@@ -733,5 +733,3 @@ async def test_heartbeat_loop_invokes_emit() -> None:
     runtime._stop.set()
     await asyncio.wait_for(task, timeout=2.0)
     assert calls
-
-

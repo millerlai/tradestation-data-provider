@@ -82,9 +82,7 @@ def test_load_sinks_config_rejects_top_level_list(tmp_path: Path) -> None:
         ("sinks: 'notalist'\n", "'sinks' must be a list"),
     ],
 )
-def test_load_sinks_config_validation_errors(
-    tmp_path: Path, yaml_body: str, match: str
-) -> None:
+def test_load_sinks_config_validation_errors(tmp_path: Path, yaml_body: str, match: str) -> None:
     p = tmp_path / "x.yaml"
     p.write_text(yaml_body, encoding="utf-8")
     with pytest.raises(SinksConfigError, match=match):

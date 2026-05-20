@@ -99,9 +99,7 @@ def instantiate_sink(cfg: SinkConfig) -> Sink:
             f"sink {cfg.name!r}: module {module_path!r} has no attribute {attr!r}"
         ) from exc
     if not callable(factory):
-        raise SinksConfigError(
-            f"sink {cfg.name!r}: target {cfg.target!r} is not callable"
-        )
+        raise SinksConfigError(f"sink {cfg.name!r}: target {cfg.target!r} is not callable")
     try:
         instance = factory(name=cfg.name, **cfg.params)
     except TypeError as exc:

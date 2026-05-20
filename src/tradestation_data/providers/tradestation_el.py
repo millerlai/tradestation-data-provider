@@ -4,6 +4,7 @@ import json
 import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import zmq
@@ -131,8 +132,14 @@ class TradeStationELProvider:
             except zmq.error.ContextTerminated:
                 return
             except zmq.error.ZMQError as exc:
+                # mypy can't see that close() may flip _closed from
+                # another task during the await above, so it flags
+                # the `return` as unreachable (the while loop's
+                # condition already gates on `not self._closed`).
+                # The check is correct under concurrency — silence
+                # the false positive on the unreachable branch.
                 if self._closed:
-                    return
+                    return  # type: ignore[unreachable]
                 log.warning("zmq recv error: %s", exc)
                 continue
 
@@ -168,7 +175,7 @@ class TradeStationELProvider:
             return self._parse_tick(symbol, data)
         raise ValueError(f"Unknown event kind: {kind!r}")
 
-    def _parse_tick(self, symbol: str, data: dict) -> Tick:
+    def _parse_tick(self, symbol: str, data: dict[str, Any]) -> Tick:
         ts_epoch = float(data["ts"])
         timestamp = datetime.fromtimestamp(ts_epoch, tz=UTC)
 
@@ -198,7 +205,7 @@ class TradeStationELProvider:
             source=self.source_id,
         )
 
-    def _parse_bar(self, symbol: str, data: dict) -> Bar:
+    def _parse_bar(self, symbol: str, data: dict[str, Any]) -> Bar:
         # Priority for bucket_start (UTC):
         #   1. ts_str (authoritative) — EL wall-clock string, parsed here
         #      as America/New_York. Zone-correct on any DLL host because

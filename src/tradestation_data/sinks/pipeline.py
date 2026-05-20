@@ -53,8 +53,10 @@ class SinkPipeline:
             except Exception:
                 log.exception(
                     "sink_on_tick_failed",
-                    extra={"sink": getattr(sink, "name", type(sink).__name__),
-                           "symbol": tick.symbol},
+                    extra={
+                        "sink": getattr(sink, "name", type(sink).__name__),
+                        "symbol": tick.symbol,
+                    },
                 )
 
     def on_bar(self, bar: Bar) -> None:
@@ -64,8 +66,10 @@ class SinkPipeline:
             except Exception:
                 log.exception(
                     "sink_on_bar_failed",
-                    extra={"sink": getattr(sink, "name", type(sink).__name__),
-                           "symbol": bar.symbol},
+                    extra={
+                        "sink": getattr(sink, "name", type(sink).__name__),
+                        "symbol": bar.symbol,
+                    },
                 )
 
     # ---- buffered-sink lifecycle ----------------------------------------

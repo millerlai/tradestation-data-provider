@@ -57,6 +57,7 @@ dev = [
     "pytest-cov>=5.0",
     "ruff>=0.6",
     "mypy>=1.10",
+    "types-PyYAML>=6",
 ]
 
 [project.scripts]
@@ -148,3 +149,16 @@ python_version = "3.11"
 strict = true
 warn_unreachable = true
 files = ["src"]
+
+[[tool.mypy.overrides]]
+# pyarrow ships no type stubs and exposes every Parquet API as an
+# untyped function. `no-untyped-call` is reported at the *caller*,
+# so the override scopes the relaxation to the three storage modules
+# that wrap pyarrow — the rest of the codebase stays under full
+# strict rules.
+module = [
+    "tradestation_data.storage.bar_writer",
+    "tradestation_data.storage.tick_writer",
+    "tradestation_data.storage.history_store",
+]
+disable_error_code = ["no-untyped-call"]

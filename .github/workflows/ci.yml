@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same branch when a new push happens.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false  # cpp/build-tools/vcpkg isn't needed for Python CI
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Set up Python ${{ matrix.python }}
+        run: uv python install ${{ matrix.python }}
+
+      - name: Sync dev deps
+        run: uv sync --extra dev --python ${{ matrix.python }}
+
+      - name: Lint (ruff check)
+        run: uv run ruff check .
+
+      - name: Format check (ruff format)
+        run: uv run ruff format --check .
+
+      - name: Type check (mypy)
+        # mypy is configured strict on src/ in pyproject.toml; a regression
+        # here fails CI rather than being noticed at release time.
+        run: uv run mypy
+
+      - name: Tests (pytest)
+        run: uv run pytest -q
+
+  build:
+    name: Build wheel + sdist
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      - name: Build
+        run: uv build
+
+      - name: Smoke-test the wheel in an isolated venv
+        # Confirms the wheel is installable as a dependency and exposes
+        # what we claim it does — same check the release workflow runs
+        # before publishing.
+        run: |
+          uv run --isolated --no-project --with dist/*.whl \
+            python -c "import tradestation_data; from tradestation_data.sinks import SinkPipeline; print('import OK')"
+          uv run --isolated --no-project --with dist/*.whl \
+            tradestation-data-ingest --help > /dev/null
+          echo "entrypoint OK"
+
+      - name: Upload dist as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ github.sha }}
+          path: dist/
+          retention-days: 7
