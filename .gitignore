@@ -13,3 +13,33 @@ htmlcov/
 data/
 dist/
 build/
+
+# ---- C++ build output (cpp/) -------------------------------------------
+# Anything under per-config build dirs at any depth: cpp/Debug/, cpp/Release/,
+# cpp/x64/, cpp/TS2Python/Debug/, cpp/TS2Pytho.<hash>/x64/Release/, ... etc.
+cpp/Debug/
+cpp/Release/
+cpp/x64/
+cpp/**/Debug/
+cpp/**/Release/
+cpp/**/x64/
+
+# MSBuild intermediate-name folder VS auto-creates (cpp/TS2Pytho.<hash>/).
+# Re-generated on every solution open, never useful in history.
+cpp/TS2Pytho.*/
+
+# Visual Studio IDE state.
+cpp/.vs/
+
+# Per-user / build-time files
+*.user
+*.suo
+*.tlog
+*.lib
+*.dll
+*.exp
+*.pdb
+*.obj
+*.ilk
+*.recipe
+*.FileListAbsolute.txt
