@@ -1,0 +1,41 @@
+version: 2
+updates:
+  # Python runtime + dev dependencies declared in pyproject.toml.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    labels: ["dependencies", "python"]
+    commit-message:
+      prefix: "deps"
+      include: "scope"
+    groups:
+      # Group lockstep updates so one PR covers ruff + mypy + types
+      # bumps that almost always land together.
+      dev-tools:
+        patterns:
+          - "ruff"
+          - "mypy"
+          - "pytest*"
+          - "types-*"
+      # Group the data-stack lower bumps; major bumps still arrive as
+      # individual PRs because they're more likely to need code review.
+      data-stack:
+        patterns:
+          - "polars"
+          - "pyarrow"
+          - "duckdb"
+        update-types: ["minor", "patch"]
+
+  # GitHub Actions versions used by ci.yml + release.yml.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    labels: ["dependencies", "github-actions"]
+    commit-message:
+      prefix: "ci"
+      include: "scope"
