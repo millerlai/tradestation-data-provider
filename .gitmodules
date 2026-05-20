@@ -1,0 +1,3 @@
+[submodule "cpp/build-tools/vcpkg"]
+	path = cpp/build-tools/vcpkg
+	url = https://github.com/microsoft/vcpkg
