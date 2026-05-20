@@ -5,10 +5,37 @@ build-backend = "hatchling.build"
 [project]
 name = "tradestation-data-provider"
 version = "0.1.0"
-description = "TradeStation EasyLanguage → Parquet data ingestion / verification / imputation pipeline"
+description = "TradeStation EasyLanguage → Python data ingestion pipeline with pluggable output sinks (Parquet, CSV, in-process callbacks, ...)"
 requires-python = ">=3.11"
 readme = "README.md"
-authors = [{ name = "Miller Lai" }]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Miller Lai", email = "miller.lai@gmail.com" }]
+keywords = [
+    "tradestation",
+    "market-data",
+    "easylanguage",
+    "zeromq",
+    "parquet",
+    "ohlcv",
+    "ingestion",
+    "tick-data",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 
 dependencies = [
     "pyzmq>=26.0",
@@ -35,8 +62,27 @@ dev = [
 [project.scripts]
 tradestation-data-ingest = "tradestation_data.runtime.main:main"
 
+[project.urls]
+Homepage = "https://github.com/millerlai/tradestation-data-provider"
+Repository = "https://github.com/millerlai/tradestation-data-provider"
+Issues = "https://github.com/millerlai/tradestation-data-provider/issues"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/tradestation_data"]
+
+[tool.hatch.build.targets.sdist]
+# Only ship what a user / packager would actually need to rebuild the
+# wheel and run the tests. Skip the C++ side (built upstream as a DLL)
+# and developer-only artifacts.
+include = [
+    "/src",
+    "/tests",
+    "/config/sinks.yaml",
+    "/config/symbols.yaml",
+    "/README.md",
+    "/LICENSE",
+    "/pyproject.toml",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

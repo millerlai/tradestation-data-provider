@@ -1,0 +1,76 @@
+name: Release
+
+# Triggered by pushing a tag like v0.1.0. Builds sdist + wheel, then
+# uploads to PyPI via Trusted Publishing (OIDC) — no API token needed
+# in repo secrets. On first publish you must register this workflow
+# as a Trusted Publisher in PyPI project settings:
+#   https://docs.pypi.org/trusted-publishers/adding-a-publisher/
+# Workflow name to register: "release.yml"; environment: "pypi".
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Verify tag matches pyproject version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          pkg=$(grep '^version' pyproject.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ "$tag" != "$pkg" ]; then
+            echo "Tag v$tag does not match pyproject.toml version $pkg"
+            exit 1
+          fi
+
+      - name: Build
+        run: uv build
+
+      - name: Smoke-test installed wheel
+        run: |
+          uv run --isolated --no-project --with dist/*.whl \
+            python -c "import tradestation_data; from tradestation_data.sinks import SinkPipeline; print('import OK')"
+          uv run --isolated --no-project --with dist/*.whl \
+            tradestation-data-ingest --help > /dev/null
+          echo "entrypoint OK"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    # Required for PyPI Trusted Publishing (OIDC).
+    permissions:
+      id-token: write
+    environment:
+      name: pypi
+      url: https://pypi.org/p/tradestation-data-provider
+    steps:
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
