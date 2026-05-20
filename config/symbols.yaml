@@ -1,0 +1,49 @@
+# Symbol universe configuration.
+# See docs/design.md §6.
+#
+# category:
+#   etf          — tradeable ETFs (volume, bid/ask available)
+#   breadth      — market breadth/sentiment index ($TICK, $ADD, etc.)
+#                  No volume / bid / ask. volume=0, bid=null, ask=null in ticks.
+#   volatility   — VXX and related
+#   mega_cap     — large-cap equities (volume, bid/ask available)
+#
+# role (advisory, not enforced):
+#   trade        — the agent may place orders here (currently SPY only)
+#   context      — observed for signals, not traded directly
+#
+# Session retention (defaults per category — see SessionPolicy.for_category):
+#   session_reset              — breadth=true (clears deque at 09:30 ET),
+#                                others=false (pre-market bars preserved)
+#   pre_market_window_minutes  — breadth=null, others=60 (minutes of pre-
+#                                market history retained ahead of 09:30 ET)
+#   Override either key per-symbol if a specific contract needs different
+#   treatment.
+
+symbols:
+  - { id: SPY,    category: etf,        role: trade   }
+  - { id: QQQ,    category: etf,        role: context }
+
+  - { id: $TICK,  category: breadth,    role: context }
+  - { id: $ADD,   category: breadth,    role: context }
+  - { id: $VOLD,  category: breadth,    role: context }
+  - { id: $TRIN,  category: breadth,    role: context }
+  - { id: $PCVA, category: breadth,    role: context }
+
+  - { id: VXX,   category: volatility, role: context }
+
+  - { id: NVDA,   category: mega_cap,   role: context }
+  - { id: AAPL,   category: mega_cap,   role: context }
+  - { id: MSFT,   category: mega_cap,   role: context }
+  - { id: AVGO,   category: mega_cap,   role: context }
+  - { id: TSLA,   category: mega_cap,   role: context }
+  - { id: AMZN,   category: mega_cap,   role: context }
+  - { id: META,   category: mega_cap,   role: context }
+  - { id: GOOGL,  category: mega_cap,   role: context }
+  - { id: AMD,    category: mega_cap,   role: context }
+  - { id: BRK.B,  category: mega_cap,   role: context }
+  - { id: LLY,    category: mega_cap,   role: context }
+  - { id: JPM,    category: mega_cap,   role: context }
+  - { id: XOM,    category: mega_cap,   role: context }
+  - { id: JNJ,    category: mega_cap,   role: context }
+  - { id: WMT,    category: mega_cap,   role: context }

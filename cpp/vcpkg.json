@@ -1,0 +1,9 @@
+﻿{
+  "name": "ts2python",
+  "version": "0.1.0",
+  "description": "TradeStation EL -> ZeroMQ PUB bridge DLL",
+  "dependencies": [
+    "cppzmq",
+    "zeromq"
+  ]
+}

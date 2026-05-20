@@ -1,0 +1,165 @@
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass, field
+from datetime import date
+from pathlib import Path
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+from tradestation_data.domain.tick import Tick
+
+log = logging.getLogger(__name__)
+
+TICK_SCHEMA: pa.Schema = pa.schema(
+    [
+        # timestamp (UTC) and timestamp_et (America/New_York) describe the
+        # same instant in different zones; both are persisted so tooling
+        # can filter on either without a runtime conversion. ET is the
+        # authoritative basis for session-time decisions downstream.
+        pa.field("timestamp", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field(
+            "timestamp_et",
+            pa.timestamp("us", tz="America/New_York"),
+            nullable=False,
+        ),
+        pa.field("price", pa.float64(), nullable=False),
+        pa.field("volume", pa.int64(), nullable=False),
+        pa.field("bid", pa.float64(), nullable=True),
+        pa.field("ask", pa.float64(), nullable=True),
+        pa.field("tick_count", pa.int32(), nullable=False),
+        pa.field("source", pa.string(), nullable=False),
+    ]
+)
+
+
+@dataclass(slots=True)
+class _DayPartition:
+    symbol: str
+    day: date
+    buffer: list[Tick] = field(default_factory=list)
+    writer: pq.ParquetWriter | None = None
+
+    def path(self, root: Path) -> Path:
+        return root / f"symbol={self.symbol}" / f"date={self.day.isoformat()}" / "ticks.parquet"
+
+
+class TickWriter:
+    """
+    Tier 1 raw tick writer. Hive-partitioned Parquet.
+
+    Layout:  `{root}/symbol={SYM}/date={YYYY-MM-DD}/ticks.parquet`
+
+    See docs/design.md §3.6.3, §3.6.5. Buffered with two flush triggers
+    (either one fires a flush):
+
+      - `max_buffered_ticks`  : total buffered ticks across all partitions
+      - `max_flush_seconds`   : time since the oldest buffered tick arrived
+
+    Design caveat (§3.6.7): one `ParquetWriter` is held open per
+    (symbol, day) so multiple flushes land in a single file. The file's
+    footer is only written on `close()` — crashing loses the entire
+    in-progress file for that partition. This is accepted: the live
+    system treats tick loss on crash as tolerable.
+    """
+
+    def __init__(
+        self,
+        root: Path | str,
+        *,
+        max_buffered_ticks: int = 10_000,
+        max_flush_seconds: float = 30.0,
+        compression: str = "zstd",
+    ) -> None:
+        self._root = Path(root)
+        self._root.mkdir(parents=True, exist_ok=True)
+        self._max_ticks = max_buffered_ticks
+        self._max_seconds = max_flush_seconds
+        self._compression = compression
+        self._partitions: dict[tuple[str, date], _DayPartition] = {}
+        self._buffered_ticks = 0
+        self._oldest_buffer_monotonic: float | None = None
+        self._closed = False
+
+    def write(self, tick: Tick) -> None:
+        if self._closed:
+            raise RuntimeError("TickWriter is closed")
+        # Partition on the ET calendar date so all ticks from one US
+        # trading session land in a single date= directory, regardless of
+        # the UTC rollover mid-session.
+        partition_day = tick.timestamp_et.date()
+        key = (tick.symbol, partition_day)
+        part = self._partitions.get(key)
+        if part is None:
+            part = _DayPartition(symbol=tick.symbol, day=partition_day)
+            self._partitions[key] = part
+        part.buffer.append(tick)
+        self._buffered_ticks += 1
+        if self._oldest_buffer_monotonic is None:
+            self._oldest_buffer_monotonic = time.monotonic()
+
+    def should_flush(self) -> bool:
+        if self._buffered_ticks == 0:
+            return False
+        if self._buffered_ticks >= self._max_ticks:
+            return True
+        if self._oldest_buffer_monotonic is None:
+            return False
+        return (time.monotonic() - self._oldest_buffer_monotonic) >= self._max_seconds
+
+    def flush(self) -> int:
+        total = 0
+        for part in self._partitions.values():
+            if not part.buffer:
+                continue
+            total += self._flush_partition(part)
+        self._buffered_ticks = 0
+        self._oldest_buffer_monotonic = None
+        return total
+
+    def _flush_partition(self, part: _DayPartition) -> int:
+        path = part.path(self._root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        table = _ticks_to_table(part.buffer)
+        if part.writer is None:
+            part.writer = pq.ParquetWriter(path, TICK_SCHEMA, compression=self._compression)
+        part.writer.write_table(table)
+        n = len(part.buffer)
+        part.buffer.clear()
+        return n
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self.flush()
+        finally:
+            for part in self._partitions.values():
+                if part.writer is not None:
+                    part.writer.close()
+                    part.writer = None
+
+    def __enter__(self) -> TickWriter:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+
+def _ticks_to_table(ticks: list[Tick]) -> pa.Table:
+    return pa.Table.from_pydict(
+        {
+            "timestamp": [t.timestamp for t in ticks],
+            "timestamp_et": [t.timestamp_et for t in ticks],
+            "price": [t.price for t in ticks],
+            "volume": [t.volume for t in ticks],
+            "bid": [t.bid for t in ticks],
+            "ask": [t.ask for t in ticks],
+            "tick_count": [t.tick_count for t in ticks],
+            "source": [t.source for t in ticks],
+        },
+        schema=TICK_SCHEMA,
+    )

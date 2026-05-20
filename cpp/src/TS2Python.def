@@ -1,0 +1,17 @@
+; TS2Python.def — force undecorated export names for EL's DefineDLLFunc.
+;
+; Why: on x86 with __stdcall + __declspec(dllexport), MSVC decorates exports
+; as _Name@N (e.g. _EL_Init@4). EasyLanguage's DefineDLLFunc / GetProcAddress
+; looks up the raw "EL_Init" name and fails. Listing exports here makes the
+; linker emit them under the plain symbol name while keeping the __stdcall
+; call convention intact.
+;
+; Keep this in sync with include/ts2python.h.
+
+LIBRARY TS2Python
+EXPORTS
+    EL_Init
+    EL_PublishTick
+    EL_PublishTickEx
+    EL_Shutdown
+    EL_DllVersion

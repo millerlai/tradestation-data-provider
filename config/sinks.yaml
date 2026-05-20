@@ -1,0 +1,30 @@
+# Sink pipeline definition for the live ingestion runtime.
+#
+# Each entry instantiates one Sink and registers it with the
+# IngestionRuntime. Sinks receive every Tick and every closed Bar
+# in declaration order. See `src/tradestation_data/sinks/` and the
+# README "Pluggable sinks" section for the full protocol and for
+# how to write a custom sink.
+#
+# To run without persistence (smoke-test / live observability only),
+# pass `--sinks-empty` on the CLI, or point `--sinks-config` to a
+# YAML file with `sinks: []`.
+
+sinks:
+  - name: bars_parquet
+    class: tradestation_data.sinks.parquet:ParquetBarSink
+    params:
+      # Default root resolves relative to the process CWD. Override
+      # at the CLI with --data-root if you want to keep this YAML
+      # generic across machines.
+      root: data/bars
+      timeframe: 1m
+      compression: zstd
+
+  - name: ticks_parquet
+    class: tradestation_data.sinks.parquet:ParquetTickSink
+    params:
+      root: data/ticks
+      max_buffered_ticks: 10000
+      max_flush_seconds: 30.0
+      compression: zstd

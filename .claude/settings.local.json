@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run *)",
+      "Bash(uv --version)",
+      "Bash(uv sync *)",
+      "Bash(git mv *)",
+      "Bash(grep -E '\\\\.\\(py|md|toml|yaml|yml|cfg|ini\\)$')",
+      "Bash(xargs grep -l 'trading_agent\\\\|trading-agent')",
+      "Bash(python *)",
+      "Bash(awk '{print $1}')",
+      "Bash(git add *)"
+    ]
+  }
+}

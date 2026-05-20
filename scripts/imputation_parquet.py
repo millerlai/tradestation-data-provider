@@ -1,0 +1,464 @@
+#!/usr/bin/env python3
+"""Fill missing bars in Hive-partitioned bar Parquet files.
+
+Shares the same date / session / timeframe arguments as verify_parquet.py.
+For each trading day in range, detects which session bars are missing and
+writes synthetic replacements using the chosen method:
+
+  ffill       — use previous bar's close for o/h/l/c (flat, zero volume).
+  bfill       — use next bar's open for o/h/l/c (flat, zero volume).
+  interpolate — linear interp between prev.close and next.open.
+
+Imputed rows are marked in the ``source`` column (default tag
+``imputed_<method>``) so downstream code can filter them out.
+
+``--symbol`` is optional: when omitted, every symbol discovered under
+``<root>/timeframe=<tf>/symbol=*/`` is processed. Imputation is
+**destructive** (in-place overwrite via atomic .tmp swap) — STRONGLY
+recommended to ``--dry-run`` first when running across all symbols.
+
+Usage:
+  # Single symbol
+  python scripts/imputation_parquet.py --symbol SPY \\
+      --start-date 2026-03-20 --end-date 2026-04-17 --method ffill
+
+  # All symbols, dry-run first
+  python scripts/imputation_parquet.py \\
+      --start-date 2026-03-20 --end-date 2026-04-17 --dry-run
+
+  # All symbols, real run after dry-run looks fine
+  python scripts/imputation_parquet.py \\
+      --start-date 2026-03-20 --end-date 2026-04-17
+
+  python scripts/imputation_parquet.py --symbol VXX \\
+      --start-date 2026-04-16 --end-date 2026-04-16 --method interpolate \\
+      --start-time 09:30 --end-time 13:00
+"""
+
+from __future__ import annotations
+
+import argparse
+import bisect
+import sys
+from datetime import UTC, date, datetime, time, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from verify_parquet import (
+    _cluster,
+    _discover_symbols,
+    _expected_bars,
+    _fmt_range,
+    _parse_date,
+    _parse_hhmm,
+    _parse_timeframe,
+    _resolve_tz,
+)
+
+METHODS = ("ffill", "bfill", "interpolate")
+
+_ET_TZ = ZoneInfo("America/New_York")
+
+
+def _build_imputed_row(
+    bucket_start: datetime,
+    value: float,
+    source_tag: str,
+    *,
+    vwap: float | None = None,
+) -> dict:
+    # bucket_start_et mirrors BAR_SCHEMA in bar_writer.py — it's non-nullable
+    # in newer parquet files, so we must populate it on imputed rows or
+    # pa.Table.from_pylist will fail when re-writing.
+    return {
+        "bucket_start": bucket_start,
+        "bucket_start_et": bucket_start.astimezone(_ET_TZ),
+        "open": value,
+        "high": value,
+        "low": value,
+        "close": value,
+        "volume": 0,
+        "vwap": vwap,
+        "tick_count": 0,
+        "source": source_tag,
+    }
+
+
+def _impute_value(
+    missing_ts: datetime,
+    prev: dict | None,
+    nxt: dict | None,
+    method: str,
+) -> tuple[float, str] | None:
+    """Return (value, fallback_note) or None if no reference exists."""
+    if method == "ffill":
+        if prev is not None:
+            return prev["close"], ""
+        if nxt is not None:
+            return nxt["open"], "no_prev→bfill"
+        return None
+    if method == "bfill":
+        if nxt is not None:
+            return nxt["open"], ""
+        if prev is not None:
+            return prev["close"], "no_next→ffill"
+        return None
+    if method == "interpolate":
+        if prev is not None and nxt is not None:
+            total = (nxt["bucket_start"] - prev["bucket_start"]).total_seconds()
+            elapsed = (missing_ts - prev["bucket_start"]).total_seconds()
+            frac = elapsed / total if total > 0 else 0.0
+            return prev["close"] + frac * (nxt["open"] - prev["close"]), ""
+        if prev is not None:
+            return prev["close"], "no_next→ffill"
+        if nxt is not None:
+            return nxt["open"], "no_prev→bfill"
+        return None
+    raise ValueError(f"unknown method: {method!r}")
+
+
+def impute_day(
+    path: Path,
+    expected_utc: list[datetime],
+    method: str,
+    source_tag: str,
+    tf_sec: int,
+    display_tz: ZoneInfo,
+) -> tuple[int, int, list[tuple[datetime, str]], pa.Table | None]:
+    """Return (rows_before, rows_added, per_row_log, new_table_or_None).
+
+    new_table is None when nothing needed imputation.
+    """
+    table = pq.read_table(path)
+    rows = table.to_pylist()
+    for r in rows:
+        ts = r["bucket_start"]
+        if ts.tzinfo is None:
+            r["bucket_start"] = ts.replace(tzinfo=UTC)
+        else:
+            r["bucket_start"] = ts.astimezone(UTC)
+
+    by_ts = {r["bucket_start"]: r for r in rows}
+    missing = [t for t in expected_utc if t not in by_ts]
+    if not missing:
+        return len(rows), 0, [], None
+
+    sorted_rows = sorted(rows, key=lambda r: r["bucket_start"])
+    existing_ts = [r["bucket_start"] for r in sorted_rows]
+
+    new_rows: list[dict] = []
+    log: list[tuple[datetime, str]] = []
+    for t in missing:
+        idx = bisect.bisect_left(existing_ts, t)
+        prev = sorted_rows[idx - 1] if idx > 0 else None
+        nxt = sorted_rows[idx] if idx < len(sorted_rows) else None
+        result = _impute_value(t, prev, nxt, method)
+        if result is None:
+            log.append((t, "SKIP_no_reference"))
+            continue
+        value, fallback = result
+        new_rows.append(_build_imputed_row(t, value, source_tag, vwap=None))
+        log.append((t, fallback or method))
+
+    if not new_rows:
+        return len(rows), 0, log, None
+
+    all_rows = rows + new_rows
+    all_rows.sort(key=lambda r: r["bucket_start"])
+    new_table = pa.Table.from_pylist(all_rows, schema=table.schema)
+    return len(rows), len(new_rows), log, new_table
+
+
+def _write_atomic(path: Path, table: pa.Table) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    pq.write_table(table, tmp, compression="zstd")
+    tmp.replace(path)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument(
+        "--symbol",
+        default=None,
+        help=(
+            "Symbol (e.g., SPY, $TICK). Quote $-prefixed on shells. "
+            "Omit to impute every symbol found under <root>/timeframe=<tf>/."
+        ),
+    )
+    ap.add_argument("--start-date", required=True, type=_parse_date)
+    ap.add_argument("--end-date", required=True, type=_parse_date)
+    ap.add_argument("--timeframe", "--tf", default="1m")
+    ap.add_argument("--start-time", default="09:30")
+    ap.add_argument("--end-time", default="16:00")
+    ap.add_argument("--tz", default="ET")
+    ap.add_argument(
+        "--method",
+        choices=METHODS,
+        default="ffill",
+        help="Imputation method (default: ffill).",
+    )
+    ap.add_argument(
+        "--root",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent / "data" / "bars",
+    )
+    ap.add_argument(
+        "--holidays",
+        default="",
+        help="Comma-separated YYYY-MM-DD to skip.",
+    )
+    ap.add_argument("--include-weekends", action="store_true")
+    ap.add_argument(
+        "--source-tag",
+        default=None,
+        help="Value for 'source' column on imputed rows (default: imputed_<method>).",
+    )
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report what would change but do not write files.",
+    )
+    ap.add_argument("--max-gap-runs", type=int, default=3)
+    args = ap.parse_args()
+
+    try:
+        tf_label, tf_sec = _parse_timeframe(args.timeframe)
+        start_time = _parse_hhmm(args.start_time)
+        end_time = _parse_hhmm(args.end_time)
+        tz = _resolve_tz(args.tz)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+    if args.end_date < args.start_date:
+        print("error: --end-date before --start-date", file=sys.stderr)
+        return 2
+    if end_time <= start_time:
+        print("error: --end-time must be after --start-time", file=sys.stderr)
+        return 2
+    if not args.root.exists():
+        print(f"error: root not found: {args.root}", file=sys.stderr)
+        return 2
+
+    holidays: set[date] = set()
+    for h in filter(None, (s.strip() for s in args.holidays.split(","))):
+        try:
+            holidays.add(_parse_date(h))
+        except ValueError:
+            print(f"error: bad holiday date: {h!r}", file=sys.stderr)
+            return 2
+
+    source_tag = args.source_tag or f"imputed_{args.method}"
+    per_day_expected = len(_expected_bars(args.start_date, start_time, end_time, tf_sec, tz))
+
+    if args.symbol is not None:
+        symbols = [args.symbol]
+    else:
+        symbols = _discover_symbols(args.root, tf_label)
+        if not symbols:
+            print(
+                f"error: no symbols found under {args.root}/timeframe={tf_label}/",
+                file=sys.stderr,
+            )
+            return 2
+
+    print(
+        f"range={args.start_date}..{args.end_date}  tf={tf_label}  "
+        f"session={args.start_time}-{args.end_time} {args.tz}  "
+        f"method={args.method}  expected/day={per_day_expected}"
+    )
+    print(
+        f"root={args.root}  source_tag={source_tag}  dry_run={args.dry_run}  symbols={len(symbols)}"
+    )
+    print()
+
+    multi = len(symbols) > 1
+    cross_rows: list[tuple[str, dict[str, int]]] = []
+    overall_imputed = overall_skipped = overall_touched = 0
+
+    for sym in symbols:
+        if multi:
+            print(f"===== symbol={sym} =====")
+        stats = _impute_one_symbol(
+            symbol=sym,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            tf_label=tf_label,
+            tf_sec=tf_sec,
+            start_time=start_time,
+            end_time=end_time,
+            tz=tz,
+            tz_label=args.tz,
+            method=args.method,
+            source_tag=source_tag,
+            root=args.root,
+            holidays=holidays,
+            include_weekends=args.include_weekends,
+            dry_run=args.dry_run,
+            max_gap_runs=args.max_gap_runs,
+        )
+        cross_rows.append((sym, stats))
+        overall_touched += stats["files_touched"]
+        overall_imputed += stats["rows_imputed"]
+        overall_skipped += stats["rows_skipped"]
+
+    if multi:
+        _print_cross_summary(
+            cross_rows,
+            dry_run=args.dry_run,
+            overall_touched=overall_touched,
+            overall_imputed=overall_imputed,
+            overall_skipped=overall_skipped,
+        )
+
+    return 0
+
+
+def _impute_one_symbol(
+    *,
+    symbol: str,
+    start_date: date,
+    end_date: date,
+    tf_label: str,
+    tf_sec: int,
+    start_time: time,
+    end_time: time,
+    tz: ZoneInfo,
+    tz_label: str,
+    method: str,
+    source_tag: str,
+    root: Path,
+    holidays: set[date],
+    include_weekends: bool,
+    dry_run: bool,
+    max_gap_runs: int,
+) -> dict[str, int]:
+    header = (
+        f"{'Date':<11}  {'Status':<14}  {'Rows':>5}  {'+Imp':>5}  {'Skip':>5}  Gaps ({tz_label})"
+    )
+    print(header)
+    print("-" * len(header))
+
+    touched = imputed_total = skipped_total = 0
+    file_missing = holiday_n = weekend_n = no_change = 0
+    d = start_date
+    while d <= end_date:
+        if not include_weekends and d.weekday() >= 5:
+            weekend_n += 1
+            d += timedelta(days=1)
+            continue
+        if d in holidays:
+            holiday_n += 1
+            d += timedelta(days=1)
+            continue
+
+        path = (
+            root
+            / f"timeframe={tf_label}"
+            / f"symbol={symbol}"
+            / f"date={d.isoformat()}"
+            / "bars.parquet"
+        )
+        expected = _expected_bars(d, start_time, end_time, tf_sec, tz)
+
+        if not path.exists():
+            file_missing += 1
+            print(
+                f"{d.isoformat():<11}  {'FILE_MISSING':<14}  {'-':>5}  {'-':>5}  {'-':>5}  (skipped)"
+            )
+            d += timedelta(days=1)
+            continue
+
+        try:
+            before, added, log, new_table = impute_day(
+                path, expected, method, source_tag, tf_sec, tz
+            )
+        except Exception as e:
+            print(f"{d.isoformat():<11}  {'ERROR':<14}  -     -     -     {e}")
+            d += timedelta(days=1)
+            continue
+
+        skipped = sum(1 for _, note in log if note == "SKIP_no_reference")
+        if new_table is None:
+            no_change += 1
+            print(f"{d.isoformat():<11}  {'OK':<14}  {before:>5}  {0:>5}  {0:>5}")
+            d += timedelta(days=1)
+            continue
+
+        imputed_ts = [t for t, note in log if note != "SKIP_no_reference"]
+        runs = _cluster(imputed_ts, tf_sec)
+        gaps = _fmt_range(runs, tz, max_gap_runs)
+
+        if not dry_run:
+            _write_atomic(path, new_table)
+            status = "WRITTEN"
+        else:
+            status = "WOULD_IMPUTE"
+
+        touched += 1
+        imputed_total += added
+        skipped_total += skipped
+        print(f"{d.isoformat():<11}  {status:<14}  {before:>5}  {added:>5}  {skipped:>5}  {gaps}")
+        d += timedelta(days=1)
+
+    print()
+    print("summary:")
+    print(f"  files_touched   {touched}")
+    print(f"  rows_imputed    {imputed_total}")
+    print(f"  rows_skipped    {skipped_total}  (no reference bar available)")
+    print(f"  already_ok      {no_change}")
+    print(f"  file_missing    {file_missing}")
+    print(f"  holiday         {holiday_n}")
+    print(f"  weekend         {weekend_n}")
+    if dry_run:
+        print("(dry-run — no files written)")
+    print()
+
+    return {
+        "files_touched": touched,
+        "rows_imputed": imputed_total,
+        "rows_skipped": skipped_total,
+        "already_ok": no_change,
+        "file_missing": file_missing,
+        "holiday": holiday_n,
+        "weekend": weekend_n,
+    }
+
+
+def _print_cross_summary(
+    rows: list[tuple[str, dict[str, int]]],
+    *,
+    dry_run: bool,
+    overall_touched: int,
+    overall_imputed: int,
+    overall_skipped: int,
+) -> None:
+    sym_w = max(8, max(len(s) for s, _ in rows))
+    header = (
+        f"{'Symbol':<{sym_w}}  "
+        f"{'Touched':>7}  {'+Imp':>5}  {'Skip':>5}  "
+        f"{'OK':>4}  {'Miss':>5}  {'Hol':>4}  {'Wknd':>5}"
+    )
+    print("=" * len(header))
+    print(f"CROSS-SYMBOL SUMMARY{'  (dry-run)' if dry_run else ''}")
+    print("=" * len(header))
+    print(header)
+    print("-" * len(header))
+    for sym, s in rows:
+        print(
+            f"{sym:<{sym_w}}  "
+            f"{s['files_touched']:>7}  {s['rows_imputed']:>5}  {s['rows_skipped']:>5}  "
+            f"{s['already_ok']:>4}  {s['file_missing']:>5}  {s['holiday']:>4}  {s['weekend']:>5}"
+        )
+    print()
+    print(
+        f"overall: touched={overall_touched}  imputed={overall_imputed}  skipped={overall_skipped}"
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,44 @@
+﻿{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "x86-base",
+      "hidden": true,
+      "generator": "Visual Studio 17 2022",
+      "architecture": "Win32",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET": "x86-windows",
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/build/${presetName}/stage"
+      }
+    },
+    {
+      "name": "x86-release",
+      "inherits": "x86-base",
+      "displayName": "Win32 Release",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "x86-debug",
+      "inherits": "x86-base",
+      "displayName": "Win32 Debug",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "x86-release",
+      "configurePreset": "x86-release",
+      "configuration": "Release",
+      "targets": ["TS2Python", "TS2Python_TestHarness"]
+    },
+    {
+      "name": "x86-debug",
+      "configurePreset": "x86-debug",
+      "configuration": "Debug",
+      "targets": ["TS2Python", "TS2Python_TestHarness"]
+    }
+  ]
+}
