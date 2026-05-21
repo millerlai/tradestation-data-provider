@@ -53,7 +53,6 @@ _EMPTY_SCHEMA: dict[str, type[pl.DataType]] = {
     "low": pl.Float64,
     "close": pl.Float64,
     "volume": pl.Int64,
-    "vwap": pl.Float64,
     "tick_count": pl.Int32,
     "source": pl.Utf8,
     "symbol": pl.Utf8,
@@ -71,23 +70,17 @@ class Resampler:
       low        = min(price)
       close      = last(price ORDER BY timestamp)
       volume     = sum(volume)
-      vwap       = sum(price*volume) / NULLIF(sum(volume), 0)
       tick_count = count(*)
-
-    Index symbols (volume=0 per tick) naturally get `vwap = NULL`
-    via the `NULLIF` guard.
 
     Bar-from-bar fallback (``resample_from_bars``): when raw ticks are
     missing for a symbol but 1-minute bars are cached, HistoryStore can
-    roll them up to the requested timeframe. Aggregation rules differ
-    slightly from tick-based (can't recover per-tick vwap exactly):
+    roll them up to the requested timeframe.
 
       open       = first(open  ORDER BY bucket_start)
       high       = max(high)
       low        = min(low)
       close      = last(close  ORDER BY bucket_start)
       volume     = sum(volume)
-      vwap       = sum(vwap*volume) / NULLIF(sum(volume), 0)
       tick_count = sum(tick_count)
     """
 
@@ -124,7 +117,6 @@ class Resampler:
           min(price)                      AS low,
           last(price ORDER BY timestamp)  AS close,
           sum(volume)                     AS volume,
-          sum(price * volume) / NULLIF(sum(volume), 0) AS vwap,
           CAST(count(*) AS INTEGER)       AS tick_count,
           first(source)                   AS source
         FROM read_parquet(?, hive_partitioning = true)
@@ -184,7 +176,6 @@ class Resampler:
           min(low)                           AS low,
           last(close  ORDER BY bucket_start) AS close,
           sum(volume)                        AS volume,
-          sum(vwap * volume) / NULLIF(sum(volume), 0) AS vwap,
           CAST(sum(tick_count) AS INTEGER)   AS tick_count,
           first(source)                      AS source
         FROM read_parquet(?, hive_partitioning = true)

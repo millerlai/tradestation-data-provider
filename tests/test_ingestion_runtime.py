@@ -409,7 +409,6 @@ def _bar(symbol: str, ts: datetime, close: float = 450.0) -> Bar:  # noqa: F821
         low=close - 0.2,
         close=close,
         volume=100,
-        vwap=close,
         tick_count=5,
         source="test",
     )

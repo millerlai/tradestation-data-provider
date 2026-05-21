@@ -28,7 +28,6 @@ Rules (as specified by the user):
   high         = max(high)
   low          = min(low)
   volume       = sum(volume)
-  vwap         = sum(vwap * volume) / sum(volume), or None if sum(volume) = 0
   tick_count   = sum(tick_count)
   source       = first bar's source
 
@@ -64,7 +63,6 @@ BAR_SCHEMA: pa.Schema = pa.schema(
         pa.field("low", pa.float64(), nullable=False),
         pa.field("close", pa.float64(), nullable=False),
         pa.field("volume", pa.int64(), nullable=False),
-        pa.field("vwap", pa.float64(), nullable=True),
         pa.field("tick_count", pa.int32(), nullable=False),
         pa.field("source", pa.string(), nullable=False),
     ]
@@ -115,7 +113,6 @@ def _aggregate_day(src_path: Path, n_out_min: int) -> pa.Table:
     low = table.column("low").to_pylist()
     close = table.column("close").to_pylist()
     volume = table.column("volume").to_pylist()
-    vwap = table.column("vwap").to_pylist()
     tick_count = table.column("tick_count").to_pylist()
     source = table.column("source").to_pylist()
 
@@ -125,7 +122,6 @@ def _aggregate_day(src_path: Path, n_out_min: int) -> pa.Table:
     out_low: list = []
     out_close: list = []
     out_volume: list = []
-    out_vwap: list = []
     out_tick: list = []
     out_source: list = []
 
@@ -135,15 +131,7 @@ def _aggregate_day(src_path: Path, n_out_min: int) -> pa.Table:
         out_high.append(max(high[start:end]))
         out_low.append(min(low[start:end]))
         out_close.append(close[end - 1])
-        vol_sum = sum(volume[start:end])
-        out_volume.append(vol_sum)
-        if vol_sum > 0:
-            pv = sum(
-                (vwap[k] if vwap[k] is not None else 0.0) * volume[k] for k in range(start, end)
-            )
-            out_vwap.append(pv / vol_sum)
-        else:
-            out_vwap.append(None)
+        out_volume.append(sum(volume[start:end]))
         out_tick.append(sum(tick_count[start:end]))
         out_source.append(source[start])
 
@@ -169,7 +157,6 @@ def _aggregate_day(src_path: Path, n_out_min: int) -> pa.Table:
             "low": out_low,
             "close": out_close,
             "volume": out_volume,
-            "vwap": out_vwap,
             "tick_count": out_tick,
             "source": out_source,
         },

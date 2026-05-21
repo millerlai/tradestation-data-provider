@@ -79,7 +79,6 @@ def _make_1m_day(path: Path, n_minutes: int = 5):
                 "low": 99.0 + i,
                 "close": 100.5 + i,
                 "volume": 1000 * (i + 1),
-                "vwap": 100.25 + i,
                 "tick_count": 10 + i,
                 "source": "live",
             }
@@ -104,9 +103,6 @@ def test_aggregate_day_5m_from_5_1m_bars(tmp_path):
     assert row["low"] == 99.0
     # volumes 1000,2000,3000,4000,5000 -> 15000
     assert row["volume"] == 15000
-    # sum of vwap*volume / total_volume
-    expected_vwap = sum((100.25 + i) * 1000 * (i + 1) for i in range(5)) / 15000
-    assert row["vwap"] == pytest.approx(expected_vwap)
     assert row["tick_count"] == sum(10 + i for i in range(5))
     assert row["source"] == "live"
 

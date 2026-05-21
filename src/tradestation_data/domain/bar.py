@@ -20,7 +20,6 @@ class Bar:
     `bucket_start` is UTC, aligned to the minute (second=0, microsecond=0).
     `bucket_start_et` is the same instant expressed in America/New_York and
     is the authoritative basis for session-time decisions downstream.
-    `vwap` is None when `volume == 0` (empty bar or index symbol).
     `source` is either the original provider's source_id or "empty" for
     wall-clock-emitted empty bars.
     """
@@ -32,7 +31,6 @@ class Bar:
     low: float
     close: float
     volume: int
-    vwap: float | None
     tick_count: int
     source: str
 

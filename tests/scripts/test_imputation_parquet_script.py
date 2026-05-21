@@ -17,7 +17,6 @@ BAR_SCHEMA = pa.schema(
         pa.field("low", pa.float64(), nullable=False),
         pa.field("close", pa.float64(), nullable=False),
         pa.field("volume", pa.int64(), nullable=False),
-        pa.field("vwap", pa.float64(), nullable=True),
         pa.field("tick_count", pa.int32(), nullable=False),
         pa.field("source", pa.string(), nullable=False),
     ]
@@ -32,7 +31,6 @@ def _row(ts, close, open_=None, volume=1000):
         "low": close,
         "close": close,
         "volume": volume,
-        "vwap": close,
         "tick_count": 5,
         "source": "live",
     }
@@ -45,7 +43,7 @@ def test_build_imputed_row_structure():
     assert row["volume"] == 0
     assert row["tick_count"] == 0
     assert row["source"] == "imputed_ffill"
-    assert row["vwap"] is None
+    assert "vwap" not in row
 
 
 def test_impute_value_ffill_uses_prev():

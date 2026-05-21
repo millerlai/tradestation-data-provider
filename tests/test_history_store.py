@@ -135,7 +135,6 @@ def test_load_bars_falls_back_to_1m_cache_for_index_symbol(tmp_path: Path) -> No
                     low=90.0 + i,
                     close=105.0 + i,
                     volume=0,
-                    vwap=None,
                     tick_count=1,
                     source="tradestation_el",
                 )

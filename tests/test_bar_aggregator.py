@@ -55,8 +55,6 @@ def test_cross_bucket_emits_previous_bar() -> None:
     assert bar.low == pytest.approx(449.5)
     assert bar.close == pytest.approx(449.5)
     assert bar.volume == 400
-    expected_vwap = (450.0 * 100 + 451.0 * 200 + 449.5 * 100) / 400
-    assert bar.vwap == pytest.approx(expected_vwap)
     assert bar.tick_count == 3
     assert bar.source == "tradestation_el"
 
@@ -77,7 +75,6 @@ def test_gap_fills_with_empty_bars() -> None:
     for empty in (e1, e2):
         assert empty.source == "empty"
         assert empty.volume == 0
-        assert empty.vwap is None
         assert empty.tick_count == 0
         # Empty bars carry forward the previous close
         assert empty.open == empty.high == empty.low == empty.close == pytest.approx(450.0)
@@ -116,7 +113,7 @@ def test_out_of_order_tick_is_dropped() -> None:
     assert bar.low == pytest.approx(450.0)
 
 
-def test_vwap_is_none_when_volume_zero() -> None:
+def test_zero_volume_index_symbol_bar() -> None:
     agg = BarAggregator()
     # Index-style tick: vol=0
     agg.ingest(_tick("VXX", T0 + timedelta(seconds=10), 18.5, volume=0, tick_count=0))
@@ -125,7 +122,6 @@ def test_vwap_is_none_when_volume_zero() -> None:
     assert len(emitted) == 1
     bar = emitted[0]
     assert bar.volume == 0
-    assert bar.vwap is None
     assert bar.open == pytest.approx(18.5)
     assert bar.close == pytest.approx(18.6)
 

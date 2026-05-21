@@ -427,7 +427,7 @@ async def test_bar_1m_falls_back_to_ts_when_ts_el_missing(zmq_inproc_bus) -> Non
     event = await asyncio.wait_for(anext(gen), timeout=1.0)
     assert isinstance(event, Bar)
     assert event.bucket_start == datetime(2026, 4, 18, 13, 31, 0, tzinfo=UTC)
-    assert event.vwap is None  # volume == 0 → no vwap
+    assert event.volume == 0
 
     await gen.aclose()
     await provider.close()

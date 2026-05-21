@@ -28,7 +28,6 @@ def _bar(symbol: str = "SPY") -> Bar:
         low=0.5,
         close=1.5,
         volume=10,
-        vwap=1.4,
         tick_count=3,
         source="t",
     )

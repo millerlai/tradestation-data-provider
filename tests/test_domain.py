@@ -38,7 +38,7 @@ def test_tick_allows_none_quote_for_index_symbols() -> None:
     assert vix.volume == 0
 
 
-def test_bar_vwap_may_be_none() -> None:
+def test_bar_zero_volume_index_symbol() -> None:
     ts = datetime(2026, 4, 18, 13, 30, tzinfo=UTC)
     bar = Bar(
         symbol="VXX",
@@ -48,11 +48,11 @@ def test_bar_vwap_may_be_none() -> None:
         low=18.4,
         close=18.6,
         volume=0,
-        vwap=None,
         tick_count=3,
         source="tradestation_el",
     )
-    assert bar.vwap is None
+    assert bar.volume == 0
+    assert bar.tick_count == 3
 
 
 def test_order_intent_basic() -> None:
@@ -134,7 +134,6 @@ def test_bar_bucket_start_et_returns_et_view() -> None:
         low=449.5,
         close=450.2,
         volume=1000,
-        vwap=450.1,
         tick_count=10,
         source="x",
     )
@@ -150,8 +149,8 @@ def test_bar_bucket_start_et_dst_fallback_preserves_distinct_instants() -> None:
     # 01:30 EDT = 05:30 UTC, 01:30 EST = 06:30 UTC — two distinct instants.
     edt = datetime(2026, 11, 1, 5, 30, tzinfo=UTC)
     est = datetime(2026, 11, 1, 6, 30, tzinfo=UTC)
-    bar_edt = Bar("SPY", edt, 1, 1, 1, 1, 0, None, 0, "x")
-    bar_est = Bar("SPY", est, 1, 1, 1, 1, 0, None, 0, "x")
+    bar_edt = Bar("SPY", edt, 1, 1, 1, 1, 0, 0, "x")
+    bar_est = Bar("SPY", est, 1, 1, 1, 1, 0, 0, "x")
     assert bar_edt.bucket_start_et.hour == 1
     assert bar_est.bucket_start_et.hour == 1
     # UTC instants differ even though ET wall-clock reads the same.
