@@ -178,7 +178,6 @@ def _polars_bars_to_arrow(df: pl.DataFrame) -> pa.Table:
             "low",
             "close",
             "volume",
-            "vwap",
             "tick_count",
             "source",
         ]

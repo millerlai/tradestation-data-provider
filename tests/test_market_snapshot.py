@@ -33,7 +33,6 @@ def _bar(symbol: str, bucket: datetime, close: float) -> Bar:
         low=close,
         close=close,
         volume=100,
-        vwap=close,
         tick_count=1,
         source="tradestation_el",
     )

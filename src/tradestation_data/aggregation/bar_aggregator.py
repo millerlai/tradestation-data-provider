@@ -33,7 +33,6 @@ class _BarBuilder:
     low: float
     close: float
     volume: int
-    pv_sum: float
     tick_count: int
     source: str
 
@@ -44,11 +43,9 @@ class _BarBuilder:
             self.low = tick.price
         self.close = tick.price
         self.volume += tick.volume
-        self.pv_sum += tick.price * tick.volume
         self.tick_count += tick.tick_count
 
     def build(self) -> Bar:
-        vwap = self.pv_sum / self.volume if self.volume > 0 else None
         return Bar(
             symbol=self.symbol,
             bucket_start=self.bucket_start,
@@ -57,7 +54,6 @@ class _BarBuilder:
             low=self.low,
             close=self.close,
             volume=self.volume,
-            vwap=vwap,
             tick_count=self.tick_count,
             source=self.source,
         )
@@ -76,10 +72,9 @@ class BarAggregator:
           (b) advance_time(now) is called with now >= bucket_end.
       - When ingest crosses multiple minute boundaries with no ticks in
         between, the gap is filled forward with EMPTY bars
-        (volume=0, vwap=None, OHLC = prev close, source="empty").
+        (volume=0, OHLC = prev close, source="empty").
       - Out-of-order ticks (ts strictly earlier than the latest seen
         tick for that symbol) are dropped and logged.
-      - VWAP is None when volume == 0.
     """
 
     def __init__(self) -> None:
@@ -145,7 +140,6 @@ class BarAggregator:
             low=tick.price,
             close=tick.price,
             volume=tick.volume,
-            pv_sum=tick.price * tick.volume,
             tick_count=tick.tick_count,
             source=tick.source,
         )
@@ -160,7 +154,6 @@ class BarAggregator:
             low=last,
             close=last,
             volume=0,
-            vwap=None,
             tick_count=0,
             source="empty",
         )

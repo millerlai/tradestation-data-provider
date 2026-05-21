@@ -9,6 +9,21 @@ changes; patch releases (`0.x.Y`) will not.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-21
+
+### Removed
+- **BREAKING:** The `vwap` field is gone from every layer of the pipeline. `Bar` no longer
+  carries it, `BarAggregator` no longer accumulates `pv_sum`, the EL provider no longer
+  emits a synthesised value, and `BAR_SCHEMA` / `_polars_bars_to_arrow` /
+  `Resampler` SQL no longer write or compute it. Downstream consumers should derive VWAP
+  from raw ticks (`price * volume / sum(volume)`) if needed — the synthesised
+  `close`-as-proxy that lived on bars added no information over what `close` already
+  carries. Existing `bars.parquet` files written by `0.1.x` remain readable column-wise,
+  but `BarWriter` / `HistoryStore` will reject them via schema mismatch on the next write
+  pass; rebuild the bar cache from ticks (or delete and re-collect) when upgrading.
+
+## [0.1.1] — 2026-05-20
+
 ### Added
 - CI workflow (`.github/workflows/ci.yml`) running ruff (lint + format), mypy strict, and
   pytest across Python 3.11 / 3.12 / 3.13 on Ubuntu + Windows; separate `build` job
@@ -58,5 +73,7 @@ changes; patch releases (`0.x.Y`) will not.
 - MIT LICENSE; `py.typed` marker for downstream mypy.
 - Bilingual README (English primary, 繁體中文 mirror) with Mermaid architecture diagram.
 
-[Unreleased]: https://github.com/millerlai/tradestation-data-provider/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/millerlai/tradestation-data-provider/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/millerlai/tradestation-data-provider/releases/tag/v0.2.0
+[0.1.1]: https://github.com/millerlai/tradestation-data-provider/releases/tag/v0.1.1
 [0.1.0]: https://github.com/millerlai/tradestation-data-provider/releases/tag/v0.1.0

@@ -61,8 +61,6 @@ def test_resample_1m_recovers_bar_from_ticks(tmp_path: Path) -> None:
     assert row["low"] == pytest.approx(449.5)
     assert row["close"] == pytest.approx(449.5)
     assert row["volume"] == 400
-    expected_vwap = (450.0 * 100 + 451.0 * 200 + 449.5 * 100) / 400
-    assert row["vwap"] == pytest.approx(expected_vwap)
     assert row["tick_count"] == 3
     assert row["symbol"] == "SPY"
 
@@ -87,7 +85,7 @@ def test_resample_5m_aggregates_five_minutes(tmp_path: Path) -> None:
     assert row["tick_count"] == 10
 
 
-def test_resample_index_symbol_has_null_vwap(tmp_path: Path) -> None:
+def test_resample_zero_volume_index_symbol(tmp_path: Path) -> None:
     ticks_root = tmp_path / "ticks"
     _write_ticks(
         ticks_root,
@@ -100,7 +98,6 @@ def test_resample_index_symbol_has_null_vwap(tmp_path: Path) -> None:
     assert df.height == 1
     row = df.row(0, named=True)
     assert row["volume"] == 0
-    assert row["vwap"] is None
     assert row["open"] == pytest.approx(18.5)
     assert row["close"] == pytest.approx(18.6)
 
@@ -163,7 +160,6 @@ def _bar_1m(
         low=low,
         close=close,
         volume=vol,
-        vwap=(open_ + close) / 2,
         tick_count=5,
         source="tradestation_el",
     )

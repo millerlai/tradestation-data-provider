@@ -10,9 +10,7 @@ from tradestation_data.domain.bar import Bar
 from tradestation_data.storage import BarWriter
 
 
-def _bar(
-    symbol: str, bucket: datetime, close: float, *, volume: int = 100, vwap: float | None = None
-) -> Bar:
+def _bar(symbol: str, bucket: datetime, close: float, *, volume: int = 100) -> Bar:
     return Bar(
         symbol=symbol,
         bucket_start=bucket,
@@ -21,7 +19,6 @@ def _bar(
         low=close - 0.2,
         close=close,
         volume=volume,
-        vwap=close if vwap is None and volume > 0 else vwap,
         tick_count=5,
         source="tradestation_el",
     )
@@ -48,7 +45,6 @@ def test_writer_creates_timeframe_partitioned_file(tmp_path: Path) -> None:
         "low",
         "close",
         "volume",
-        "vwap",
         "tick_count",
         "source",
     } <= set(table.column_names)
@@ -70,7 +66,7 @@ def test_writer_partitions_by_symbol_and_date(tmp_path: Path) -> None:
         assert p.exists(), p
 
 
-def test_empty_bar_writes_null_vwap(tmp_path: Path) -> None:
+def test_empty_bar_writes_zero_volume(tmp_path: Path) -> None:
     root = tmp_path / "bars"
     with BarWriter(root) as writer:
         writer.write(
@@ -82,15 +78,14 @@ def test_empty_bar_writes_null_vwap(tmp_path: Path) -> None:
                 low=450.0,
                 close=450.0,
                 volume=0,
-                vwap=None,
                 tick_count=0,
                 source="empty",
             )
         )
     path = root / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
     table = pq.read_table(path)
-    assert table.column("vwap").to_pylist() == [None]
     assert table.column("volume").to_pylist() == [0]
+    assert table.column("tick_count").to_pylist() == [0]
     assert table.column("source").to_pylist() == ["empty"]
 
 

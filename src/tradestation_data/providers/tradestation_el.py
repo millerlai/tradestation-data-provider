@@ -240,21 +240,14 @@ class TradeStationELProvider:
         if bucket_start is None:
             bucket_start = _floor_to_minute_utc(float(data["ts"]))
 
-        volume = int(data.get("vol", 0))
-        close = float(data["c"])
-        # EL only exposes OHLC — no tick-by-tick VWAP. Use the bar's close as a
-        # cheap proxy when volume > 0; index symbols (vol=0) get vwap=None.
-        vwap: float | None = close if volume > 0 else None
-
         return Bar(
             symbol=symbol,
             bucket_start=bucket_start,
             open=float(data["o"]),
             high=float(data["h"]),
             low=float(data["l"]),
-            close=close,
-            volume=volume,
-            vwap=vwap,
+            close=float(data["c"]),
+            volume=int(data.get("vol", 0)),
             tick_count=int(data.get("tc", 0)),
             source=self.source_id,
         )

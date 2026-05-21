@@ -107,7 +107,7 @@ Hive-partitioned Parquet under `data/`. `ParquetBarSink` / `ParquetTickSink` pro
 - The EL string `ts_str` (format `yyyy-MM/dd-HH:mm:ss`, 24-hour) is **authoritative** for `Bar.bucket_start` and is parsed as `America/New_York`, then converted to UTC. `ts_utc` from the DLL is only a sanity cross-check (a >5s drift is logged, not raised). 24-hour is deliberate — the old `hh:mm:ss tt` format broke on zh-TW Windows hosts where `FormatTime("tt")` emits localised AM/PM.
 - Ticks use the DLL's receive-side `ts` (UTC epoch) as authoritative.
 - `aggregation/session.py` owns session-edge logic. US equity session = 09:30–16:00 ET; bars before 04:00 ET belong to the *previous* session. Per-symbol retention via `SessionPolicy`: `breadth` indices reset daily, everything else retains 60 min of pre-market by default. Defaults come from `symbols.yaml::category`; per-symbol overrides are read in `runtime/config.py`.
-- Index/breadth symbols (`$TICK`, `$ADD`, `$VOLD`, `$TRIN`, `$PCVA`, `VXX` by default in `DEFAULT_INDEX_SYMBOLS`) have no bid/ask/volume — the provider forces `bid=ask=None` and `vwap` is null when `volume==0`.
+- Index/breadth symbols (`$TICK`, `$ADD`, `$VOLD`, `$TRIN`, `$PCVA`, `VXX` by default in `DEFAULT_INDEX_SYMBOLS`) have no bid/ask/volume — the provider forces `bid=ask=None` and `volume==0`.
 
 ### Windows-specific event loop
 

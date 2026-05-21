@@ -68,8 +68,6 @@ def _build_imputed_row(
     bucket_start: datetime,
     value: float,
     source_tag: str,
-    *,
-    vwap: float | None = None,
 ) -> dict:
     # bucket_start_et mirrors BAR_SCHEMA in bar_writer.py — it's non-nullable
     # in newer parquet files, so we must populate it on imputed rows or
@@ -82,7 +80,6 @@ def _build_imputed_row(
         "low": value,
         "close": value,
         "volume": 0,
-        "vwap": vwap,
         "tick_count": 0,
         "source": source_tag,
     }
@@ -161,7 +158,7 @@ def impute_day(
             log.append((t, "SKIP_no_reference"))
             continue
         value, fallback = result
-        new_rows.append(_build_imputed_row(t, value, source_tag, vwap=None))
+        new_rows.append(_build_imputed_row(t, value, source_tag))
         log.append((t, fallback or method))
 
     if not new_rows:

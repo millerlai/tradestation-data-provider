@@ -29,7 +29,6 @@ BAR_SCHEMA: pa.Schema = pa.schema(
         pa.field("low", pa.float64(), nullable=False),
         pa.field("close", pa.float64(), nullable=False),
         pa.field("volume", pa.int64(), nullable=False),
-        pa.field("vwap", pa.float64(), nullable=True),
         pa.field("tick_count", pa.int32(), nullable=False),
         pa.field("source", pa.string(), nullable=False),
     ]
@@ -126,7 +125,6 @@ def _bars_to_table(bars: list[Bar]) -> pa.Table:
             "low": [b.low for b in bars],
             "close": [b.close for b in bars],
             "volume": [b.volume for b in bars],
-            "vwap": [b.vwap for b in bars],
             "tick_count": [b.tick_count for b in bars],
             "source": [b.source for b in bars],
         },

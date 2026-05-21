@@ -19,7 +19,6 @@ def _bar() -> Bar:
         low=449.9,
         close=450.3,
         volume=1000,
-        vwap=450.25,
         tick_count=42,
         source="t",
     )
