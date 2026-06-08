@@ -44,7 +44,7 @@ dependencies = [
     "polars>=1.0,<2",
     "pyarrow>=16.0,<25",
     "pyyaml>=6.0,<7",
-    "structlog>=24.0,<26",
+    "structlog>=24.0,<27",
     # Windows Python stdlib ships without IANA tz data; polars needs it
     # when reading TIMESTAMPTZ columns from DuckDB / Arrow.
     "tzdata>=2024.1 ; sys_platform == 'win32'",
