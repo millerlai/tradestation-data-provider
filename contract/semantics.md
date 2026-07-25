@@ -108,6 +108,35 @@ EL 正常情況下送出的就是分鐘對齊的時間，所以取整通常是 n
 > epoch 錨定，而 `1h` / `1d` 的行為從未被測試涵蓋。同時 `aggregation/session.py`
 > 的 04:00 規則與重採樣的日界切分是**兩套不一致的時間概念** —— 現已統一。
 
+### 2.3 native 與 derived 的 bar 不可互換
+
+同一個區間的 bar 有兩種來源：
+
+| 來源 | 產生方式 | 特性 |
+| --- | --- | --- |
+| **native** | TradeStation 自己聚合，經 wire 送達 | 聚合規則不透明；**日線含交易所官方 OHLC 與除權息調整** |
+| **derived** | binding 由 tick 或 1m bar 算出 | 規則在我們手上、可重現、可稽核 |
+
+#### 規則
+
+1. **binding 必須讓兩者在儲存上可辨識。** reference binding 把 derived bar 的
+   provenance 欄位標為 `derived:<來源>`（例如 `derived:ticks`、`derived:1m`），
+   native 則保留 provider id。
+2. **同一個區間分區內不得混有兩種來源。**
+3. **native 優先。** derived 的結果**不得覆寫** native bar。
+
+#### 為何日線特別重要
+
+`1d` 是唯一「native 明確較優」的區間 —— TradeStation 的日線帶有**交易所官方收盤價
+與除權息調整**，這兩樣都**無法**由 tick 加總還原。derived 的日線是個長得一模一樣的
+近似值，換掉 native 之後看起來完全合理，卻是錯的。
+
+intraday 則相反：由 tick 聚合是可重現、可驗證的，且只需掛一張圖。
+
+> reference binding 的實作曾有這個洞：`Resampler` 用 `first(source)` 把來源原樣
+> 複製，於是 derived 與 native 在磁碟上**完全無法區分**；而快取寫入是直接覆寫，
+> 只要範圍內有一天缺資料，整段就會重算並把旁邊的 native 日線一併蓋掉。
+
 ---
 
 ## 3. bid / ask 何時無效

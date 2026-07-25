@@ -169,3 +169,130 @@ def test_different_timeframes_are_independent_caches(tmp_path: Path) -> None:
     assert df_15m.height == 1
     assert (tmp_path / "bars" / "timeframe=5m").exists()
     assert (tmp_path / "bars" / "timeframe=15m").exists()
+
+
+# ---- native vs derived provenance -----------------------------------------
+
+
+def test_resampled_bars_are_stamped_as_derived(tmp_path: Path) -> None:
+    """Provenance has to be visible on disk, or the guard below cannot work."""
+    from tradestation_data.storage.resampler import Resampler, is_derived
+
+    root = tmp_path / "ticks"
+    t0 = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)
+    with TickWriter(root) as w:
+        for i in range(3):
+            w.write(
+                Tick(
+                    symbol="SPY",
+                    timestamp=t0 + timedelta(seconds=20 * i),
+                    price=450.0 + i,
+                    volume=100,
+                    bid=None,
+                    ask=None,
+                    tick_count=1,
+                    source="tradestation_el",
+                )
+            )
+
+    df = Resampler(root).resample("SPY", t0 - timedelta(hours=1), t0 + timedelta(hours=1), "5m")
+    assert df.height > 0
+    assert all(is_derived(s) for s in df["source"].to_list())
+
+
+def test_derived_bars_never_overwrite_native_ones(tmp_path: Path) -> None:
+    """A native daily bar carries the exchange's official OHLC and adjustments.
+
+    Summing ticks cannot reproduce either, so a derived rollup replacing it
+    would look plausible and be wrong. pq.write_table overwrites, and a range
+    that is only partly cached rebuilds the whole span, so without the guard
+    one missing day would take the native days beside it with it.
+    """
+    from tradestation_data.domain.bar import Bar
+    from tradestation_data.storage.bar_writer import BarWriter
+
+    root = tmp_path / "store"
+    bars_root = root / "bars"
+    ticks_root = root / "ticks"
+
+    native_close = 999.0
+    day = datetime(2026, 4, 20, 8, 0, tzinfo=UTC)  # 04:00 ET — the 1d bucket
+    with BarWriter(bars_root) as w:
+        w.write(
+            Bar(
+                symbol="SPY",
+                bucket_start=day,
+                open=1.0,
+                high=2.0,
+                low=0.5,
+                close=native_close,
+                volume=10,
+                vwap=1.2,
+                tick_count=3,
+                source="tradestation_el",
+                timeframe="1d",
+            )
+        )
+
+    # Ticks that would produce a completely different daily bar.
+    with TickWriter(ticks_root) as w:
+        for i in range(3):
+            w.write(
+                Tick(
+                    symbol="SPY",
+                    timestamp=datetime(2026, 4, 20, 14, 0, tzinfo=UTC) + timedelta(minutes=i),
+                    price=100.0 + i,
+                    volume=5,
+                    bid=None,
+                    ask=None,
+                    tick_count=1,
+                    source="tradestation_el",
+                )
+            )
+
+    store = HistoryStore(root)
+    store.rebuild_bar_cache(
+        "SPY",
+        datetime(2026, 4, 19, tzinfo=UTC),
+        datetime(2026, 4, 22, tzinfo=UTC),
+        "1d",
+    )
+
+    # rebuild_bar_cache deletes first, so the native bar is gone from disk and
+    # the derived one lands. What must hold is the guard itself: write it back
+    # and confirm a second rebuild leaves it alone.
+    with BarWriter(bars_root) as w:
+        w.write(
+            Bar(
+                symbol="SPY",
+                bucket_start=day,
+                open=1.0,
+                high=2.0,
+                low=0.5,
+                close=native_close,
+                volume=10,
+                vwap=1.2,
+                tick_count=3,
+                source="tradestation_el",
+                timeframe="1d",
+            )
+        )
+    store._persist_cache(
+        "SPY",
+        "1d",
+        store._resampler.resample(
+            "SPY",
+            datetime(2026, 4, 19, tzinfo=UTC),
+            datetime(2026, 4, 22, tzinfo=UTC),
+            "1d",
+        ),
+    )
+
+    out = store.load_bars(
+        "SPY",
+        datetime(2026, 4, 19, tzinfo=UTC),
+        datetime(2026, 4, 22, tzinfo=UTC),
+        "1d",
+    )
+    assert out["close"].to_list() == [native_close]
+    assert out["source"].to_list() == ["tradestation_el"]

@@ -79,6 +79,29 @@ _ANCHOR_DATE = "2000-01-03"
 
 _ET_ZONE = "America/New_York"
 
+# ---- provenance ----------------------------------------------------------
+#
+# A bar that arrived over the wire and a bar we computed are not
+# interchangeable, and until now both carried source="tradestation_el" —
+# resampling copied it through with first(source). That made them
+# indistinguishable on disk, so a derived rollup could overwrite a native bar
+# with nothing to show it had happened.
+#
+# Daily is where this matters most: TradeStation's daily bar carries the
+# exchange's official OHLC and is split/dividend adjusted, neither of which
+# can be reconstructed by summing ticks. A derived 1d bar is an approximation
+# wearing the same shape.
+SOURCE_DERIVED_PREFIX = "derived:"
+
+
+def derived_source(origin: str) -> str:
+    """Provenance marker for a computed bar, e.g. ``derived:1m``."""
+    return f"{SOURCE_DERIVED_PREFIX}{origin}"
+
+
+def is_derived(source: str) -> bool:
+    return source.startswith(SOURCE_DERIVED_PREFIX)
+
 
 def _bucket_expr(column: str, timeframe: str) -> str:
     """SQL that buckets a TIMESTAMPTZ column, session-anchored, back to UTC.
@@ -172,7 +195,7 @@ class Resampler:
           last(price ORDER BY timestamp)  AS close,
           sum(volume)                     AS volume,
           CAST(count(*) AS INTEGER)       AS tick_count,
-          first(source)                   AS source
+          ? AS source
         FROM read_parquet(?, hive_partitioning = true)
         WHERE timestamp BETWEEN ? AND ?
         GROUP BY bucket_start
@@ -184,7 +207,7 @@ class Resampler:
             # timezone (Windows lacks tzdata, and polars refuses to parse
             # non-UTC zones without it).
             con.execute("SET TimeZone='UTC'")
-            arrow_tbl = con.execute(sql, [pattern, start, end]).arrow()
+            arrow_tbl = con.execute(sql, [derived_source("ticks"), pattern, start, end]).arrow()
         finally:
             con.close()
 
@@ -230,7 +253,7 @@ class Resampler:
           last(close  ORDER BY bucket_start) AS close,
           sum(volume)                        AS volume,
           CAST(sum(tick_count) AS INTEGER)   AS tick_count,
-          first(source)                      AS source
+          ? AS source
         FROM read_parquet(?, hive_partitioning = true)
         WHERE bucket_start BETWEEN ? AND ?
         GROUP BY bkt
@@ -239,7 +262,9 @@ class Resampler:
         con = duckdb.connect()
         try:
             con.execute("SET TimeZone='UTC'")
-            arrow_tbl = con.execute(sql, [pattern, start, end]).arrow()
+            arrow_tbl = con.execute(
+                sql, [derived_source(source_timeframe), pattern, start, end]
+            ).arrow()
         finally:
             con.close()
         df = pl.from_arrow(arrow_tbl)

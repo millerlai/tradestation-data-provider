@@ -10,7 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from tradestation_data.storage.bar_writer import BAR_SCHEMA
-from tradestation_data.storage.resampler import Resampler, Timeframe
+from tradestation_data.storage.resampler import Resampler, Timeframe, is_derived
 
 log = logging.getLogger(__name__)
 
@@ -144,6 +144,28 @@ class HistoryStore:
             out_dir = self._cache_dir(symbol, timeframe) / f"date={day.isoformat()}"
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / "bars.parquet"
+
+            # Never let a computed bar replace one that came off the wire.
+            # pq.write_table overwrites, and a partly-covered range takes the
+            # miss path for the whole span, so without this a single missing
+            # day would rebuild — and overwrite — every native day beside it.
+            #
+            # Daily is where the loss would be real rather than cosmetic:
+            # TradeStation's daily bar carries the exchange's official OHLC
+            # and is split/dividend adjusted. Summing ticks cannot reproduce
+            # either, so the replacement would look plausible and be wrong.
+            if _partition_holds_native(out_path):
+                log.warning(
+                    "bar_cache_write_skipped_native_present",
+                    extra={
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "date": day.isoformat(),
+                        "path": str(out_path),
+                    },
+                )
+                continue
+
             table = _polars_bars_to_arrow(day_df)
             pq.write_table(table, out_path, compression="zstd")
 
@@ -183,3 +205,21 @@ def _polars_bars_to_arrow(df: pl.DataFrame) -> pa.Table:
         ]
     ).to_arrow()
     return table.cast(BAR_SCHEMA)
+
+
+def _partition_holds_native(path: Path) -> bool:
+    """True if this partition file contains any bar that did not come from us.
+
+    Provenance lives in the ``source`` column: computed bars are stamped
+    ``derived:<origin>`` by the resampler, anything else arrived over the
+    wire. A file we cannot read is treated as native — refusing to overwrite
+    something unreadable is the safer failure.
+    """
+    if not path.exists():
+        return False
+    try:
+        sources = pq.read_table(path, columns=["source"])["source"].to_pylist()
+    except Exception:
+        log.warning("bar_cache_partition_unreadable", extra={"path": str(path)})
+        return True
+    return any(not is_derived(str(s)) for s in sources)
