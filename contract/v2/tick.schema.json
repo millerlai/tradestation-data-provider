@@ -46,12 +46,12 @@
       "description": "Volume. Emitted as a double (%.6f) even though semantically integral. Meaningless for index/breadth symbols."
     },
     "bid": {
-      "type": "number",
-      "description": "Bid. ALWAYS a number on the wire — never null. Bindings MUST treat this as invalid for the index/breadth symbols listed in semantics.md §3."
+      "type": ["number", "null"],
+      "description": "Bid, or null when no quote is available. EL supplies 0 from InsideBid during historical replay and for symbols that carry no quote at all (breadth indices); the publisher normalises any non-positive value to null so the wire states the absence rather than leaving every binding to remember that 0 means \"absent\". See semantics.md §3."
     },
     "ask": {
-      "type": "number",
-      "description": "Ask. Same caveat as bid."
+      "type": ["number", "null"],
+      "description": "Ask, or null when no quote is available. Same rule as bid."
     },
     "tc": {
       "type": "number",

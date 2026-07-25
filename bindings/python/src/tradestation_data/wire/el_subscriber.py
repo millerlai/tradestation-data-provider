@@ -301,8 +301,8 @@ class TradeStationELProvider:
             timestamp=timestamp,
             price=float(data["px"]),
             volume=int(data.get("vol", 0)),
-            bid=None if is_index else _optional_float(data.get("bid")),
-            ask=None if is_index else _optional_float(data.get("ask")),
+            bid=None if is_index else _quote_or_none(data.get("bid")),
+            ask=None if is_index else _quote_or_none(data.get("ask")),
             tick_count=int(data.get("tc", 0)),
             source=self.source_id,
         )
@@ -370,6 +370,21 @@ def _optional_float(value: object) -> float | None:
     if value is None:
         return None
     return float(value)  # type: ignore[arg-type]
+
+
+def _quote_or_none(value: object) -> float | None:
+    """Read a bid/ask, treating "no quote" as absent however it is spelled.
+
+    A wire-v2 publisher already sends null when EL had no quote to report
+    (historical replay, or a symbol that never carries one). A v1 publisher
+    cannot — it emits 0.000000 instead — so a non-positive number has to be
+    read as absent too, or a v1 history replay would look like a run of
+    $0.00 quotes. See contract/semantics.md §3.
+    """
+    q = _optional_float(value)
+    if q is None or q <= 0.0:
+        return None
+    return q
 
 
 def _floor_to_minute_utc(epoch_seconds: float) -> datetime:

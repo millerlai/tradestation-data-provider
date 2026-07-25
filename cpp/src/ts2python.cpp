@@ -65,6 +65,32 @@ std::uint64_t reserve_seq(const char* symbol) {
     return ++g_seq[std::string(symbol)];
 }
 
+// ---- quote availability --------------------------------------------------
+//
+// EL passes InsideBid / InsideAsk, which are live-quote functions. They
+// return 0 whenever there is no quote to report:
+//
+//   - historical replay (chart loading, or any non-realtime bar)
+//   - symbols that have no quote at all, e.g. breadth indices
+//
+// Forwarding that 0 verbatim puts a number on the wire that reads as a
+// $0.00 quote, and leaves every binding to independently remember that 0
+// means "absent". That is exactly the kind of rule that survives only in
+// prose and gets missed by the next implementation — this repo already
+// has one such rule (see contract/semantics.md §3).
+//
+// Emitting JSON null instead makes the wire say what it means. Bindings
+// that already model an optional quote need no special case at all.
+//
+// The guard is written as !(v > 0.0) so NaN lands on the null branch too.
+void format_quote(char* out, std::size_t n, double v) {
+    if (!(v > 0.0)) {
+        std::snprintf(out, n, "null");
+    } else {
+        std::snprintf(out, n, "%.6f", v);
+    }
+}
+
 // Pin the DLL into the host process's address space on first successful
 // EL_Init. TradeStation calls FreeLibrary when the user disables or
 // removes the indicator; without pinning, that unload would trigger the
@@ -213,16 +239,21 @@ TS2P_API int TS2P_CALL EL_PublishTick(
 
         const std::uint64_t seq = reserve_seq(symbol);
 
+        char bid_s[32], ask_s[32];
+        format_quote(bid_s, sizeof(bid_s), bid);
+        format_quote(ask_s, sizeof(ask_s), ask);
+
         char payload[544];
         const int n = std::snprintf(
             payload, sizeof(payload),
             "{\"v\":2,\"kind\":\"tick\",\"seq\":%llu,\"sid\":%llu,"
             "\"ts\":%.6f,\"ts_utc\":%.6f,\"ts_str\":\"%s\","
             "\"px\":%.6f,\"vol\":%.6f,"
-            "\"bid\":%.6f,\"ask\":%.6f,\"tc\":%.0f}",
+            "\"bid\":%s,\"ask\":%s,\"tc\":%.0f}",
             static_cast<unsigned long long>(seq),
             static_cast<unsigned long long>(g_sid),
-            recv_unix_seconds(), ts_utc_epoch, ts_str, price, volume, bid, ask, tick_count);
+            recv_unix_seconds(), ts_utc_epoch, ts_str, price, volume,
+            bid_s, ask_s, tick_count);
         if (n <= 0 || static_cast<size_t>(n) >= sizeof(payload)) return -4;
 
         zmq::message_t topic(symbol, std::strlen(symbol));
@@ -264,18 +295,22 @@ TS2P_API int TS2P_CALL EL_PublishTickEx(
 
         const std::uint64_t seq = reserve_seq(symbol);
 
+        char bid_s[32], ask_s[32];
+        format_quote(bid_s, sizeof(bid_s), bid);
+        format_quote(ask_s, sizeof(ask_s), ask);
+
         char payload[608];
         const int n = std::snprintf(
             payload, sizeof(payload),
             "{\"v\":2,\"kind\":\"bar_1m\",\"seq\":%llu,\"sid\":%llu,"
             "\"ts\":%.6f,\"ts_utc\":%.6f,\"ts_str\":\"%s\","
             "\"o\":%.6f,\"h\":%.6f,\"l\":%.6f,\"c\":%.6f,"
-            "\"vol\":%.6f,\"bid\":%.6f,\"ask\":%.6f,\"tc\":%.0f}",
+            "\"vol\":%.6f,\"bid\":%s,\"ask\":%s,\"tc\":%.0f}",
             static_cast<unsigned long long>(seq),
             static_cast<unsigned long long>(g_sid),
             recv_unix_seconds(), ts_utc_epoch, ts_str,
             bar_open, bar_high, bar_low, bar_close,
-            volume, bid, ask, tick_count);
+            volume, bid_s, ask_s, tick_count);
         if (n <= 0 || static_cast<size_t>(n) >= sizeof(payload)) return -4;
 
         zmq::message_t topic(symbol, std::strlen(symbol));

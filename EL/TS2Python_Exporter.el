@@ -79,6 +79,16 @@ If Enabled and InitDone Then Begin
           + "-"
           + FormatTime("HH:mm:ss", ElTimeToDateTime(Time));
 
+    { InsideBid / InsideAsk are live-quote functions. They return 0 when
+      there is no quote to report — during historical replay (chart load,
+      any non-realtime bar), and for symbols that carry no quote at all
+      such as breadth indices ($TICK, $ADD, ...).
+
+      They are passed through raw on purpose. The DLL normalises a
+      non-positive quote to JSON null, so the "absent" case is expressed
+      once, in one place, for every caller of the C ABI rather than being
+      re-derived by each EL script. See contract/semantics.md §3. }
+
     If BarType = 0 Then Begin
         { Tick data series — one call per trade print. }
         PubRC = EL_PublishTick(

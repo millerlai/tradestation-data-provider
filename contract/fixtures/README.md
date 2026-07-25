@@ -8,7 +8,8 @@
 | fixture | expected | 涵蓋 |
 | --- | --- | --- |
 | `smoke.jsonl` | `expected/smoke.json` | wire v2 · tick + bar_1m · per-symbol `seq` · index symbol 的 bid/ask 無效化 |
-| `v1_legacy.jsonl` | `expected/v1_legacy.json` | wire v1 向下相容 · 無 `seq` 時的降級行為 |
+| `noquote.jsonl` | `expected/noquote.json` | 無報價情境 —— 歷史回放與 breadth symbol，wire 上為 `null` |
+| `v1_legacy.jsonl` | `expected/v1_legacy.json` | wire v1 向下相容 · 無 `seq` 時的降級行為 · v1 用 `0` 表示無報價 |
 
 `*.jsonl` 每行一個 frame：
 
@@ -54,6 +55,5 @@ python contract/tools/record.py --count 6 --quiet --record contract/fixtures/smo
 - **DST 轉換日**的 `ts_str` → UTC（§1）—— 一年只錯兩天的那種 bug
 - **session 首尾兩根 bar**，驗證左標籤（§2）
 - **缺漏**：`seq` 跳號後的偵測行為（§6）
-- **breadth symbol 的零成交量**（$TICK / $ADD）
 
 這幾項需要 harness 支援指定 symbol 與時間戳；目前 `--mode smoke` 的參數是寫死的。

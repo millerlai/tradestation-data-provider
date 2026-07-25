@@ -79,20 +79,34 @@ EL 正常情況下送出的就是分鐘對齊的時間，所以取整通常是 n
 
 ---
 
-## 3. Index / breadth symbol 的 bid、ask 無效
+## 3. bid / ask 何時無效
 
-> ⚠️ **這是目前最容易被新 binding 漏掉的規則。**
+報價有**兩種**無效情形，來源不同，處理方式也不同。
 
-### 3.1 wire 上看不出來
+### 3.1 沒有報價可報 → wire 上是 `null`（publisher 負責）
 
-`bid` / `ask` 在 wire 上**永遠是 float，從不為 `null`** —— payload 由 `snprintf`
-以 `%.6f` 組出。對於 index / breadth symbol，DLL 會照樣送出 EL 傳進來的值
-（通常是 `0.0` 或殘值），**它們不具意義**。
+EL 傳的是 `InsideBid` / `InsideAsk`，那是**即時報價函式**。以下情況它們回傳 `0`：
 
-### 3.2 規則
+| 情況 | 說明 |
+| --- | --- |
+| **歷史回放** | 圖表載入、任何非即時 bar。TradeStation 不在 live mode 時就沒有報價 |
+| **本身無報價的 symbol** | breadth 指數（`$TICK`、`$ADD` …）從來就沒有買賣盤 |
 
-以下 symbol 的 `bid` / `ask` 必須由 binding 視為**無效**（轉為該語言的 null / None /
-`nil`），不可原樣傳遞給下游：
+wire v2 起，**DLL 會把非正值報價正規化為 JSON `null`**（`format_quote()`，
+`!(v > 0.0)` 因此也涵蓋 NaN）。wire 自己說出「沒有報價」，binding 不需要記得
+「`0` 代表無效」這種只活在文件裡、遲早被漏掉的規則。
+
+> **wire v1 沒有這個保護。** v1 的 payload 一律是 `%.6f`，歷史回放會送出
+> `"bid":0.000000`。讀 v1 的 binding **必須**自行把 `<= 0` 視為無效，否則會把
+> `$0.00` 當成真實報價。`v1_legacy.jsonl` 就是為此存在。
+
+正規化刻意放在 C++ 而非 EL：C ABI 只有一個實作，所有 EL 呼叫端自動一致；
+放在 EL 則每支 script 都要各自記得。
+
+### 3.2 有報價但不該採信 → binding 負責
+
+即使 live mode 下報價非零，以下 symbol 的 `bid` / `ask` 仍**不具意義**，
+binding 必須視為無效：
 
 ```
 $TICK   $ADD   $VOLD   $TRIN   $PCVA   VXX
@@ -101,18 +115,32 @@ $TICK   $ADD   $VOLD   $TRIN   $PCVA   VXX
 此清單為**預設值**，binding 應允許呼叫端覆寫（reference binding 的
 `TradeStationELProvider(index_symbols=...)`）。
 
-同理，`vol` 對這些 symbol 亦不具價格量意義；當 `vol == 0` 時衍生的 VWAP 應為 null
+DLL 不做這一層，是因為它不持有 symbol 分類知識（那是 binding 的設定，
+例如 `bindings/python/config/symbols.yaml`）。代價就是**這條規則必須寫在契約裡** ——
+現況即為如此：reference binding 把清單硬編在
+`bindings/python/src/tradestation_data/wire/el_subscriber.py` 的
+`DEFAULT_INDEX_SYMBOLS`，本文件將其升格為契約。
+
+### 3.3 綜合判定
+
+binding 應把 `bid` / `ask` 視為無效，若**任一**成立：
+
+1. 值為 `null`（v2 publisher 已判定沒有報價）
+2. 值 `<= 0`（v1 相容，或任何未來的異常值）
+3. symbol 在 index / breadth 清單中（§3.2）
+
+### 3.4 成交量
+
+`vol` 對 index / breadth symbol 同樣不具意義。`vol == 0` 時衍生的 VWAP 應為 null
 而非除以零。
 
-### 3.3 為何不在 DLL 端處理
+### 3.5 `Bar` 是否保留 bid / ask 由 binding 決定
 
-DLL 不持有 symbol 分類知識（那是 binding 的設定，例如 reference binding 的 `bindings/python/config/symbols.yaml`），且保持 wire 為原始透傳
-可讓 binding 自行決定分類。代價就是**這條規則必須寫在契約裡**，否則只會活在某一個
-binding 的原始碼中。
+wire 的 `bar_1m` 帶有 bar 收盤當下的 `bid` / `ask`。reference Python binding 的
+`Bar` 型別**不保留**這兩個欄位，資料在此丟棄。
 
-> 現況即為如此：reference binding 把清單硬編在
-> `bindings/python/src/tradestation_data/wire/el_subscriber.py` 的
-> `DEFAULT_INDEX_SYMBOLS`。本文件將其升格為契約。
+這是建模選擇而非解析錯誤 —— 保留的 binding 不算違規，丟棄的也不算。但 fixture 的
+`expected/*.json` 一律記錄 wire 上的原值，讓選擇保留的 binding 有東西可比對。
 
 ---
 

@@ -20,7 +20,7 @@ from tradestation_data.domain.bar import Bar
 from tradestation_data.domain.tick import Tick
 from tradestation_data.wire.el_subscriber import TradeStationELProvider
 
-CASES = ["smoke", "v1_legacy"]
+CASES = ["smoke", "noquote", "v1_legacy"]
 
 
 def _iso(dt: datetime) -> str:

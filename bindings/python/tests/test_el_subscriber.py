@@ -935,3 +935,57 @@ async def test_unknown_future_wire_version_is_rejected(zmq_inproc_bus) -> None:
 
     await gen.aclose()
     await provider.close()
+
+
+# ---- quote availability (semantics.md §3) ---------------------------------
+
+
+def _quote(v):
+    from tradestation_data.wire.el_subscriber import _quote_or_none
+
+    return _quote_or_none(v)
+
+
+def test_v2_null_quote_is_absent():
+    """A v2 publisher already decided there was no quote."""
+    assert _quote(None) is None
+
+
+def test_v1_zero_quote_is_absent_not_a_price():
+    """v1 cannot send null, so 0.000000 is how a history replay looks.
+
+    Reading it as a real $0.00 quote would put fabricated prices into the
+    store for every non-live bar.
+    """
+    assert _quote(0.0) is None
+    assert _quote(-1.0) is None
+
+
+def test_real_quotes_pass_through():
+    assert _quote(449.99) == pytest.approx(449.99)
+    assert _quote(0.01) == pytest.approx(0.01)
+
+
+@pytest.mark.asyncio
+async def test_history_replay_shaped_v1_tick_has_no_quotes(zmq_inproc_bus) -> None:
+    """End to end on the v1 shape: bid/ask 0 must not reach the caller as 0."""
+    ctx, pub, endpoint = zmq_inproc_bus
+    provider = TradeStationELProvider(endpoint=endpoint, context=ctx)
+    await provider.connect()
+    await provider.subscribe(["SPY"])
+    await asyncio.sleep(0)
+
+    ts_epoch = datetime(2026, 4, 18, 13, 30, 45, tzinfo=UTC).timestamp()
+    await _publish(
+        pub,
+        "SPY",
+        {"v": 1, "ts": ts_epoch, "px": 450.23, "vol": 100, "bid": 0.0, "ask": 0.0, "tc": 5},
+    )
+
+    tick, gen = await _next_tick(provider)
+    assert tick.price == pytest.approx(450.23)
+    assert tick.bid is None
+    assert tick.ask is None
+
+    await gen.aclose()
+    await provider.close()
