@@ -3,7 +3,8 @@
 // Called from TradeStation EasyLanguage via DefineDLLFunc. All functions use
 // __stdcall (EL's default DLL calling convention on Win32) and C linkage.
 //
-// See docs/design.md §3.2 and docs/error_codes.md for semantics.
+// See ../contract/ for the wire format and ../contract/error_codes.md for
+// the return-code semantics.
 
 #ifndef TS2PYTHON_H
 #define TS2PYTHON_H
@@ -24,7 +25,7 @@ extern "C" {
 #  define TS2P_CALL
 #endif
 
-// Return codes (see docs/error_codes.md).
+// Return codes (see ../contract/error_codes.md).
 //   0  success
 //   1  already initialized (idempotent; not an error)
 //  -1  not initialized
@@ -66,7 +67,9 @@ TS2P_API int TS2P_CALL EL_PublishTickEx(
 
 TS2P_API int TS2P_CALL EL_Shutdown(void);
 
-// Version identifier for this DLL build (bumps independently of wire protocol).
+// Version identifier for this DLL build (bumps independently of the wire
+// protocol version carried in the payload's "v" field). Current pairing is
+// ABI 7 <-> wire 2; see ../contract/compat.md for the full matrix.
 TS2P_API int TS2P_CALL EL_DllVersion(void);
 
 #ifdef __cplusplus

@@ -1,14 +1,17 @@
-// TS2Python bridge implementation — see docs/design.md §3.2 / §5
-// and docs/error_codes.md for the semantics enforced here.
+// TS2Python bridge implementation — see ../contract/ for the wire format
+// and ../contract/error_codes.md for the return codes enforced here.
 
 #include "ts2python.h"
 
 #include <zmq.hpp>
 
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <string>
+#include <unordered_map>
 
 #if defined(_WIN32)
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -19,7 +22,7 @@
 
 namespace {
 
-constexpr int kDllVersion = 6;
+constexpr int kDllVersion = 7;
 
 std::mutex       g_mutex;
 // Raw pointers, never destroyed implicitly. See pin_self_module_once()
@@ -30,6 +33,37 @@ std::mutex       g_mutex;
 // EL_Shutdown for the standalone test harness path.
 zmq::context_t*  g_ctx  = nullptr;
 zmq::socket_t*   g_sock = nullptr;
+
+// ---- gap detection (wire v2) --------------------------------------------
+//
+// PUB/SUB is fire-and-forget: PUB drops silently past SNDHWM and never
+// blocks, SUB drops silently past RCVHWM. Neither side reports it, so
+// without a sequence number a subscriber cannot tell a quiet market from
+// a lost one — which matters when the data feeds trading decisions and
+// model training.
+//
+// g_seq is per-symbol rather than global because a subscriber may filter
+// on a single topic; a global counter's gaps would be indistinguishable
+// from other symbols' traffic it never asked for.
+//
+// g_sid marks the publisher's session so a subscriber can tell "the DLL
+// restarted and counters reset" from "we lost 4000 messages". Stamped
+// once per successful EL_Init.
+//
+// Both are guarded by g_mutex, which already serialises every publish.
+std::uint64_t                                     g_sid = 0;
+std::unordered_map<std::string, std::uint64_t>    g_seq;
+
+// Reserve the next sequence number for `symbol`. Must be called with
+// g_mutex held.
+//
+// The number is consumed even if the send that follows fails. That is
+// deliberate: a reserved-but-unsent number surfaces at the subscriber as
+// a gap, which is exactly what happened. Incrementing only on success
+// would hide real losses behind a contiguous sequence.
+std::uint64_t reserve_seq(const char* symbol) {
+    return ++g_seq[std::string(symbol)];
+}
 
 // Pin the DLL into the host process's address space on first successful
 // EL_Init. TradeStation calls FreeLibrary when the user disables or
@@ -133,14 +167,22 @@ TS2P_API int TS2P_CALL EL_Init(const char* zmq_endpoint) {
         auto* ctx  = new zmq::context_t(1);
         auto* sock = new zmq::socket_t(*ctx, zmq::socket_type::pub);
         // PUB silently drops past SNDHWM (PUB never blocks publisher).
-        // 100k * ~448B payload ≈ 45MB per subscriber pipe — buys ~30 min
+        // 100k * ~512B payload ≈ 51MB per subscriber pipe — buys ~30 min
         // of SUB stall at 50 tps, still safe inside TS's 32-bit address space.
+        // Drops past this point are invisible here; the wire-v2 `seq` field
+        // is what lets the subscriber notice them.
         sock->set(zmq::sockopt::sndhwm, 100000);
         sock->set(zmq::sockopt::linger, 0);
         sock->bind(zmq_endpoint);
 
         g_ctx  = ctx;
         g_sock = sock;
+        // New publisher session: stamp its id and restart every counter.
+        // Only on a real init — the idempotent path above returned 1
+        // without touching either, so a re-Verify of the indicator does
+        // not look like a restart to subscribers.
+        g_sid = static_cast<std::uint64_t>(recv_unix_seconds());
+        g_seq.clear();
         pin_self_module_once();  // stay resident for the life of the host
         return 0;
     } catch (const zmq::error_t&) {
@@ -169,12 +211,17 @@ TS2P_API int TS2P_CALL EL_PublishTick(
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!g_sock) return -1;
 
-        char payload[448];
+        const std::uint64_t seq = reserve_seq(symbol);
+
+        char payload[544];
         const int n = std::snprintf(
             payload, sizeof(payload),
-            "{\"v\":1,\"kind\":\"tick\",\"ts\":%.6f,\"ts_utc\":%.6f,\"ts_str\":\"%s\","
+            "{\"v\":2,\"kind\":\"tick\",\"seq\":%llu,\"sid\":%llu,"
+            "\"ts\":%.6f,\"ts_utc\":%.6f,\"ts_str\":\"%s\","
             "\"px\":%.6f,\"vol\":%.6f,"
             "\"bid\":%.6f,\"ask\":%.6f,\"tc\":%.0f}",
+            static_cast<unsigned long long>(seq),
+            static_cast<unsigned long long>(g_sid),
             recv_unix_seconds(), ts_utc_epoch, ts_str, price, volume, bid, ask, tick_count);
         if (n <= 0 || static_cast<size_t>(n) >= sizeof(payload)) return -4;
 
@@ -215,12 +262,17 @@ TS2P_API int TS2P_CALL EL_PublishTickEx(
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!g_sock) return -1;
 
-        char payload[512];
+        const std::uint64_t seq = reserve_seq(symbol);
+
+        char payload[608];
         const int n = std::snprintf(
             payload, sizeof(payload),
-            "{\"v\":1,\"kind\":\"bar_1m\",\"ts\":%.6f,\"ts_utc\":%.6f,\"ts_str\":\"%s\","
+            "{\"v\":2,\"kind\":\"bar_1m\",\"seq\":%llu,\"sid\":%llu,"
+            "\"ts\":%.6f,\"ts_utc\":%.6f,\"ts_str\":\"%s\","
             "\"o\":%.6f,\"h\":%.6f,\"l\":%.6f,\"c\":%.6f,"
             "\"vol\":%.6f,\"bid\":%.6f,\"ask\":%.6f,\"tc\":%.0f}",
+            static_cast<unsigned long long>(seq),
+            static_cast<unsigned long long>(g_sid),
             recv_unix_seconds(), ts_utc_epoch, ts_str,
             bar_open, bar_high, bar_low, bar_close,
             volume, bid, ask, tick_count);
@@ -248,6 +300,8 @@ TS2P_API int TS2P_CALL EL_Shutdown(void) {
     std::lock_guard<std::mutex> lock(g_mutex);
     delete g_sock; g_sock = nullptr;
     delete g_ctx;  g_ctx  = nullptr;
+    g_seq.clear();
+    g_sid = 0;
     return 0;
 }
 
