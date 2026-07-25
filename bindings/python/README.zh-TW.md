@@ -10,7 +10,11 @@
 
 純 Python 資料管線：訂閱 TradeStation EasyLanguage 訊號（透過 C++/ZeroMQ bridge），把 tick 與 1 分鐘 bar 派發給**可插拔的輸出 sink** — Parquet、in-memory buffer、使用者 callback，或任何你自己實作的 sink。
 
-C++ DLL 在 [`cpp/`](cpp/) 下、獨立編譯；本 repo 是 Python 端消費者。**本專案不包含 strategy / broker / risk 邏輯** — runtime 純粹是資料收集。
+這是 [`contract/`](../../contract/) 所定義 wire protocol 的 **reference binding** —— 該 repo 支援的多語言 subscriber 之一。發布資料的 EasyLanguage indicator 與 C++ DLL 分別在 [`EL/`](../../EL/) 與 [`cpp/`](../../cpp/)。
+
+**本專案不包含 strategy / broker / risk 邏輯** —— runtime 純粹是資料收集。
+
+> 修改任何 wire 解析行為前，請先讀 [`contract/semantics.md`](../../contract/semantics.md)。只活在本套件裡的規則，正是下一個 binding 會弄錯的那些。
 
 ## 為什麼用它
 
@@ -231,23 +235,28 @@ python ../../contract/tools/record.py                            # 原始 ZMQ wi
 ## 專案結構
 
 ```
-tradestation-data-provider/
+bindings/python/                   # 本 binding；repo 根目錄在上兩層
 ├── pyproject.toml
-├── LICENSE
+├── .python-version                # 3.12，與 CI matrix 對齊
+├── LICENSE                        # 副本 —— 打包後端無法引用本目錄之上
 ├── config/
-│   ├── sinks.yaml             # 可插拔 sink pipeline
-│   └── symbols.yaml           # symbol universe + 每 symbol 的 session policy
-├── scripts/                   # 給人用的 CLI 包裝（見上）
-├── src/tradestation_data/     # 核心 Python package
-│   ├── domain/                # Bar / Tick / Order / Position
-│   ├── aggregation/           # BarAggregator / MarketSnapshot
-│   ├── wire/                  # TradeStationELProvider (ZMQ SUB) — core binding
-│   ├── storage/               # BarWriter / TickWriter / HistoryStore / Resampler
-│   ├── sinks/                 # Sink protocol、pipeline、registry、內建 sinks
-│   ├── runtime/               # IngestionRuntime + CLI entry
-│   └── tools/                 # scripts 共用的 audit / clear cache helper
-└── tests/                     # 272 個 unit + integration tests
+│   ├── sinks.yaml                 # 可插拔 sink pipeline（值為 module:attr）
+│   └── symbols.yaml               # symbol universe + 每 symbol 的 session policy
+├── scripts/                       # 給人用的 CLI 包裝（見上）
+├── src/tradestation_data/
+│   ├── domain/                    # Bar / Tick —— wire 的值域
+│   ├── wire/                      # frame 解碼、缺漏偵測          [core]
+│   ├── aggregation/               # BarAggregator / MarketSnapshot [app]
+│   ├── storage/                   # BarWriter / TickWriter / HistoryStore / Resampler
+│   ├── sinks/                     # Sink protocol、pipeline、registry、內建 sinks
+│   ├── runtime/                   # IngestionRuntime + CLI entry
+│   └── tools/                     # scripts 共用的 audit / clear cache helper
+└── tests/
+    └── conformance/               # 用 contract/fixtures/ 驗證本 binding
 ```
+
+`domain/` 與 `wire/` 是任何語言 binding 都必須重新實作的部分，其餘都是本
+reference application。見 [`docs/architecture.md`](../../docs/architecture.md) §5。
 
 ## Release 流程（維護者）
 
@@ -259,7 +268,7 @@ tradestation-data-provider/
 
 ## 注意事項
 
-- C++ DLL 由上游主專案編譯與部署 — 本 repo 只負責 Python 端。
+- C++ DLL 見 [`cpp/README.zh-TW.md`](../../cpp/README.zh-TW.md)；本目錄只負責 Python binding。
 - 預設資料根目錄是 `<project-root>/data/`；可用 `--data-root` 覆寫（**僅在 `sinks.yaml` 缺檔時的 fallback 路徑生效**；正常情況以 YAML 內每個 sink 的 `root` 參數為準）。
 - 純 smoke test（不寫任何輸出）用 `--no-storage`，等於空 sink pipeline。
 - pytest 設定 `filterwarnings = ["error", "ignore::DeprecationWarning"]` — **新 warning 會讓 build 失敗**。修原因，不要放寬 filter。

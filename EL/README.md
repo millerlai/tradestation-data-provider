@@ -28,7 +28,10 @@ TradeStation Chart → TS2Python_Exporter.el → TS2Python.dll → ZMQ PUB → s
 - Indicator **不做任何策略運算**，只負責呼叫 DLL 匯出資料。
 - 送出的 payload 格式由 [`../contract/`](../contract/) 規範，不是這支 indicator 的
   自由；修改欄位前先改 contract。
-- 見 [`../docs/design.md`](../docs/design.md) §3.1。
+- `InsideBid` / `InsideAsk` 原樣傳出，不在 EL 端判斷。無報價時（歷史回放、
+  非 live mode、breadth symbol）它們回傳 0，由 DLL 統一正規化為 JSON `null` ——
+  集中在 C ABI 一處，所有 EL 呼叫端才會一致。見
+  [`../contract/semantics.md`](../contract/semantics.md) §3.1。
 
 ## 盤前資料
 

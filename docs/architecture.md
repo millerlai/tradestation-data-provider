@@ -40,19 +40,24 @@ subscriber binding，全部對同一份 contract。
 三層的可變性完全不同，這是整個設計的基礎：
 
 ```mermaid
+---
+config:
+  flowchart:
+    defaultRenderer: elk
+---
 flowchart TB
     subgraph PROD["① Producer — 固定"]
         direction TB
         TS["TradeStation Desktop"]
         EL["EL Exporter Indicator<br/>TS2Python_Exporter.el"]
-        DLL["TS2Python.dll<br/>C++ / Win32 x86 / ABI v6"]
+        DLL["TS2Python.dll<br/>C++ / Win32 x86 / ABI 7"]
         TS --> EL
         EL -->|"DefineDLLFunc __stdcall"| DLL
     end
 
     subgraph CON["② Contract — dp 真正的產品"]
         direction TB
-        WIRE["wire vN<br/>2-frame: topic + payload"]
+        WIRE["wire v2<br/>2-frame: topic + payload"]
         SCHEMA["JSON Schema<br/>tick / bar_1m"]
         SEM["semantics.md<br/>時間權威 · session 規則"]
         FIX["conformance fixtures<br/>錄自 test_harness"]
@@ -73,106 +78,102 @@ flowchart TB
     FIX ==>|必須通過| PY
     FIX ==>|必須通過| GO
     FIX ==>|必須通過| RS
+
+    classDef existing fill:#e9ecef,stroke:#adb5bd,color:#495057
+    classDef added fill:#d4edda,stroke:#28a745,color:#155724
+    classDef modified fill:#fff3cd,stroke:#ffc107,color:#856404
+    class TS,EL,PY existing
+    class DLL modified
+    class WIRE,SCHEMA,SEM,FIX,COMPAT,GO,RS added
 ```
 
 | 層 | 可變性 | 誰負責 |
 | --- | --- | --- |
 | ① Producer | 固定 | 本 repo（EL + cpp） |
-| ② Contract | 版本化演進（v1 JSON → v2 MessagePack） | 本 repo（contract/） |
+| ② Contract | 版本化演進（目前 v2；v1 仍須支援） | 本 repo（contract/） |
 | ③ Bindings | 增生 | 本 repo（Python）+ 未來各語言 |
 
 ---
 
 ## 3. Repo Layout
 
-標記：`（現有）` 不動 · `←` 從 TA 搬入 · `★` 新增 · `⇢` 位置變更 · `[core]` / `[app]` 見 §5
+> 以下為**實際落地**的結構（非規劃稿）。建置產物與 `.venv` 由 `.gitignore` 排除。
 
 ```
 tradestation-data-provider/
 │
-├─ contract/                             ★ ② 語言中立 SSoT — 本 repo 最高優先資產
-│  ├─ README.md                          ★ contract 入口：讀者是「要寫新 binding 的人」
-│  ├─ v1/
-│  │  ├─ envelope.md                     ★ 2-frame 規則（topic frame + payload frame）
-│  │  ├─ tick.schema.json                ★ EL_PublishTick payload
-│  │  └─ bar_1m.schema.json              ★ EL_PublishTickEx payload
-│  ├─ semantics.md                       ★ 時間權威關係 · session 規則 · symbology 語意
-│  ├─ compat.md                          ★ DLL ABI × wire version 相容矩陣
-│  ├─ error_codes.md                     ← TA/docs/error_codes.md（30 行，整份）
-│  ├─ fixtures/                          ★ 錄自 test_harness 的真實 frame
-│  │  ├─ smoke.jsonl                     ★ --mode smoke
-│  │  ├─ breadth_no_bidask.jsonl         ★ $TICK：volume=0 · bid/ask=null
-│  │  ├─ dst_transition.jsonl            ★ DST 轉換日的 ts_str → UTC
-│  │  ├─ session_boundary.jsonl          ★ 盤前 / 半日市
-│  │  ├─ multithread.jsonl               ★ --mode multithread，frame 交錯
-│  │  └─ expected/*.json                 ★ 語言中立的期望解析結果
+├─ contract/                             ② 語言中立 SSoT — 本 repo 最高優先資產
+│  ├─ README.md                          　 入口：讀者是「要寫新 binding 的人」
+│  ├─ semantics.md                       　 schema 表達不了的規則（§1 時間權威、
+│  │                                     　 §2 左標籤+分鐘取整、§3 報價有效性、
+│  │                                     　 §4 session、§5 前綴、§6 序號）
+│  ├─ compat.md                          　 DLL ABI × wire version 相容矩陣
+│  ├─ error_codes.md                     　 C ABI 回傳碼
+│  ├─ v2/                                　 目前版本
+│  │  ├─ envelope.md                     　 frame 結構與 payload（自成一體）
+│  │  ├─ tick.schema.json
+│  │  └─ bar_1m.schema.json
+│  ├─ v1/                                　 前一版，仍須支援
+│  │  ├─ envelope.md · tick.schema.json · bar_1m.schema.json
+│  ├─ fixtures/
+│  │  ├─ README.md                       　 錄製規矩：不得手寫、expected 不得由 binding 產生
+│  │  ├─ smoke.jsonl                     　 v2 · tick+bar · per-symbol seq
+│  │  ├─ noquote.jsonl                   　 無報價（歷史回放形狀）→ wire 上是 null
+│  │  ├─ v1_legacy.jsonl                 　 v1 向下相容（錄自另建的 v1 DLL）
+│  │  └─ expected/{smoke,noquote,v1_legacy}.json
 │  └─ tools/
-│     └─ record.py                       ⇢ 由 scripts/simple_sub.py 演進（加 --record）
-│                                        　 Python 僅作腳本語言，不依賴任何 binding
+│     └─ record.py                        　 wire 檢視器 + fixture 錄製器，不依賴任何 binding
 │
-├─ EL/                                   ← ① 從 TA 搬入（提案 A）
-│  ├─ README.md                          ←
-│  └─ TS2Python_Exporter.el              ←   TradeStation 側訊號源頭
-│                                        　 （TA/EL/monarch 為策略用，留在 TA）
+├─ EL/                                   ① TradeStation 側訊號源頭
+│  ├─ README.md
+│  └─ TS2Python_Exporter.el
 │
-├─ cpp/                                  （現有）① bridge DLL — 語言固定為 C++
+├─ cpp/                                  ① bridge DLL — 語言固定為 C++
 │  ├─ CMakeLists.txt · CMakePresets.json · vcpkg.json
-│  ├─ TS2Python.sln · TS2Python.vcxproj · TS2Python_TestHarness.vcxproj (+.filters)
-│  ├─ README.md · README.zh-TW.md        　 §4 的 wire 說明改為指向 contract/
+│  ├─ TS2Python.sln · *.vcxproj (+.filters)
+│  ├─ README.md · README.zh-TW.md
 │  ├─ include/ts2python.h                　 C ABI（EL_Init / EL_PublishTick[Ex] / …）
-│  ├─ src/ts2python.cpp                  　 ZMQ PUB publisher
-│  ├─ src/test_harness.cpp               　 ★ 不依賴 TradeStation 的 frame 產生器
+│  ├─ src/ts2python.cpp                  　 ZMQ PUB publisher · seq/sid · 報價正規化
+│  ├─ src/test_harness.cpp               　 不依賴 TradeStation 的 frame 產生器
 │  ├─ src/TS2Python.def
 │  └─ build-tools/vcpkg/                 　 submodule
 │
-├─ bindings/                             ★ ③ subscriber bindings
-│  └─ python/                            ⇢ 由 repo 根目錄搬入（reference binding）
-│     ├─ pyproject.toml                  ⇢
-│     ├─ uv.lock                         ⇢
-│     ├─ README.md                       ★ 本 binding 專屬說明
-│     ├─ .python-version                 ★ 釘 3.12，與 CI matrix 對齊
-│     ├─ LICENSE                         ★ 副本 — 打包後端無法引用專案根之上
-│     ├─ config/
-│     │  ├─ sinks.yaml                   ⇢ Python 專屬（值是 module:attr 路徑）
-│     │  └─ symbols.yaml                 ⇢ 本 binding 的 symbol universe 範例
-│     ├─ src/tradestation_data/
-│     │  ├─ __init__.py · py.typed
-│     │  ├─ domain/                      [core] bar.py · tick.py · position.py
-│     │  │                               　 order.py → 見 §3.2 待決策
-│     │  ├─ wire/                        [core] ⇢ 由 providers/ 改名（§5.2）
-│     │  │  ├─ base.py                   　 原 providers/base.py，語意收窄
-│     │  │  ├─ el_subscriber.py          　 原 tradestation_el.py
-│     │  │  └─ webapi.py                 ← 從 TA 搬入的 Phase 6 stub
-│     │  ├─ aggregation/                 [app] bar_aggregator · session · snapshot
-│     │  ├─ storage/                     [app] bar_writer · tick_writer
-│     │  │                               　    history_store · resampler
-│     │  ├─ sinks/                       [app] base · pipeline · registry
-│     │  │                               　    parquet · memory · callback
-│     │  ├─ runtime/                     [app] config · ingestion · main
-│     │  └─ tools/                       [app] audit_bar_cache · clear_bar_cache
-│     ├─ scripts/                        ⇢ 9 支 Parquet 維運腳本
-│     │                                  　 （simple_sub.py 已升格 contract/tools/）
-│     └─ tests/                          ⇢ 32 支現有測試
-│        └─ conformance/                 ★ 對 contract/fixtures 跑驗證
-│
-├─ .ruff.toml                            ★ 僅為 repo 根的防護，見 §3.3
+├─ bindings/python/                      ③ reference binding
+│  ├─ pyproject.toml · uv.lock
+│  ├─ .python-version                    　 3.12，與 CI matrix 對齊
+│  ├─ LICENSE                            　 副本 — 打包後端無法引用專案根之上
+│  ├─ README.md · README.zh-TW.md
+│  ├─ config/{sinks,symbols}.yaml
+│  ├─ src/tradestation_data/
+│  │  ├─ domain/      [core] bar.py · tick.py
+│  │  ├─ wire/        [core] base.py · el_subscriber.py
+│  │  ├─ aggregation/ [app]  bar_aggregator · session · snapshot
+│  │  ├─ storage/     [app]  bar_writer · tick_writer · history_store · resampler
+│  │  ├─ sinks/       [app]  base · pipeline · registry · parquet · memory · callback
+│  │  ├─ runtime/     [app]  config · ingestion · main
+│  │  └─ tools/       [app]  audit_bar_cache · clear_bar_cache
+│  ├─ scripts/                           　 9 支 Parquet 維運腳本
+│  └─ tests/
+│     └─ conformance/                     　 對 contract/fixtures 跑驗證
 │
 ├─ docs/
-│  ├─ architecture.md                    ★ 本文
-│  ├─ design.md                          ← TA/docs/design.md 的 provider 段落
-│  │                                     　 （§3.1–3.4 · §5；全文 1473 行，需節選）
-│  ├─ benchmarks.md                      ← 待評估是否 provider 相關
-│  └─ migration/
-│     └─ tradingagent-submodule.md       ★ 消費端遷移筆記
+│  ├─ architecture.md                     　 本文
+│  └─ migration/tradingagent-submodule.md 　 消費端遷移筆記
 │
-├─ .github/                              （現有）路徑需隨 bindings/ 更新
-│  ├─ dependabot.yml
-│  └─ workflows/{ci.yml, release.yml}
-│
-├─ .claude/ · .gitignore · .gitmodules   （現有）
-├─ CHANGELOG.md · CLAUDE.md · CONTRIBUTING.md · LICENSE · SECURITY.md   （現有）
-└─ README.md · README.zh-TW.md           （現有）改寫：主角是 contract，非 Python
+├─ .ruff.toml                            　 僅為 repo 根的防護，見 §3.4
+├─ .github/{dependabot.yml, workflows/{ci.yml, release.yml}}
+├─ .claude/ · .gitignore · .gitmodules
+├─ CHANGELOG.md · CLAUDE.md · CONTRIBUTING.md · LICENSE · SECURITY.md
+└─ README.md · README.zh-TW.md            　 主角是 contract，非 Python
 ```
+
+**與原規劃的差異**（刻意為之，理由記於各處）：
+
+| 規劃過但沒做 | 為何 |
+| --- | --- |
+| 搬入 `wire/webapi.py` | 那是 36 行全 `NotImplementedError` 的 stub，唯一作用是讓 Protocol 看起來有兩個實作。意圖已由 `wire/base.py` 的 docstring 記載 |
+| 建立 `docs/design.md` | 消費端那份 1473 行文件是用它的視角寫的，且 §5 已與實作脫節。屬契約的內容改為萃取進 `contract/` |
+| `config/` 留在 repo 根 | 打包後端無法引用專案根之上，見 §3.3 |
 
 ### 3.1 各層歸屬判準
 
@@ -358,6 +359,11 @@ protocol」，但目前沒有任何地方記錄它們的對應關係：
 下圖的**箭頭一律表示「依賴」**（`A --> B` 讀作「A import B」），邊取自實際 import 關係。
 
 ```mermaid
+---
+config:
+  flowchart:
+    defaultRenderer: elk
+---
 flowchart TB
     subgraph CORE["core — 每個語言 binding 都必須有"]
         WIRE["wire/　（現 providers/）<br/>ZMQ frame → 型別化物件"]
@@ -429,6 +435,11 @@ dp **內部**給兩種 TradeStation 接入方式（EL bridge / 未來 WebAPI）�
 讓「多語言 subscriber」從口號變成可驗證的機制。
 
 ```mermaid
+---
+config:
+  flowchart:
+    defaultRenderer: elk
+---
 flowchart LR
     TH["test_harness.exe<br/>--mode smoke/stress/multithread"]
     REC["simple_sub.py --record<br/>（不依賴 tradestation_data）"]
@@ -468,6 +479,11 @@ flowchart LR
 **契約由消費端定義，dp 靠 structural typing 滿足它。**
 
 ```mermaid
+---
+config:
+  flowchart:
+    defaultRenderer: elk
+---
 flowchart TB
     subgraph CONSUMER["消費端 repo"]
         PROTO["MarketDataSource (Protocol)<br/>★ 契約在這裡定義"]

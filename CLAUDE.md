@@ -4,51 +4,86 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project shape
 
-Pure-Python data pipeline for a TradeStation EasyLanguage feed. The C++ DLL (built in a separate parent repo) publishes ticks and 1-min bars over ZeroMQ; this project is the Python side that subscribes, aggregates, and **fans the events out through a pluggable sink pipeline** (Parquet by default, but anything implementable). Offline scripts under `scripts/` then verify, dedupe, aggregate, and back-fill the resulting Parquet store. **No strategy / broker / risk wiring lives here** — the runtime is data-collection-only.
+**The product is the wire protocol, not the Python package.** TradeStation → an
+EasyLanguage indicator → a C++ bridge DLL → ZeroMQ PUB. Any language can subscribe;
+Python is the reference binding and the template for the next one.
 
-- Python ≥ 3.11, managed with **uv** (`pyproject.toml` + `uv.lock`).
-- Package: `tradestation_data` under `src/` (src layout). Console script: `tradestation-data-ingest` → `tradestation_data.runtime.main:main`.
-- Distributed via pip / uv / poetry — installable from PyPI (after first publish) or directly from the GitHub URL. Build backend: hatchling.
-- README is split: `README.md` (English, primary; what PyPI shows) and `README.zh-TW.md` (繁體中文). Architecture diagram in the README is Mermaid; the ASCII diagram in this file is kept because Claude reads the file as plain text.
-- All wrapper scripts in `scripts/` shell out to `uv run …` via `scripts/_common.py`; run them with plain `python scripts/<name>.py` and they re-enter the project venv.
+```
+contract/            wire spec, semantics, conformance fixtures   <- source of truth
+EL/                  EasyLanguage exporter indicator
+cpp/                 bridge DLL (Win32 x86) + standalone test harness
+bindings/python/     reference binding: ingestion runtime, sinks, Parquet store
+docs/                architecture.md, migration/
+```
+
+**Rules that live only inside a binding are bugs.** They get missed by the next
+implementation — this repo has already had a spec drift into describing fields the DLL
+no longer emitted, unnoticed, because nothing checked. Anything a second binding would
+have to guess belongs in `contract/semantics.md`, with a fixture.
+
+- Wire v2 / DLL ABI 7 is current; v1 is superseded but **still supported** — the DLL sits
+  in the user's TradeStation install and does not update when a binding does.
+- Python ≥ 3.11, managed with **uv**. `.python-version` pins 3.12 (`requires-python` has
+  no upper bound, and a fresh sync otherwise picks a version with no pyarrow wheel).
+- Package `tradestation_data` under `bindings/python/src/`. Console script
+  `tradestation-data-ingest` → `tradestation_data.runtime.main:main`.
+- READMEs are split EN / zh-TW at the repo root and again under `bindings/python/`.
+- Wrapper scripts in `bindings/python/scripts/` shell out to `uv run` via `_common.py`.
+- `contract/tools/record.py` deliberately imports **no binding** — that independence is
+  what qualifies it to record the fixtures every binding is checked against.
+- **No strategy / broker / risk wiring lives here.** `domain/` is exactly `Tick` and
+  `Bar`: the value range of the wire. A new domain type with no counterpart on the wire
+  means scope is leaking back in.
 
 ## Commands
 
+All Python commands run from `bindings/python/`.
+
 ```powershell
-# Install
-uv sync                       # base deps
-uv sync --extra dev           # + pytest / pytest-asyncio / pytest-cov / ruff / mypy
+uv sync --extra dev
 
-# Run ingestion (DLL must already be publishing on the configured endpoint)
+# Ingestion (DLL must already be publishing)
 python scripts/run_ingestion.py
-python scripts/run_ingestion.py --sinks-config config/sinks.yaml   # use a different sink pipeline
-python scripts/run_ingestion.py --no-storage --log-level DEBUG     # smoke test (empty pipeline)
-python scripts/run_ingestion.py --print-bars 5                     # dump first N bars as the on-disk schema
+python scripts/run_ingestion.py --sinks-config config/sinks.yaml
+python scripts/run_ingestion.py --no-storage --log-level DEBUG
+python scripts/run_ingestion.py --print-bars 5
 
-# Offline pipeline tools (all are uv-run wrappers)
+# Offline Parquet tools (uv-run wrappers)
 python scripts/aggregate_parquet.py --symbol all --timeframe 5m --input data/bars/timeframe=1m --output data/bars
 python scripts/verify_parquet.py    --start-date YYYY-MM-DD --end-date YYYY-MM-DD
 python scripts/imputation_parquet.py --start-date YYYY-MM-DD --end-date YYYY-MM-DD --dry-run
-python scripts/audit_bar_cache.py
-python scripts/clear_bar_cache.py
-python scripts/dedupe_bars.py
-python scripts/dump_parquet.py
-python scripts/simple_sub.py        # raw ZMQ wire-format inspector
-
-# Build / smoke-test the wheel
-uv build                                                            # → dist/*.whl + *.tar.gz
-uv run --isolated --no-project --with dist/*.whl tradestation-data-ingest --help
+python scripts/audit_bar_cache.py ; python scripts/clear_bar_cache.py
+python scripts/dedupe_bars.py ; python scripts/dump_parquet.py
 
 # Tests / lint / types
-uv run pytest                                       # full suite (asyncio_mode=auto), 272 tests
-uv run pytest tests/test_bar_aggregator.py          # one file
-uv run pytest tests/test_bar_aggregator.py::test_x  # one test
-uv run pytest --cov                                 # coverage (config in pyproject.toml)
+uv run pytest                                  # full suite, asyncio_mode=auto
+uv run pytest tests/conformance                # contract fixtures only
 uv run ruff check . ; uv run ruff format .
-uv run mypy                                         # strict mode on src/
+uv run mypy                                    # strict on src/
+
+uv build
 ```
 
-Pytest is configured (in `pyproject.toml`) with `pythonpath = ["src"]`, `asyncio_mode = "auto"`, and `filterwarnings = ["error", "ignore::DeprecationWarning"]` — **a new warning will fail the build**; fix the cause, don't broaden the filter.
+C++ and wire inspection, from the repo root:
+
+```powershell
+cd cpp
+cmake --preset x86-release          # or x86-release-vs2022
+cmake --build --preset x86-release
+
+# Drive the DLL without TradeStation, then watch or record the wire.
+# Leave enough warmup for the subscriber to attach — PUB drops with no subscriber.
+cpp/build/x86-release/Release/TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
+python contract/tools/record.py
+python contract/tools/record.py --count 6 --quiet --record contract/fixtures/smoke.jsonl
+```
+
+Harness modes: `smoke` (3 topics + one bar), `noquote` (bid/ask absent, the
+history-replay shape), `stress`, `multithread`.
+
+Pytest is configured with `pythonpath = ["src"]`, `asyncio_mode = "auto"`, and
+`filterwarnings = ["error", ...]` — **a new warning fails the build**; fix the cause
+rather than widening the filter.
 
 ## Architecture
 
@@ -104,10 +139,28 @@ Hive-partitioned Parquet under `data/`. `ParquetBarSink` / `ParquetTickSink` pro
 
 ### Timestamps and sessions
 
-- The EL string `ts_str` (format `yyyy-MM/dd-HH:mm:ss`, 24-hour) is **authoritative** for `Bar.bucket_start` and is parsed as `America/New_York`, then converted to UTC. `ts_utc` from the DLL is only a sanity cross-check (a >5s drift is logged, not raised). 24-hour is deliberate — the old `hh:mm:ss tt` format broke on zh-TW Windows hosts where `FormatTime("tt")` emits localised AM/PM.
+**These are contract rules, not local choices — `contract/semantics.md` is authoritative
+and every binding must agree. Change them there first.**
+
+- `ts_str` (`yyyy-MM/dd-HH:mm:ss`, 24-hour) is **authoritative** for `Bar.bucket_start`:
+  parsed as `America/New_York`, converted to UTC, then **floored to the minute**. The
+  flooring is invisible in normal operation because EL sends aligned times; the smoke
+  fixture catches it because the harness reuses a tick's `:45` timestamp. `ts_utc` from
+  the DLL is only a cross-check (>5s drift logged, never raised). 24-hour is deliberate —
+  `hh:mm:ss tt` broke on zh-TW Windows hosts where `FormatTime("tt")` emits localised
+  AM/PM.
+- Bars are **left-labelled**: `bucket_start` covers `[t, t+step)`, so an RTH 1m session
+  runs 09:30…15:59, not 09:31…16:00.
 - Ticks use the DLL's receive-side `ts` (UTC epoch) as authoritative.
-- `aggregation/session.py` owns session-edge logic. US equity session = 09:30–16:00 ET; bars before 04:00 ET belong to the *previous* session. Per-symbol retention via `SessionPolicy`: `breadth` indices reset daily, everything else retains 60 min of pre-market by default. Defaults come from `symbols.yaml::category`; per-symbol overrides are read in `runtime/config.py`.
-- Index/breadth symbols (`$TICK`, `$ADD`, `$VOLD`, `$TRIN`, `$PCVA`, `VXX` by default in `DEFAULT_INDEX_SYMBOLS`) have no bid/ask/volume — the provider forces `bid=ask=None` and `volume==0`.
+- `aggregation/session.py` owns session-edge logic. US equity session = 09:30–16:00 ET;
+  bars before 04:00 ET belong to the *previous* session. Per-symbol retention via
+  `SessionPolicy`: `breadth` indices reset daily, everything else retains 60 min of
+  pre-market. Defaults from `symbols.yaml::category`, overrides in `runtime/config.py`.
+- **Quotes are absent in two different ways.** EL's `InsideBid`/`InsideAsk` return 0 when
+  there is no quote (historical replay, non-live mode, breadth indices); the DLL
+  normalises non-positive values to JSON `null` on wire v2. Separately, index/breadth
+  symbols (`DEFAULT_INDEX_SYMBOLS`) may carry live numbers that still mean nothing, and
+  the binding invalidates those. `_quote_or_none()` handles both, plus v1's bare `0.0`.
 
 ### Windows-specific event loop
 
@@ -128,11 +181,14 @@ pyzmq's asyncio integration uses `loop.add_reader()`, which the default Windows 
 
 - `tests/conftest.py` injects `tests/_sink_fixtures.py` into `sys.modules` under the bare name `_sink_fixtures` at collection time, because `tests/` is *not* on `pythonpath` (only `src/` is). The sink-registry tests use that name in their `module:attr` target strings to verify dynamic instantiation without the fixture module needing to be installable. New registry tests should follow the same convention rather than re-add `tests/` to the path.
 - `tests/conftest.py::zmq_inproc_bus` uses `inproc://` for asyncio ZMQ socket tests so there's no network handshake; teardown is `ctx.destroy(linger=0)` because plain `ctx.term()` occasionally segfaults on Windows + Python 3.13 + pyzmq 27.
+- **`inproc://` requires both ends to share one `zmq.Context`.** Anything creating its own context (`contract/tools/record.py` calls `zmq.Context.instance()`) cannot be driven over that fixture and will block forever. PUB also drops whatever is sent before a subscriber exists, so a test cannot publish first and connect after. Test such tools through an extracted pure function instead — that is why `record.fixture_entry()` exists.
+- `tests/conformance/` replays `contract/fixtures/` against this binding. Expectations there are derived from `contract/semantics.md` **by hand** and must never be regenerated from this code: expectations produced by the code under test only prove it agrees with itself. When conformance fails, decide which side is wrong before touching either — twice so far the spec was.
 
 ## Conventions
 
-- Lint/format: ruff (line length 100, target py311; rules `E,F,W,I,N,UP,B,SIM,RUF`; tests get `N802/N803` relaxed). `cpp/build-tools` and `cpp/vcpkg_installed` are explicitly excluded.
+- Lint/format: ruff (line length 100, target py311; rules `E,F,W,I,N,UP,B,SIM,RUF`; tests get `N802/N803` relaxed). Run it from `bindings/python/`. The repo-root `.ruff.toml` exists only to stop a top-level `ruff check .` from falling back to defaults and rewriting the vendored vcpkg checkout — which has happened.
 - Types: mypy strict on `src/`; `tests/` is excluded.
+- C++ builds Win32 (x86) only — TradeStation is a 32-bit process. `DEFINE_SYMBOL` on the `TS2Python` target supplies `TS2PYTHON_EXPORTS`; CMake's automatic `<target>_EXPORTS` differs in case and leaves the header on the `dllimport` branch.
 - Coverage: branch coverage on `src/tradestation_data`, excludes match `pragma: no cover`, `raise NotImplementedError`, `if TYPE_CHECKING`, ellipsis-only stubs.
 - Dataclasses: use `slots=True` (and `frozen=True` for value types) — the codebase is consistent on this.
 - Logging: stdlib `logging` everywhere, with structured kwargs via `extra={...}`. `runtime/main.py` ships both a plain formatter (`_ExtraDumpFilter` flattens `extra` into the message tail) and `--log-json` (`_JsonFormatter`). Keep new log sites in the same shape. Sink-related events use the conventions `sink_on_tick_failed`, `sink_on_bar_failed`, `sink_flush_failed`, `sink_close_failed`, `sinks_loaded`, `sinks_config_invalid` — match these when adding new sink paths.

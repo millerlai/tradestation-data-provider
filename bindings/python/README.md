@@ -1,7 +1,7 @@
 # tradestation-data-provider
 
 [![CI](https://github.com/millerlai/tradestation-data-provider/actions/workflows/ci.yml/badge.svg)](https://github.com/millerlai/tradestation-data-provider/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/millerlai/tradestation-data-provider/blob/main/pyproject.toml)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/millerlai/tradestation-data-provider/blob/main/bindings/python/pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![Checked with mypy](https://img.shields.io/badge/mypy-strict-blue)](https://mypy-lang.org/)
@@ -10,7 +10,11 @@
 
 A pure-Python data pipeline that subscribes to a TradeStation EasyLanguage feed (over a C++/ZeroMQ bridge) and routes ticks and 1-minute bars to a **pluggable set of output sinks** — Parquet, in-memory, user callbacks, or anything you implement.
 
-The C++ DLL that publishes the feed lives in [`cpp/`](cpp/) and is built out-of-band; this repo is the Python consumer. **No strategy / broker / risk wiring lives here** — the runtime is data-collection-only.
+This is the **reference binding** for the wire protocol defined in [`contract/`](../../contract/) — one subscriber among the languages that repo supports. The EasyLanguage indicator and the C++ DLL that publish the feed live in [`EL/`](../../EL/) and [`cpp/`](../../cpp/).
+
+**No strategy / broker / risk wiring lives here** — the runtime is data-collection-only.
+
+> Before changing how anything on the wire is parsed, read [`contract/semantics.md`](../../contract/semantics.md). Rules that live only in this package are the ones the next binding gets wrong.
 
 ## Why use it
 
@@ -18,6 +22,7 @@ The C++ DLL that publishes the feed lives in [`cpp/`](cpp/) and is built out-of-
 - **Defaults that match the historical layout.** Built-in `ParquetBarSink` / `ParquetTickSink` keep the same Hive-partitioned schema as before.
 - **Receive ticks/bars in your own code.** `CallbackSink` lets you register Python functions per symbol or catch-all, dispatched synchronously from the ingest loop.
 - **Battery-included tooling.** Aggregate, verify, audit, dedupe, and back-fill the resulting Parquet store with the scripts under [`scripts/`](scripts/).
+- **Checked against the shared contract.** `tests/conformance/` replays recorded DLL output from [`contract/fixtures/`](../../contract/fixtures/) and asserts this binding matches expectations derived independently of it.
 
 ## Architecture
 
@@ -231,23 +236,29 @@ python ../../contract/tools/record.py                            # raw ZMQ wire 
 ## Project layout
 
 ```
-tradestation-data-provider/
+bindings/python/                   # this binding; repo root is two levels up
 ├── pyproject.toml
-├── LICENSE
+├── .python-version                # 3.12, matching the CI matrix
+├── LICENSE                        # copy — packaging cannot reach above this dir
 ├── config/
-│   ├── sinks.yaml             # pluggable sink pipeline
-│   └── symbols.yaml           # symbol universe + per-symbol session policy
-├── scripts/                   # human-facing CLI wrappers (see above)
-├── src/tradestation_data/     # the package
-│   ├── domain/                # Bar / Tick / Order / Position
-│   ├── aggregation/           # BarAggregator / MarketSnapshot
-│   ├── wire/                  # TradeStationELProvider (ZMQ SUB) — core binding
-│   ├── storage/               # BarWriter / TickWriter / HistoryStore / Resampler
-│   ├── sinks/                 # Sink protocol, pipeline, registry, built-ins
-│   ├── runtime/               # IngestionRuntime + CLI entry
-│   └── tools/                 # audit / clear cache helpers used by scripts
-└── tests/                     # 272 unit + integration tests
+│   ├── sinks.yaml                 # pluggable sink pipeline (module:attr paths)
+│   └── symbols.yaml               # symbol universe + per-symbol session policy
+├── scripts/                       # human-facing CLI wrappers (see above)
+├── src/tradestation_data/
+│   ├── domain/                    # Bar / Tick — the value range of the wire
+│   ├── wire/                      # frame decoding, gap detection  [core]
+│   ├── aggregation/               # BarAggregator / MarketSnapshot   [app]
+│   ├── storage/                   # BarWriter / TickWriter / HistoryStore / Resampler
+│   ├── sinks/                     # Sink protocol, pipeline, registry, built-ins
+│   ├── runtime/                   # IngestionRuntime + CLI entry
+│   └── tools/                     # audit / clear cache helpers used by scripts
+└── tests/
+    └── conformance/               # replays contract/fixtures/ against this binding
 ```
+
+`domain/` and `wire/` are the part any language binding must reimplement;
+everything else is this reference application. See
+[`docs/architecture.md`](../../docs/architecture.md) §5.
 
 ## Release flow (maintainers)
 
