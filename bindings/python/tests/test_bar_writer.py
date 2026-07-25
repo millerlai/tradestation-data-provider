@@ -156,7 +156,6 @@ def test_writer_partitions_on_the_bar_timeframe_not_its_own(tmp_path) -> None:
             low=0.5,
             close=1.5,
             volume=10,
-            vwap=1.2,
             tick_count=3,
             source="tradestation_el",
             timeframe=tf,

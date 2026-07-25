@@ -9,22 +9,27 @@ changes; patch releases (`0.x.Y`) will not.
 
 ## [Unreleased]
 
-## [0.2.0] — 2026-05-21
-
-### Removed
-- **BREAKING:** The `vwap` field is gone from every layer of the pipeline. `Bar` no longer
-  carries it, `BarAggregator` no longer accumulates `pv_sum`, the EL provider no longer
-  emits a synthesised value, and `BAR_SCHEMA` / `_polars_bars_to_arrow` /
-  `Resampler` SQL no longer write or compute it. Downstream consumers should derive VWAP
-  from raw ticks (`price * volume / sum(volume)`) if needed — the synthesised
-  `close`-as-proxy that lived on bars added no information over what `close` already
-  carries. Existing `bars.parquet` files written by `0.1.x` remain readable column-wise,
-  but `BarWriter` / `HistoryStore` will reject them via schema mismatch on the next write
-  pass; rebuild the bar cache from ticks (or delete and re-collect) when upgrading.
-
-## [0.1.1] — 2026-05-20
-
 ### Added
+- **Multiple timeframes: tick · 1m · 5m · 15m · 30m · 1h · 1d.** Bars previously could
+  only be 1-minute, because the wire had no field to say otherwise — `kind: "bar_1m"`
+  bound the shape and the interval into one string. Wire v3 splits them into `kind`
+  (tick/bar) and `tf`, so adding an interval is a new value rather than a change to every
+  binding's dispatch. `Bar` gains a `timeframe` field and `BarWriter` partitions on it,
+  not on its own constructor argument.
+- **Daily bars are taken natively rather than derived.** TradeStation's daily bar carries
+  the exchange's official OHLC and is split/dividend adjusted; summing ticks reproduces
+  neither, so a derived daily is an approximation wearing the same shape. Intraday runs
+  the other way — tick aggregation is reproducible and auditable, and needs one chart.
+- **Bar provenance.** Computed bars are stamped `derived:<origin>`; `Resampler` used to
+  copy the source through with `first(source)`, leaving native and derived
+  indistinguishable on disk. `HistoryStore` now refuses to overwrite a partition holding
+  native bars, and treats an unreadable partition as native.
+- New DLL export `EL_PublishBar(symbol, ts, bar_type, bar_interval, ...)`, mapping
+  EasyLanguage's `BarType`/`BarInterval` to a wire timeframe in `wire_timeframe()`. It
+  returns the new code `-5` rather than guessing at an interval it cannot name.
+  `EL_PublishTickEx` stays, publishing as 1m: under `__stdcall` a `DefineDLLFunc` whose
+  argument count stops matching corrupts the stack, so it could not simply grow two
+  parameters, and scripts written against an older DLL keep working.
 - **`contract/` — a language-neutral wire specification, now the source of truth for this
   repo.** Holds `v1/` and `v2/` JSON Schemas, `semantics.md` (the rules a schema cannot
   express: timestamp authority, left-labelled and minute-floored `bucket_start`, quote
@@ -46,15 +51,6 @@ changes; patch releases (`0.x.Y`) will not.
 - Test harness gains `--mode noquote`, reproducing the shape TradeStation emits outside
   live mode.
 - CMake presets for Visual Studio 2026 alongside 2022.
-- CI workflow (`.github/workflows/ci.yml`) running ruff (lint + format), mypy strict, and
-  pytest across Python 3.11 / 3.12 / 3.13 on Ubuntu + Windows; separate `build` job
-  smoke-tests the wheel.
-- `__version__` exposed at the package root via `importlib.metadata`, so the package
-  version is a single source of truth (`pyproject.toml`).
-- `types-PyYAML` added to the `dev` extra so mypy can type-check yaml usage.
-- Mypy override scoped to the three storage modules that wrap pyarrow's untyped Parquet
-  API (`no-untyped-call`); the rest of `src/` stays under full strict rules.
-- This `CHANGELOG.md`.
 
 ### Changed
 - **BREAKING (data): resampled buckets are anchored to the trading session, not
@@ -102,12 +98,14 @@ changes; patch releases (`0.x.Y`) will not.
   a data provider does not know what you hold.
 - `bindings/python/.python-version` pins 3.12 to match the CI matrix. `requires-python`
   has no upper bound, so a fresh `uv sync` had picked 3.14, for which pyarrow has no wheel.
-- Dependency declarations now carry upper bounds (`pyzmq<28`, `polars<2`, `pyarrow<22`,
-  `pyyaml<7`, `structlog<26`, `duckdb<2`, `pydantic<3`) to guard installs against
-  accidental major-version breakage. Caps are intentionally generous; revisit them at
-  each major release.
 
 ### Fixed
+- **A 5-minute chart silently corrupted the 1-minute partition.** `BarType = 1` covers
+  every intraday minute chart — 1/5/15/60-minute are all `BarType 1`, told apart only by
+  `BarInterval`, which the indicator never read — and the DLL stated `bar_1m`
+  unconditionally. Bars from a 5-minute chart were written to `timeframe=1m`, and the
+  resampler then derived "5m" from data that was already 5m. Nothing reported an error.
+  The indicator now forwards `BarInterval` and the DLL refuses intervals it cannot name.
 - `verify_parquet.py::_expected_bars()` produced right-labelled bar ends (09:31..16:00)
   where `BAR_SCHEMA.bucket_start` is left-labelled (09:30..15:59), so a complete session
   was reported as missing its first bar and carrying an extra last one.
@@ -120,6 +118,40 @@ changes; patch releases (`0.x.Y`) will not.
 - Repo-root `.ruff.toml` excluding `cpp/`. After the layout change there is no Python
   config at the top of the tree, so `ruff check .` from there fell back to defaults and
   rewrote the vendored vcpkg checkout — which had already happened once.
+
+## [0.2.0] — 2026-05-21
+
+### Removed
+- **BREAKING:** The `vwap` field is gone from every layer of the pipeline. `Bar` no longer
+  carries it, `BarAggregator` no longer accumulates `pv_sum`, the EL provider no longer
+  emits a synthesised value, and `BAR_SCHEMA` / `_polars_bars_to_arrow` /
+  `Resampler` SQL no longer write or compute it. Downstream consumers should derive VWAP
+  from raw ticks (`price * volume / sum(volume)`) if needed — the synthesised
+  `close`-as-proxy that lived on bars added no information over what `close` already
+  carries. Existing `bars.parquet` files written by `0.1.x` remain readable column-wise,
+  but `BarWriter` / `HistoryStore` will reject them via schema mismatch on the next write
+  pass; rebuild the bar cache from ticks (or delete and re-collect) when upgrading.
+
+## [0.1.1] — 2026-05-20
+
+### Added
+- CI workflow (`.github/workflows/ci.yml`) running ruff (lint + format), mypy strict, and
+  pytest across Python 3.11 / 3.12 / 3.13 on Ubuntu + Windows; separate `build` job
+  smoke-tests the wheel.
+- `__version__` exposed at the package root via `importlib.metadata`, so the package
+  version is a single source of truth (`pyproject.toml`).
+- `types-PyYAML` added to the `dev` extra so mypy can type-check yaml usage.
+- Mypy override scoped to the three storage modules that wrap pyarrow's untyped Parquet
+  API (`no-untyped-call`); the rest of `src/` stays under full strict rules.
+- This `CHANGELOG.md`.
+
+### Changed
+- Dependency declarations now carry upper bounds (`pyzmq<28`, `polars<2`, `pyarrow<22`,
+  `pyyaml<7`, `structlog<26`, `duckdb<2`, `pydantic<3`) to guard installs against
+  accidental major-version breakage. Caps are intentionally generous; revisit them at
+  each major release.
+
+### Fixed
 - Cleared all 12 mypy strict errors that the project had been silently carrying:
   - `runtime/config.py:7` and `sinks/registry.py:9` — resolved by `types-PyYAML`.
   - `storage/{bar_writer,tick_writer,history_store}.py` — pyarrow override above.
