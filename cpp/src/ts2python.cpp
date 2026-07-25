@@ -22,7 +22,7 @@
 
 namespace {
 
-constexpr int kDllVersion = 7;
+constexpr int kDllVersion = 8;
 
 std::mutex       g_mutex;
 // Raw pointers, never destroyed implicitly. See pin_self_module_once()
@@ -89,6 +89,34 @@ void format_quote(char* out, std::size_t n, double v) {
     } else {
         std::snprintf(out, n, "%.6f", v);
     }
+}
+
+// ---- timeframe ------------------------------------------------------------
+//
+// Maps EasyLanguage's BarType / BarInterval onto the wire's `tf` vocabulary,
+// which is the same set of strings the storage layer partitions on.
+//
+// The mapping lives here, not in EasyLanguage, for the same reason quote
+// normalisation does: there is one C ABI and many possible callers, and a
+// rule re-derived per caller is a rule that eventually disagrees with itself.
+//
+// Returns nullptr for anything with no wire representation. Callers must
+// treat that as a hard error rather than guessing — BarType 1 covers every
+// intraday minute chart, so a wrong guess files 5-minute bars under 1m and
+// nothing downstream can tell.
+const char* wire_timeframe(int bar_type, int bar_interval) {
+    if (bar_type == 1) {           // intraday, BarInterval in minutes
+        switch (bar_interval) {
+            case 1:  return "1m";
+            case 5:  return "5m";
+            case 15: return "15m";
+            case 30: return "30m";
+            case 60: return "1h";
+            default: return nullptr;
+        }
+    }
+    if (bar_type == 2 && bar_interval == 1) return "1d";   // daily
+    return nullptr;                                        // weekly/monthly/P&F/...
 }
 
 // Pin the DLL into the host process's address space on first successful
@@ -246,7 +274,7 @@ TS2P_API int TS2P_CALL EL_PublishTick(
         char payload[544];
         const int n = std::snprintf(
             payload, sizeof(payload),
-            "{\"v\":2,\"kind\":\"tick\",\"seq\":%llu,\"sid\":%llu,"
+            "{\"v\":3,\"kind\":\"tick\",\"seq\":%llu,\"sid\":%llu,"
             "\"ts\":%.6f,\"ts_utc\":%.6f,\"ts_str\":\"%s\","
             "\"px\":%.6f,\"vol\":%.6f,"
             "\"bid\":%s,\"ask\":%s,\"tc\":%.0f}",
@@ -271,9 +299,11 @@ TS2P_API int TS2P_CALL EL_PublishTick(
     }
 }
 
-TS2P_API int TS2P_CALL EL_PublishTickEx(
+// Shared bar publisher. `tf` must already be a valid wire timeframe.
+static int publish_bar_impl(
     const char* symbol,
     const char* el_timestamp,
+    const char* tf,
     double      bar_open,
     double      bar_high,
     double      bar_low,
@@ -299,13 +329,14 @@ TS2P_API int TS2P_CALL EL_PublishTickEx(
         format_quote(bid_s, sizeof(bid_s), bid);
         format_quote(ask_s, sizeof(ask_s), ask);
 
-        char payload[608];
+        char payload[640];
         const int n = std::snprintf(
             payload, sizeof(payload),
-            "{\"v\":2,\"kind\":\"bar_1m\",\"seq\":%llu,\"sid\":%llu,"
+            "{\"v\":3,\"kind\":\"bar\",\"tf\":\"%s\",\"seq\":%llu,\"sid\":%llu,"
             "\"ts\":%.6f,\"ts_utc\":%.6f,\"ts_str\":\"%s\","
             "\"o\":%.6f,\"h\":%.6f,\"l\":%.6f,\"c\":%.6f,"
             "\"vol\":%.6f,\"bid\":%s,\"ask\":%s,\"tc\":%.0f}",
+            tf,
             static_cast<unsigned long long>(seq),
             static_cast<unsigned long long>(g_sid),
             recv_unix_seconds(), ts_utc_epoch, ts_str,
@@ -326,6 +357,53 @@ TS2P_API int TS2P_CALL EL_PublishTickEx(
     } catch (...) {
         return -2;
     }
+}
+
+TS2P_API int TS2P_CALL EL_PublishBar(
+    const char* symbol,
+    const char* el_timestamp,
+    int         bar_type,
+    int         bar_interval,
+    double      bar_open,
+    double      bar_high,
+    double      bar_low,
+    double      bar_close,
+    double      volume,
+    double      bid,
+    double      ask,
+    double      tick_count)
+{
+    const char* tf = wire_timeframe(bar_type, bar_interval);
+    // No guessing. An unmappable interval published as some default would
+    // land in the wrong partition, and nothing downstream could detect it.
+    if (tf == nullptr) return -5;
+    return publish_bar_impl(symbol, el_timestamp, tf,
+                            bar_open, bar_high, bar_low, bar_close,
+                            volume, bid, ask, tick_count);
+}
+
+// Retained so an EL script written against an older DLL keeps working.
+// Its signature is part of the ABI: with __stdcall, a DefineDLLFunc whose
+// argument count no longer matches corrupts the stack, so this cannot
+// simply grow two parameters.
+//
+// It can only ever have meant 1-minute — the wire had no way to say
+// otherwise. New scripts should call EL_PublishBar.
+TS2P_API int TS2P_CALL EL_PublishTickEx(
+    const char* symbol,
+    const char* el_timestamp,
+    double      bar_open,
+    double      bar_high,
+    double      bar_low,
+    double      bar_close,
+    double      volume,
+    double      bid,
+    double      ask,
+    double      tick_count)
+{
+    return publish_bar_impl(symbol, el_timestamp, "1m",
+                            bar_open, bar_high, bar_low, bar_close,
+                            volume, bid, ask, tick_count);
 }
 
 TS2P_API int TS2P_CALL EL_Shutdown(void) {

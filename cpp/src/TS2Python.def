@@ -12,6 +12,7 @@ LIBRARY TS2Python
 EXPORTS
     EL_Init
     EL_PublishTick
+    EL_PublishBar
     EL_PublishTickEx
     EL_Shutdown
     EL_DllVersion

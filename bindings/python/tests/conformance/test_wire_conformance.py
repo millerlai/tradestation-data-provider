@@ -74,6 +74,9 @@ def test_every_field_matches_the_contract(case: str) -> None:
             assert event.close == pytest.approx(want["close"]), where
             assert event.volume == pytest.approx(want["volume"]), where
             assert event.tick_count == want["tick_count"], where
+            # The interval the bar covers decides its storage partition, so a
+            # wrong one is silent corruption rather than a cosmetic slip.
+            assert event.timeframe == want.get("timeframe", "1m"), where
             # bid/ask are deliberately not asserted for bars: the wire carries
             # them on bar_1m, but this binding's Bar does not model them. The
             # expectation files still record what the wire said, so a binding

@@ -133,3 +133,39 @@ def test_writer_partitions_by_et_date_not_utc(tmp_path: Path) -> None:
     utc_partition = root / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
     assert et_partition.exists()
     assert not utc_partition.exists()
+
+
+def test_writer_partitions_on_the_bar_timeframe_not_its_own(tmp_path) -> None:
+    """The bar decides the partition; the constructor arg is only a default.
+
+    Routing on the writer's setting instead would file every interval under
+    whatever it was configured with — the exact corruption `tf` exists to
+    stop.
+    """
+    from tradestation_data.domain.bar import Bar
+
+    root = tmp_path / "bars"
+    t = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)
+
+    def _bar(tf: str) -> Bar:
+        return Bar(
+            symbol="SPY",
+            bucket_start=t,
+            open=1.0,
+            high=2.0,
+            low=0.5,
+            close=1.5,
+            volume=10,
+            vwap=1.2,
+            tick_count=3,
+            source="tradestation_el",
+            timeframe=tf,
+        )
+
+    with BarWriter(root, timeframe="1m") as w:
+        w.write(_bar("1m"))
+        w.write(_bar("5m"))
+        w.write(_bar("1d"))
+
+    written = sorted(p.parent.parent.parent.name for p in root.rglob("bars.parquet"))
+    assert written == ["timeframe=1d", "timeframe=1m", "timeframe=5m"]

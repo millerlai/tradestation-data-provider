@@ -13,15 +13,21 @@ _ET_TZ: ZoneInfo = ZoneInfo("America/New_York")
 @dataclass(frozen=True, slots=True)
 class Bar:
     """
-    A 1-minute OHLCV bar aggregated from ticks.
-
-    See docs/design.md §3.6.4 for aggregation rules.
+    An OHLCV bar.
 
     `bucket_start` is UTC, aligned to the minute (second=0, microsecond=0).
     `bucket_start_et` is the same instant expressed in America/New_York and
     is the authoritative basis for session-time decisions downstream.
     `source` is either the original provider's source_id or "empty" for
     wall-clock-emitted empty bars.
+
+    `timeframe` names the interval this bar covers ("1m", "5m", ... ). It
+    defaults to "1m" because that is what the tick aggregator produces and
+    what wire v2 could express; a bar decoded from wire v3 carries whatever
+    the publisher said. It is not a cosmetic label — the storage layer
+    partitions on it, so a bar whose timeframe is wrong is filed under the
+    wrong interval and silently corrupts anything derived from that
+    partition. Bucket alignment per interval is contract/semantics.md §2.2.
     """
 
     symbol: str
@@ -33,6 +39,7 @@ class Bar:
     volume: int
     tick_count: int
     source: str
+    timeframe: str = "1m"
 
     @property
     def bucket_start_et(self) -> datetime:

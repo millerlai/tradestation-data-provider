@@ -30,11 +30,20 @@ DEFAULT_INDEX_SYMBOLS: frozenset[str] = frozenset(
     {"$TICK", "$ADD", "$VOLD", "$TRIN", "$PCVA", "VXX"}
 )
 
-# Wire versions this binding understands. v1 has no seq/sid and therefore no
-# gap detection; v2 adds both. Reading a version above the maximum is an
-# error rather than a guess — an unknown high version may have changed field
-# semantics we would silently misread. See ../../../../contract/compat.md.
-SUPPORTED_WIRE_VERSIONS: frozenset[int] = frozenset({1, 2})
+# Wire versions this binding understands.
+#   v1  no seq/sid, so no gap detection
+#   v2  adds seq/sid, and nullable bid/ask
+#   v3  adds `tf`; `kind` narrows to tick/bar with the interval in its own field
+# Reading a version above the maximum is an error rather than a guess — an
+# unknown high version may have changed field semantics we would silently
+# misread. See ../../../../contract/compat.md.
+
+# Timeframes this binding will accept on the wire. Deliberately the same
+# vocabulary the storage layer partitions on: a `tf` we cannot place is a
+# frame we must not file, because filing it under a default would put bars of
+# one interval into another interval's partition.
+SUPPORTED_TIMEFRAMES: frozenset[str] = frozenset({"1m", "5m", "15m", "30m", "1h", "1d"})
+SUPPORTED_WIRE_VERSIONS: frozenset[int] = frozenset({1, 2, 3})
 
 
 class _SequenceTracker:
@@ -271,10 +280,17 @@ class TradeStationELProvider:
             )
 
         kind = data.get("kind", "tick")
-        if kind == "bar_1m":
-            return self._parse_bar(symbol, data)
         if kind == "tick":
             return self._parse_tick(symbol, data)
+        if kind in ("bar", "bar_1m"):
+            # v1/v2 said bar_1m and had no other option; v3 says bar and names
+            # the interval. Absent tf on a v3 frame is a publisher bug, but
+            # defaulting to 1m is the one guess that cannot invent data the
+            # older wire could not express.
+            tf = str(data.get("tf", "1m"))
+            if tf not in SUPPORTED_TIMEFRAMES:
+                raise ValueError(f"Unsupported timeframe: {tf!r}")
+            return self._parse_bar(symbol, data, tf)
         raise ValueError(f"Unknown event kind: {kind!r}")
 
     def _parse_tick(self, symbol: str, data: dict[str, Any]) -> Tick:
@@ -307,7 +323,7 @@ class TradeStationELProvider:
             source=self.source_id,
         )
 
-    def _parse_bar(self, symbol: str, data: dict[str, Any]) -> Bar:
+    def _parse_bar(self, symbol: str, data: dict[str, Any], timeframe: str = "1m") -> Bar:
         # Priority for bucket_start (UTC):
         #   1. ts_str (authoritative) — EL wall-clock string, parsed here
         #      as America/New_York. Zone-correct on any DLL host because
@@ -352,6 +368,7 @@ class TradeStationELProvider:
             volume=int(data.get("vol", 0)),
             tick_count=int(data.get("tc", 0)),
             source=self.source_id,
+            timeframe=timeframe,
         )
 
     async def close(self) -> None:

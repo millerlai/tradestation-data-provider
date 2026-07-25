@@ -13,10 +13,10 @@
 
 | 檔案 | 內容 |
 | --- | --- |
-| [`v2/envelope.md`](v2/envelope.md) | **目前版本** —— frame 結構與 payload 格式 |
-| [`v2/tick.schema.json`](v2/tick.schema.json) | `EL_PublishTick` payload |
-| [`v2/bar_1m.schema.json`](v2/bar_1m.schema.json) | `EL_PublishTickEx` payload |
-| [`v1/`](v1/) | 前一版。**仍須支援** —— 舊 DLL 可能留在使用者機器上 |
+| [`v3/envelope.md`](v3/envelope.md) | **目前版本** —— frame 結構與 payload 格式 |
+| [`v3/tick.schema.json`](v3/tick.schema.json) | `EL_PublishTick` payload |
+| [`v3/bar.schema.json`](v3/bar.schema.json) | `EL_PublishBar` payload（含 `tf`） |
+| [`v2/`](v2/) [`v1/`](v1/) | 舊版。**仍須支援** —— 舊 DLL 可能留在使用者機器上 |
 | [`semantics.md`](semantics.md) | **schema 管不到但 binding 必須一致的規則** |
 | [`error_codes.md`](error_codes.md) | DLL C ABI 回傳碼 |
 | [`compat.md`](compat.md) | DLL ABI × wire version 相容矩陣 |
@@ -32,6 +32,7 @@
 - bar 用左標籤還是右標籤
 - 哪些 symbol 的 `bid`/`ask` 該視為無效
 - 收到比預期小的 `seq` 時該不該回退期望值
+- 各 timeframe 的 bucket 錨在哪裡
 
 這些在 wire 上看不出來。一個只讀 schema 就動手寫的 binding，會產出**通過驗證但與
 其他 binding 不一致**的資料。

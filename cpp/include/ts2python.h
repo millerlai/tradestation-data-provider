@@ -32,6 +32,7 @@ extern "C" {
 //  -2  zmq send failed
 //  -3  init failed (bind / socket create)
 //  -4  invalid argument (null pointer etc.)
+//  -5  unsupported bar type / interval (no wire timeframe for it)
 
 TS2P_API int TS2P_CALL EL_Init(const char* zmq_endpoint);
 
@@ -56,6 +57,35 @@ TS2P_API int TS2P_CALL EL_PublishTick(
 TS2P_API int TS2P_CALL EL_PublishTickEx(
     const char* symbol,
     const char* el_timestamp,
+    double      bar_open,
+    double      bar_high,
+    double      bar_low,
+    double      bar_close,
+    double      volume,
+    double      bid,
+    double      ask,
+    double      tick_count);
+
+// Publish a complete OHLC bar at any supported interval.
+//
+// Supersedes EL_PublishTickEx, which could only ever mean 1-minute: the
+// wire had no field to say otherwise, so a 5-minute chart's bars were
+// indistinguishable from 1-minute ones downstream.
+//
+// bar_type / bar_interval come straight from EasyLanguage's reserved words
+// of the same name. The mapping to a wire timeframe lives here rather than
+// in EL so that every caller of this ABI agrees on it:
+//
+//   bar_type 1 (intraday), bar_interval 1/5/15/30/60  ->  1m/5m/15m/30m/1h
+//   bar_type 2 (daily),    bar_interval 1             ->  1d
+//
+// Anything else returns -5 without publishing. Guessing an interval would
+// file bars under the wrong partition, which nothing downstream can detect.
+TS2P_API int TS2P_CALL EL_PublishBar(
+    const char* symbol,
+    const char* el_timestamp,
+    int         bar_type,
+    int         bar_interval,
     double      bar_open,
     double      bar_high,
     double      bar_low,

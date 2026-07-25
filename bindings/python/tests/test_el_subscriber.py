@@ -989,3 +989,92 @@ async def test_history_replay_shaped_v1_tick_has_no_quotes(zmq_inproc_bus) -> No
 
     await gen.aclose()
     await provider.close()
+
+
+# ---- wire v3: timeframe on the bar ----------------------------------------
+
+
+def _v3_bar(tf: str, seq: int = 1, sid: int = 7001) -> dict[str, object]:
+    return {
+        "v": 3,
+        "kind": "bar",
+        "tf": tf,
+        "seq": seq,
+        "sid": sid,
+        "ts": datetime(2026, 4, 20, 13, 30, tzinfo=UTC).timestamp(),
+        "ts_utc": 0.0,
+        "ts_str": "2026-04/20-09:30:00",
+        "o": 450.0,
+        "h": 451.0,
+        "l": 449.0,
+        "c": 450.5,
+        "vol": 1000,
+        "bid": 450.4,
+        "ask": 450.6,
+        "tc": 42,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tf", ["1m", "5m", "15m", "30m", "1h", "1d"])
+async def test_v3_bar_carries_its_timeframe(zmq_inproc_bus, tf: str) -> None:
+    ctx, pub, endpoint = zmq_inproc_bus
+    provider = TradeStationELProvider(endpoint=endpoint, context=ctx)
+    await provider.connect()
+    await provider.subscribe(["SPY"])
+    await asyncio.sleep(0)
+
+    await _publish(pub, "SPY", _v3_bar(tf))
+    gen = provider.events()
+    bar = await asyncio.wait_for(anext(gen), timeout=1.0)
+    assert bar.timeframe == tf
+
+    await gen.aclose()
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_v3_bar_with_unknown_timeframe_is_refused(zmq_inproc_bus) -> None:
+    """A tf we cannot place must not be filed under a default.
+
+    Defaulting would put one interval's bars into another's partition, which
+    is precisely the corruption this field exists to prevent.
+    """
+    ctx, pub, endpoint = zmq_inproc_bus
+    provider = TradeStationELProvider(endpoint=endpoint, context=ctx)
+    await provider.connect()
+    await provider.subscribe(["SPY"])
+    await asyncio.sleep(0)
+
+    await _publish(pub, "SPY", _v3_bar("4h"))
+    await _publish(pub, "SPY", _v3_bar("5m", seq=2))
+
+    gen = provider.events()
+    bar = await asyncio.wait_for(anext(gen), timeout=1.0)
+    assert bar.timeframe == "5m"  # the 4h frame was dropped, stream continued
+
+    await gen.aclose()
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_v2_bar_1m_still_decodes_as_1m(zmq_inproc_bus) -> None:
+    """v2 said bar_1m and had no way to say anything else."""
+    ctx, pub, endpoint = zmq_inproc_bus
+    provider = TradeStationELProvider(endpoint=endpoint, context=ctx)
+    await provider.connect()
+    await provider.subscribe(["SPY"])
+    await asyncio.sleep(0)
+
+    legacy = _v3_bar("1m")
+    legacy["v"] = 2
+    legacy["kind"] = "bar_1m"
+    del legacy["tf"]
+    await _publish(pub, "SPY", legacy)
+
+    gen = provider.events()
+    bar = await asyncio.wait_for(anext(gen), timeout=1.0)
+    assert bar.timeframe == "1m"
+
+    await gen.aclose()
+    await provider.close()
