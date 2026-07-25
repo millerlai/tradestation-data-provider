@@ -14,8 +14,11 @@ binding 的使用者 pin 的是套件版本，但**真正決定能不能通的�
 
 | DLL ABI | wire | 狀態 | 內容 |
 | ---: | ---: | --- | --- |
-| 6 | 1 | **目前** | `kind` 區分 `tick` / `bar_1m`；`ts` / `ts_utc` / `ts_str` 三時間戳。無送達保證、無缺漏偵測 |
-| 7 | 2 | **規劃中** | v1 全部欄位 + `seq`（per-symbol 單調遞增）+ `sid`（publisher session id） |
+| 6 | 1 | 已淘汰，仍須支援 | `kind` 區分 `tick` / `bar_1m`；`ts` / `ts_utc` / `ts_str` 三時間戳。無送達保證、**無缺漏偵測** |
+| 7 | 2 | **目前** | v1 全部欄位 + `seq`（per-symbol 單調遞增）+ `sid`（publisher session id） |
+
+ABI 6 標為「仍須支援」而非單純淘汰：DLL 部署在使用者的 TradeStation 上，**不受
+binding 升級控制**。舊 DLL 可能存活很久。
 
 > ABI 與 wire 目前一對一，但**不保證永遠如此** —— 例如修正 DLL 的執行緒安全問題會
 > 升 ABI 而不動 wire。新增列時務必同時填寫兩欄。
@@ -31,6 +34,10 @@ subscriber 讀到 `"v": 1`（無 `seq` 欄位）時：
 
 理由：舊版 DLL 可能仍部署在使用者的 TradeStation 上，而 DLL 的更新不受 binding
 控制。強制要求 v2 會讓升級 binding 直接中斷資料收集。
+
+**降級時 `messages_lost` 恆為 0，但那代表「無從得知」而非「沒有遺失」。** binding
+的 API 必須讓呼叫端能區分這兩者，否則使用者會拿一個沒有意義的 0 去判斷資料可信度。
+見 [`semantics.md` §6.6](semantics.md)。
 
 ### 必須拒絕未知的高版本
 

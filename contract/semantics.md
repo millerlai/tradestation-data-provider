@@ -90,12 +90,13 @@ $TICK   $ADD   $VOLD   $TRIN   $PCVA   VXX
 
 ### 3.3 為何不在 DLL 端處理
 
-DLL 不持有 symbol 分類知識（那在 `config/symbols.yaml`），且保持 wire 為原始透傳
+DLL 不持有 symbol 分類知識（那是 binding 的設定，例如 reference binding 的 `bindings/python/config/symbols.yaml`），且保持 wire 為原始透傳
 可讓 binding 自行決定分類。代價就是**這條規則必須寫在契約裡**，否則只會活在某一個
 binding 的原始碼中。
 
 > 現況即為如此：reference binding 把清單硬編在
-> `providers/tradestation_el.py` 的 `DEFAULT_INDEX_SYMBOLS`。本文件將其升格為契約。
+> `bindings/python/src/tradestation_data/wire/el_subscriber.py` 的
+> `DEFAULT_INDEX_SYMBOLS`。本文件將其升格為契約。
 
 ---
 
@@ -109,7 +110,8 @@ binding 的原始碼中。
 
 ### 4.1 Per-symbol 保留政策
 
-由 `config/symbols.yaml` 的 `category` 決定預設，可逐 symbol 覆寫：
+由 binding 設定檔的 `category` 決定預設（reference binding 為
+`bindings/python/config/symbols.yaml`），可逐 symbol 覆寫：
 
 | category | session 重置 | 盤前保留 |
 | --- | --- | --- |
@@ -129,7 +131,61 @@ binding 在收訊後**必須**以 topic 字串完全相等再過濾一次，不�
 
 ---
 
-## 6. 規則新增準則
+## 6. 序號與缺漏偵測（wire v2 起）
+
+`seq` 只有在 binding 正確詮釋下才有意義。以下各條皆為**強制行為**。
+
+### 6.1 per-symbol，且 tick 與 bar 共用
+
+`seq` 的計數單位是 **symbol**，不是 (symbol, kind)。同一個 symbol 的 `tick` 與
+`bar_1m` 交錯在同一條 topic 串流上，共用一個計數器才能偵測該串流的遺漏。
+
+實測範例（`test_harness --mode smoke`，5 筆 tick 輪流三個 symbol + 1 根 SPY bar）：
+
+| symbol | seq |
+| --- | --- |
+| SPY | 1, 2, **3**（第 3 筆是 `bar_1m`） |
+| QQQ | 1, 2 |
+| VXX | 1 |
+
+之所以不用全域序號：subscriber 可能只訂閱一個 topic，全域序號的跳號會與它從未
+訂閱的流量混淆，無法判斷自己是否漏收。
+
+### 6.2 首次見到某 symbol → 建立基準，不得報告遺漏
+
+中途加入的 subscriber 第一筆看到 `seq=21`，**不代表它遺失了 20 筆** —— 那些訊息
+發送時它根本沒在聽。第一筆只用來建立期望值。
+
+### 6.3 `sid` 變更 → 重置，不是遺漏
+
+`sid` 不同代表 publisher 重啟、所有計數器歸零。此時必須清空狀態，否則會把
+「重啟」誤報成數十億筆遺漏。
+
+`EL_Init` 的冪等路徑（重複呼叫回傳 `1`）**不會**更新 `sid`，所以在 TradeStation
+重新 Verify indicator 不會被誤判成重啟。
+
+### 6.4 `seq < expected` → 不得回退期望值
+
+TCP 保證單一 publisher 的順序，所以較小的序號是重複或重播，不是亂序。記錄它，
+但**期望值必須維持不變** —— 否則下一筆正常訊息會被誤判成 gap。
+
+### 6.5 序號在送出失敗時仍然消耗
+
+publisher 在組裝 payload 前取號；後續截斷或送出失敗時該號不會上線。
+**這是刻意的** —— 那筆資料確實遺失，顯示為 gap 才誠實。
+
+### 6.6 `messages_lost` 為 0 的兩種含義
+
+對 v1 publisher（無 `seq`），計數恆為 0。binding 必須讓使用者能區分：
+
+- **「沒有遺失」**（v2，有偵測能力）
+- **「無從得知」**（v1，沒有偵測能力）
+
+這個差別在用該數字判斷某天的資料可不可信時是關鍵。
+
+---
+
+## 7. 規則新增準則
 
 往本文件加規則的判準：**「換一種語言重寫 binding 時，會不會有人猜錯？」**
 
