@@ -12,7 +12,7 @@ import zmq.asyncio
 
 from tradestation_data.domain.bar import Bar
 from tradestation_data.domain.tick import Tick
-from tradestation_data.providers.base import MarketEvent
+from tradestation_data.wire.base import MarketEvent
 
 log = logging.getLogger(__name__)
 

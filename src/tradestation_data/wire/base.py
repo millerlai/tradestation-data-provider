@@ -7,22 +7,32 @@ from tradestation_data.domain.bar import Bar
 from tradestation_data.domain.tick import Tick
 
 # An event on the wire is either a single trade/quote print (Tick) or a
-# complete OHLC bar (Bar) emitted directly by the vendor-side indicator.
+# complete OHLC bar (Bar) emitted directly by the EL indicator.
 # Historically the bridge only shipped ticks and Python aggregated bars
 # downstream; now EL_PublishTickEx can ship an already-formed minute bar
 # so the OHLC is preserved through historical-chart replay.
+#
+# This union is the value range of the wire — see contract/v1/envelope.md.
 MarketEvent = Tick | Bar
 
 
 @runtime_checkable
 class MarketDataProvider(Protocol):
     """
-    Abstract real-time market data source. Implementations:
-      - TradeStationELProvider    (current: EL + DLL + ZeroMQ)
-      - TradeStationWebAPIProvider (future: direct REST/streaming)
-      - ...other vendors
+    A TradeStation ingress for this binding.
 
-    See docs/design.md §3.3.
+    NOT a generic multi-vendor abstraction. This package speaks to
+    TradeStation and nothing else; the shape exists because TradeStation
+    can be reached more than one way:
+
+      - TradeStationELProvider — EL indicator + DLL + ZeroMQ (implemented)
+      - a future WebAPI ingress — REST/streaming, no DLL
+
+    Consumers that want to swap this package out for a different vendor
+    should declare their own Protocol on their side and let this one
+    satisfy it structurally. Do not import this type as a vendor-neutral
+    contract — it is not one, and it is free to change with TradeStation.
+    See docs/architecture.md §7.1.
     """
 
     source_id: str

@@ -95,7 +95,7 @@ uv run pytest                 # 272 tests、約 2 秒
 ```python
 import asyncio
 from tradestation_data.aggregation import BarAggregator, MarketSnapshot
-from tradestation_data.providers.tradestation_el import TradeStationELProvider
+from tradestation_data.wire.el_subscriber import TradeStationELProvider
 from tradestation_data.runtime.ingestion import IngestionRuntime
 from tradestation_data.sinks import SinkPipeline
 from tradestation_data.sinks.parquet import ParquetBarSink, ParquetTickSink
@@ -241,7 +241,7 @@ tradestation-data-provider/
 ├── src/tradestation_data/     # 核心 Python package
 │   ├── domain/                # Bar / Tick / Order / Position
 │   ├── aggregation/           # BarAggregator / MarketSnapshot
-│   ├── providers/             # TradeStationELProvider (ZMQ SUB)
+│   ├── wire/                  # TradeStationELProvider (ZMQ SUB) — core binding
 │   ├── storage/               # BarWriter / TickWriter / HistoryStore / Resampler
 │   ├── sinks/                 # Sink protocol、pipeline、registry、內建 sinks
 │   ├── runtime/               # IngestionRuntime + CLI entry

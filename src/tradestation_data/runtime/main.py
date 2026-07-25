@@ -32,7 +32,6 @@ from typing import ClassVar
 from tradestation_data.aggregation.bar_aggregator import BarAggregator
 from tradestation_data.aggregation.snapshot import MarketSnapshot
 from tradestation_data.domain.bar import Bar
-from tradestation_data.providers.tradestation_el import TradeStationELProvider
 from tradestation_data.runtime.config import load_symbols
 from tradestation_data.runtime.ingestion import IngestionRuntime
 from tradestation_data.sinks import (
@@ -44,6 +43,7 @@ from tradestation_data.sinks import (
 from tradestation_data.sinks.base import BaseSink
 from tradestation_data.sinks.parquet import ParquetBarSink, ParquetTickSink
 from tradestation_data.storage.bar_writer import BAR_SCHEMA, _bars_to_table
+from tradestation_data.wire.el_subscriber import TradeStationELProvider
 
 
 def _configure_logging(level: str, *, json_output: bool) -> None:

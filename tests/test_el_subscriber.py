@@ -8,7 +8,7 @@ import pytest
 import zmq
 import zmq.asyncio
 
-from tradestation_data.providers.tradestation_el import TradeStationELProvider
+from tradestation_data.wire.el_subscriber import TradeStationELProvider
 
 
 async def _publish(pub: zmq.asyncio.Socket, topic: str, payload: dict[str, object]) -> None:
@@ -647,7 +647,7 @@ def test_parse_tick_logs_drift_when_ts_utc_deviates_by_more_than_5s(caplog) -> N
         "vol": 0,
         "tc": 0,
     }
-    with caplog.at_level("DEBUG", logger="tradestation_data.providers.tradestation_el"):
+    with caplog.at_level("DEBUG", logger="tradestation_data.wire.el_subscriber"):
         tick = provider._parse_payload("SPY", json.dumps(payload).encode())
     # Parser must still return a Tick — the drift is a cross-check, not fatal.
     assert tick.symbol == "SPY"
@@ -673,7 +673,7 @@ def test_parse_bar_logs_mismatch_when_ts_str_and_ts_utc_disagree(caplog) -> None
         "vol": 0,
         "tc": 0,
     }
-    with caplog.at_level("DEBUG", logger="tradestation_data.providers.tradestation_el"):
+    with caplog.at_level("DEBUG", logger="tradestation_data.wire.el_subscriber"):
         bar = provider._parse_payload("SPY", json.dumps(payload).encode())
     assert bar.bucket_start == datetime(2026, 4, 17, 13, 31, 0, tzinfo=UTC)
     assert any("ts_str vs ts_utc mismatch" in rec.message for rec in caplog.records)
@@ -778,7 +778,7 @@ async def test_events_logs_and_continues_on_transient_zmq_error(caplog) -> None:
     provider = TradeStationELProvider(endpoint="inproc://zmq-warn")
     provider._socket = _StubSocket()  # type: ignore[assignment]
     gen = provider.events()
-    with caplog.at_level("WARNING", logger="tradestation_data.providers.tradestation_el"):
+    with caplog.at_level("WARNING", logger="tradestation_data.wire.el_subscriber"):
         event = await anext(gen)
     assert event.symbol == "SPY"
     assert any("zmq recv error" in r.message for r in caplog.records)

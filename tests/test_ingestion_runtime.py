@@ -11,10 +11,10 @@ import zmq
 import zmq.asyncio
 
 from tradestation_data.aggregation import BarAggregator, MarketSnapshot
-from tradestation_data.providers.tradestation_el import TradeStationELProvider
 from tradestation_data.runtime import IngestionRuntime
 from tradestation_data.sinks import SinkPipeline
 from tradestation_data.sinks.parquet import ParquetBarSink, ParquetTickSink
+from tradestation_data.wire.el_subscriber import TradeStationELProvider
 
 
 async def _publish(pub: zmq.asyncio.Socket, topic: str, payload: dict) -> None:

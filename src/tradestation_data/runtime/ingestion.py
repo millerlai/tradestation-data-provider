@@ -11,8 +11,8 @@ from tradestation_data.aggregation.bar_aggregator import BarAggregator
 from tradestation_data.aggregation.snapshot import MarketSnapshot
 from tradestation_data.domain.bar import Bar
 from tradestation_data.domain.tick import Tick
-from tradestation_data.providers.base import MarketDataProvider
 from tradestation_data.sinks.pipeline import SinkPipeline
+from tradestation_data.wire.base import MarketDataProvider
 
 log = logging.getLogger(__name__)
 
