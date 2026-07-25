@@ -61,6 +61,22 @@ bucket_start:  09:30, 09:31, …, 15:58, 15:59
 >
 > **conformance fixture 必須涵蓋 session 首尾兩根 bar。**
 
+### 2.1 `bucket_start` 必須向下取整到分鐘
+
+解析 `ts_str` 得到 UTC 時間後，**秒與微秒一律歸零**。
+
+`bar_1m` 的 bucket 依定義是 `[分鐘邊界, +1min)`。若原樣保留秒數，`17:30:45` 起算的
+bucket 涵蓋 `[17:30:45, 17:31:45)`，那不是分鐘 bar，也無法與其他 bar 對齊。
+
+EL 正常情況下送出的就是分鐘對齊的時間，所以取整通常是 no-op —— 但 **`test_harness`
+的 `--mode smoke` 會把 tick 的 `13:30:45` 直接沿用給 `EL_PublishTickEx`**，
+`smoke.jsonl` 因此正好涵蓋這個情境。
+
+> 這條規則原本只存在於 reference binding 的實作裡（`_parse_el_str_as_et` 的
+> `replace(second=0, microsecond=0)`），本文件漏寫。是 conformance 測試比對
+> 手寫期望值時抓出來的 —— 照當時的規格實作，新 binding 會產出 `17:30:45Z`
+> 而非 `17:30:00Z`，與 reference binding 不一致。
+
 ---
 
 ## 3. Index / breadth symbol 的 bid、ask 無效

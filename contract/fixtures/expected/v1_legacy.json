@@ -80,7 +80,7 @@
     {
       "symbol": "SPY",
       "kind": "bar_1m",
-      "bucket_start": "2026-04-18T17:30:45Z",
+      "bucket_start": "2026-04-18T17:30:00Z",
       "open": 450.1,
       "high": 450.75,
       "low": 449.8,
