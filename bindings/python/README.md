@@ -225,7 +225,7 @@ python scripts/audit_bar_cache.py                                # weekly audit
 python scripts/clear_bar_cache.py                                # clear Tier-3 cache
 python scripts/dedupe_bars.py                                    # drop duplicate bars
 python scripts/dump_parquet.py                                   # inspect a parquet file
-python scripts/simple_sub.py                                     # raw ZMQ wire inspector
+python ../../contract/tools/record.py                            # raw ZMQ wire inspector
 ```
 
 ## Project layout

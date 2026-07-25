@@ -225,7 +225,7 @@ python scripts/audit_bar_cache.py                                # 週稽核
 python scripts/clear_bar_cache.py                                # 清 Tier-3 cache
 python scripts/dedupe_bars.py                                    # 去重複 bar
 python scripts/dump_parquet.py                                   # 看 parquet 內容
-python scripts/simple_sub.py                                     # 原始 ZMQ wire 檢視
+python ../../contract/tools/record.py                            # 原始 ZMQ wire 檢視
 ```
 
 ## 專案結構
