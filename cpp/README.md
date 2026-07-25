@@ -28,7 +28,7 @@ Every publish call sends a two-frame ZMQ message:
   "vol": 12000, "bid": 450.39, "ask": 450.41, "tc": 140 }
 ```
 
-`ts` is the DLL's receive-side wall clock (UTC epoch); `ts_utc` is the EL string converted to UTC via `std::chrono::zoned_time` ("America/New_York" zone); `ts_str` is the raw EL `yyyy-MM/dd-HH:mm:ss` 24-hour timestamp passed through verbatim. The Python side treats `ts_str` as authoritative for bar `bucket_start`. For details see `../docs/design.md §3.2 / §5` and `../docs/error_codes.md`.
+`ts` is the DLL's receive-side wall clock (UTC epoch); `ts_utc` is the EL string converted to UTC via `std::chrono::zoned_time` ("America/New_York" zone); `ts_str` is the raw EL `yyyy-MM/dd-HH:mm:ss` 24-hour timestamp passed through verbatim. Subscribers treat `ts_str` as authoritative for bar `bucket_start`. For the normative rules see [`../contract/semantics.md`](../contract/semantics.md) §1–2 and [`../contract/v1/envelope.md`](../contract/v1/envelope.md).
 
 ## Requirements
 
@@ -167,7 +167,7 @@ Output lands in `cpp/build/x86-release/stage/bin/`: `TS2Python.dll`, `TS2Python_
 
 ## C ABI
 
-DLL version `EL_DllVersion() == 6`. See `../docs/design.md` and `../docs/error_codes.md` for full semantics (return codes, threading rules, lifecycle).
+DLL version `EL_DllVersion() == 6`. See [`../contract/error_codes.md`](../contract/error_codes.md) for return codes and [`../contract/compat.md`](../contract/compat.md) for the ABI × wire version matrix.
 
 ```c
 int __stdcall EL_DllVersion(void);

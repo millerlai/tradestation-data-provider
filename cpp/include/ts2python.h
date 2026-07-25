@@ -3,7 +3,8 @@
 // Called from TradeStation EasyLanguage via DefineDLLFunc. All functions use
 // __stdcall (EL's default DLL calling convention on Win32) and C linkage.
 //
-// See docs/design.md §3.2 and docs/error_codes.md for semantics.
+// See ../contract/ for the wire format and ../contract/error_codes.md for
+// the return-code semantics.
 
 #ifndef TS2PYTHON_H
 #define TS2PYTHON_H
@@ -24,13 +25,14 @@ extern "C" {
 #  define TS2P_CALL
 #endif
 
-// Return codes (see docs/error_codes.md).
+// Return codes (see ../contract/error_codes.md).
 //   0  success
 //   1  already initialized (idempotent; not an error)
 //  -1  not initialized
 //  -2  zmq send failed
 //  -3  init failed (bind / socket create)
 //  -4  invalid argument (null pointer etc.)
+//  -5  unsupported bar type / interval (no wire timeframe for it)
 
 TS2P_API int TS2P_CALL EL_Init(const char* zmq_endpoint);
 
@@ -64,9 +66,40 @@ TS2P_API int TS2P_CALL EL_PublishTickEx(
     double      ask,
     double      tick_count);
 
+// Publish a complete OHLC bar at any supported interval.
+//
+// Supersedes EL_PublishTickEx, which could only ever mean 1-minute: the
+// wire had no field to say otherwise, so a 5-minute chart's bars were
+// indistinguishable from 1-minute ones downstream.
+//
+// bar_type / bar_interval come straight from EasyLanguage's reserved words
+// of the same name. The mapping to a wire timeframe lives here rather than
+// in EL so that every caller of this ABI agrees on it:
+//
+//   bar_type 1 (intraday), bar_interval 1/5/15/30/60  ->  1m/5m/15m/30m/1h
+//   bar_type 2 (daily),    bar_interval 1             ->  1d
+//
+// Anything else returns -5 without publishing. Guessing an interval would
+// file bars under the wrong partition, which nothing downstream can detect.
+TS2P_API int TS2P_CALL EL_PublishBar(
+    const char* symbol,
+    const char* el_timestamp,
+    int         bar_type,
+    int         bar_interval,
+    double      bar_open,
+    double      bar_high,
+    double      bar_low,
+    double      bar_close,
+    double      volume,
+    double      bid,
+    double      ask,
+    double      tick_count);
+
 TS2P_API int TS2P_CALL EL_Shutdown(void);
 
-// Version identifier for this DLL build (bumps independently of wire protocol).
+// Version identifier for this DLL build (bumps independently of the wire
+// protocol version carried in the payload's "v" field). Current pairing is
+// ABI 7 <-> wire 2; see ../contract/compat.md for the full matrix.
 TS2P_API int TS2P_CALL EL_DllVersion(void);
 
 #ifdef __cplusplus

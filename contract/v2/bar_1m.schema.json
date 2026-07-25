@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/millerlai/tradestation-data-provider/contract/v2/bar_1m.schema.json",
+  "title": "TS2Python wire v2 — bar_1m",
+  "description": "Payload emitted by EL_PublishTickEx: an already-formed 1-minute OHLC bar. Frame 2 of a 2-frame ZMQ message; frame 1 is the UTF-8 symbol topic. See envelope.md and semantics.md — schema validation alone is NOT sufficient to implement a correct binding.",
+  "type": "object",
+  "required": ["v", "kind", "seq", "sid", "ts", "ts_utc", "ts_str", "o", "h", "l", "c", "vol", "bid", "ask", "tc"],
+  "additionalProperties": false,
+  "properties": {
+    "v": {
+      "const": 2,
+      "description": "Wire version."
+    },
+    "kind": {
+      "const": "bar_1m"
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Per-symbol monotonic sequence, shared with tick on the same symbol — both interleave on one topic, so one counter is what detects loss on that stream. Emitted as an unsigned 64-bit integer. See semantics.md §6."
+    },
+    "sid": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Publisher session id — the UTC epoch second stamped at EL_Init."
+    },
+    "ts": {
+      "type": "number",
+      "description": "DLL receive-side wall clock, UTC epoch seconds. Latency measurement only. Must NOT be used for bucket alignment."
+    },
+    "ts_utc": {
+      "type": "number",
+      "description": "ts_str converted to UTC epoch by the DLL. 0.0 on parse failure. Cross-check only."
+    },
+    "ts_str": {
+      "type": "string",
+      "description": "Raw EL timestamp, yyyy-MM/dd-HH:mm:ss (24-hour). AUTHORITATIVE source for bucket_start: parse as America/New_York, convert to UTC. bucket_start is LEFT-labelled, covering [t, t+1min). See semantics.md §1 and §2.",
+      "examples": ["2026-04/18-13:31:00"]
+    },
+    "o": { "type": "number", "description": "Open." },
+    "h": { "type": "number", "description": "High." },
+    "l": { "type": "number", "description": "Low." },
+    "c": { "type": "number", "description": "Close." },
+    "vol": {
+      "type": "number",
+      "description": "Bar volume. Double even though semantically integral. Meaningless for index/breadth symbols."
+    },
+    "bid": {
+      "type": ["number", "null"],
+      "description": "Bid, or null when no quote is available. EL supplies 0 from InsideBid during historical replay and for symbols that carry no quote at all (breadth indices); the publisher normalises any non-positive value to null so the wire states the absence rather than leaving every binding to remember that 0 means \"absent\". See semantics.md §3."
+    },
+    "ask": {
+      "type": ["number", "null"],
+      "description": "Ask, or null when no quote is available. Same rule as bid."
+    },
+    "tc": {
+      "type": "number",
+      "description": "Tick count within the bar. Emitted as %.0f."
+    }
+  }
+}

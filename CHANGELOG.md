@@ -9,6 +9,118 @@ changes; patch releases (`0.x.Y`) will not.
 
 ## [Unreleased]
 
+### Added
+- **Multiple timeframes: tick · 1m · 5m · 15m · 30m · 1h · 1d.** Bars previously could
+  only be 1-minute, because the wire had no field to say otherwise — `kind: "bar_1m"`
+  bound the shape and the interval into one string. Wire v3 splits them into `kind`
+  (tick/bar) and `tf`, so adding an interval is a new value rather than a change to every
+  binding's dispatch. `Bar` gains a `timeframe` field and `BarWriter` partitions on it,
+  not on its own constructor argument.
+- **Daily bars are taken natively rather than derived.** TradeStation's daily bar carries
+  the exchange's official OHLC and is split/dividend adjusted; summing ticks reproduces
+  neither, so a derived daily is an approximation wearing the same shape. Intraday runs
+  the other way — tick aggregation is reproducible and auditable, and needs one chart.
+- **Bar provenance.** Computed bars are stamped `derived:<origin>`; `Resampler` used to
+  copy the source through with `first(source)`, leaving native and derived
+  indistinguishable on disk. `HistoryStore` now refuses to overwrite a partition holding
+  native bars, and treats an unreadable partition as native.
+- New DLL export `EL_PublishBar(symbol, ts, bar_type, bar_interval, ...)`, mapping
+  EasyLanguage's `BarType`/`BarInterval` to a wire timeframe in `wire_timeframe()`. It
+  returns the new code `-5` rather than guessing at an interval it cannot name.
+  `EL_PublishTickEx` stays, publishing as 1m: under `__stdcall` a `DefineDLLFunc` whose
+  argument count stops matching corrupts the stack, so it could not simply grow two
+  parameters, and scripts written against an older DLL keep working.
+- **`contract/` — a language-neutral wire specification, now the source of truth for this
+  repo.** Holds `v1/` and `v2/` JSON Schemas, `semantics.md` (the rules a schema cannot
+  express: timestamp authority, left-labelled and minute-floored `bucket_start`, quote
+  availability, session policy, sequence handling), `error_codes.md`, `compat.md`, and
+  recorded conformance fixtures. Python is now one binding against this spec rather than
+  the definition of it.
+- **Wire v2 / DLL ABI 7 — gap detection.** The payload carries `seq` (per-symbol,
+  monotonic) and `sid` (publisher session id). PUB/SUB drops silently at both high-water
+  marks, so before this a subscriber could not distinguish a quiet market from a lost one.
+  `TradeStationELProvider.messages_lost` reports the count.
+- `EL/` — the EasyLanguage exporter indicator, previously kept in the consuming project.
+  It is the upstream origin of the feed and belongs with the provider.
+- `contract/fixtures/` with `smoke`, `noquote`, and `v1_legacy` cases, all recorded from
+  real DLL output (the v1 case from a DLL built out of git history, not hand-written).
+  `bindings/python/tests/conformance/` replays them against this binding.
+- `contract/tools/record.py` — wire inspector and fixture recorder, promoted from
+  `scripts/simple_sub.py`. It depends on no binding, which is what qualifies it to record
+  the files every binding is checked against.
+- Test harness gains `--mode noquote`, reproducing the shape TradeStation emits outside
+  live mode.
+- CMake presets for Visual Studio 2026 alongside 2022.
+
+### Changed
+- **BREAKING (data): resampled buckets are anchored to the trading session, not
+  the Unix epoch.** `Resampler` used a bare `time_bucket`, which is epoch-aligned.
+  That happens to be correct for 5m/15m/30m — the ET offset is a whole number of
+  hours and 09:30 is a multiple of 30 minutes — but not for the longer frames:
+  `1h` produced 09:00 ET buckets, so the first regular-session bar held only
+  09:30–10:00 while carrying a full bar's timestamp, and `1d` split on UTC
+  midnight, which is 20:00 ET — the end of the extended session, so post-market
+  prints landed on the following day. `1d` also disagreed with
+  `aggregation.session`'s 04:00 ET rule about which day a bar belonged to.
+
+  The grid is now laid out in `America/New_York` wall-clock time, anchored at
+  09:30 for intraday and 04:00 for daily, so it does not drift against the
+  session when the offset changes twice a year. Neither anchor sits in the DST
+  fold. Specified in `contract/semantics.md` §2.2.
+
+  **Any cached 1h or 1d bars on disk were produced by the old alignment and are
+  wrong.** Clear them and let them rebuild:
+
+  ```
+  python scripts/clear_bar_cache.py --data-root ./data --timeframes 1h 1d --confirm
+  ```
+
+  5m/15m/30m caches are unaffected.
+- **BREAKING (wire): `bid` / `ask` may now be `null`.** EL's `InsideBid` / `InsideAsk`
+  return 0 whenever there is no quote — historical replay, any non-live bar, and symbols
+  that never carry one. The DLL previously forwarded that 0 verbatim, putting what reads
+  as a $0.00 quote on the wire and leaving every binding to remember that 0 means absent.
+  It now emits `null`. Wire v1 cannot do this, so bindings reading v1 must treat a
+  non-positive quote as absent.
+- **BREAKING (layout): the Python package moved to `bindings/python/`.** A second binding
+  is now a sibling directory rather than a restructure. `config/` and a `LICENSE` copy
+  moved with it, because packaging back-ends resolve paths relative to `pyproject.toml`
+  and cannot reach above it.
+- **BREAKING (API): `providers/` renamed to `wire/`**, and `tradestation_el.py` to
+  `el_subscriber.py`. "Providers" invited reading the module as a generic multi-vendor
+  abstraction; its job is decoding wire frames. `MarketDataProvider` keeps its name but no
+  longer claims to cover other vendors — consumers wanting to swap this package out should
+  declare their own Protocol and let this one satisfy it structurally.
+- **BREAKING (API): `domain/` is now exactly `Tick` and `Bar`.** `Order`, `Fill`,
+  `OrderIntent`, `OrderStatus`, `OrderType`, `Side`, and `Position` are gone, along with
+  `MarketSnapshot.{position_of,positions,set_position,clear_position}`. Nothing in
+  production code imported the order module, and position tracking is a consumer concern —
+  a data provider does not know what you hold.
+- **Python 3.14 is supported and tested.** A fresh `uv sync` had been resolving to 3.14
+  and failing, because the lockfile pinned pyarrow 21, which ships no cp314 wheel and so
+  fell back to building from source. Unpinning it (24.0.0) fixes that at the source; 3.14
+  joins the CI matrix and the classifiers.
+
+### Fixed
+- **A 5-minute chart silently corrupted the 1-minute partition.** `BarType = 1` covers
+  every intraday minute chart — 1/5/15/60-minute are all `BarType 1`, told apart only by
+  `BarInterval`, which the indicator never read — and the DLL stated `bar_1m`
+  unconditionally. Bars from a 5-minute chart were written to `timeframe=1m`, and the
+  resampler then derived "5m" from data that was already 5m. Nothing reported an error.
+  The indicator now forwards `BarInterval` and the DLL refuses intervals it cannot name.
+- `verify_parquet.py::_expected_bars()` produced right-labelled bar ends (09:31..16:00)
+  where `BAR_SCHEMA.bucket_start` is left-labelled (09:30..15:59), so a complete session
+  was reported as missing its first bar and carrying an extra last one.
+- The CMake build could not produce a DLL at all: `CMakeLists.txt` never defined
+  `TS2PYTHON_EXPORTS`, which `ts2python.h` checks to choose `dllexport` over `dllimport`.
+  CMake's automatic define is `TS2Python_EXPORTS` — target name, different case — so every
+  definition failed with C2491. Only the MSBuild project set it, which is why the breakage
+  went unnoticed. `CMAKE_TOOLCHAIN_FILE` also no longer reads `$env{VCPKG_ROOT}`, which is
+  easy to leave pointing at an unrelated checkout; it uses the vendored submodule.
+- Repo-root `.ruff.toml` excluding `cpp/`. After the layout change there is no Python
+  config at the top of the tree, so `ruff check .` from there fell back to defaults and
+  rewrote the vendored vcpkg checkout — which had already happened once.
+
 ## [0.2.0] — 2026-05-21
 
 ### Removed

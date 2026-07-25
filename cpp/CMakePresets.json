@@ -1,29 +1,54 @@
-﻿{
+{
   "version": 3,
   "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
   "configurePresets": [
     {
-      "name": "x86-base",
+      "name": "x86-common",
       "hidden": true,
-      "generator": "Visual Studio 17 2022",
       "architecture": "Win32",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
-        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "CMAKE_TOOLCHAIN_FILE": "${sourceDir}/build-tools/vcpkg/scripts/buildsystems/vcpkg.cmake",
         "VCPKG_TARGET_TRIPLET": "x86-windows",
         "CMAKE_INSTALL_PREFIX": "${sourceDir}/build/${presetName}/stage"
       }
     },
+
+    {
+      "name": "vs2026-base",
+      "hidden": true,
+      "inherits": "x86-common",
+      "generator": "Visual Studio 18 2026"
+    },
     {
       "name": "x86-release",
-      "inherits": "x86-base",
-      "displayName": "Win32 Release",
+      "inherits": "vs2026-base",
+      "displayName": "Win32 Release (VS 2026)",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
     },
     {
       "name": "x86-debug",
-      "inherits": "x86-base",
-      "displayName": "Win32 Debug",
+      "inherits": "vs2026-base",
+      "displayName": "Win32 Debug (VS 2026)",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+    },
+
+    {
+      "name": "vs2022-base",
+      "hidden": true,
+      "inherits": "x86-common",
+      "generator": "Visual Studio 17 2022"
+    },
+    {
+      "name": "x86-release-vs2022",
+      "inherits": "vs2022-base",
+      "displayName": "Win32 Release (VS 2022)",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release" }
+    },
+    {
+      "name": "x86-debug-vs2022",
+      "inherits": "vs2022-base",
+      "displayName": "Win32 Debug (VS 2022)",
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
     }
   ],
@@ -37,6 +62,18 @@
     {
       "name": "x86-debug",
       "configurePreset": "x86-debug",
+      "configuration": "Debug",
+      "targets": ["TS2Python", "TS2Python_TestHarness"]
+    },
+    {
+      "name": "x86-release-vs2022",
+      "configurePreset": "x86-release-vs2022",
+      "configuration": "Release",
+      "targets": ["TS2Python", "TS2Python_TestHarness"]
+    },
+    {
+      "name": "x86-debug-vs2022",
+      "configurePreset": "x86-debug-vs2022",
       "configuration": "Debug",
       "targets": ["TS2Python", "TS2Python_TestHarness"]
     }

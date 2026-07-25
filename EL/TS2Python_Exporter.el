@@ -1,0 +1,159 @@
+{ ===========================================================================
+  TS2Python_Exporter — TradeStation EasyLanguage Indicator
+  ---------------------------------------------------------------------------
+  Job:   Forward every bar/tick on the chart's symbol to TS2Python.dll so the
+         Python agent can consume it via ZeroMQ.
+
+  Host:  Insert as an Indicator on any supported chart.
+         - BarType = 0   → EL_PublishTick(Close, ...)
+         - otherwise     → EL_PublishBar(O, H, L, C, ...) carrying BarType and
+                           BarInterval, which the DLL maps to a wire timeframe
+
+         Supported intervals: 1 / 5 / 15 / 30 / 60 minute, and daily.
+         Anything else is refused by the DLL with rc = -5 and logged once.
+
+         Bars go out as full OHLC so the subscriber can rebuild them losslessly
+         instead of collapsing to a single close price.
+
+  WHY BarInterval IS PASSED: BarType = 1 covers every intraday minute chart —
+  1-min, 5-min, 15-min and 60-min are all BarType 1, told apart only by
+  BarInterval. This indicator does not decide what that means; it forwards both
+  numbers and lets the DLL map them, so every caller of the C ABI agrees on the
+  vocabulary. Guessing here would file 5-minute bars under the 1-minute
+  partition, which nothing downstream can detect.
+
+  KNOWN GAP — VERIFY BEFORE RELYING ON THIS: a second-based chart may also
+  report BarType = 1 with BarInterval = 1, in which case 1-second bars would be
+  published as 1-minute bars. TradeStation exposes BarType_ext to separate
+  second-based from minute-based intraday, but the exact values differ across
+  TS versions and have not been checked against a live install here. Use minute
+  or daily charts only until that is confirmed.
+
+  Zero state. All symbol/value plumbing comes from TS built-ins at runtime,
+  so one compiled indicator covers every chart.
+
+  Wire format and semantics: ../contract/. Error codes: ../contract/error_codes.md.
+  =========================================================================== }
+
+Inputs:
+    ZMQEndpoint("tcp://127.0.0.1:5555"),
+    Enabled(True),
+    LogErrors(True);
+
+Variables:
+    InitRC(0),
+    PubRC(0),
+    InitDone(False),
+    UnsupportedLogged(False),
+    Sym(""),
+    TsStr("");
+
+{ -- DLL prototypes ---------------------------------------------------------
+  Calling convention is __stdcall (TS default for DefineDLLFunc).
+  Keep types in sync with cpp/include/ts2python.h. }
+DefineDLLFunc: "TS2Python.dll", int, "EL_Init", LPSTR;
+DefineDLLFunc: "TS2Python.dll", int, "EL_PublishTick",
+    LPSTR, LPSTR, double, double, double, double, double;
+DefineDLLFunc: "TS2Python.dll", int, "EL_PublishBar",
+    LPSTR, LPSTR, int, int,
+    double, double, double, double, double, double, double, double;
+DefineDLLFunc: "TS2Python.dll", int, "EL_Shutdown";
+DefineDLLFunc: "TS2Python.dll", int, "EL_DllVersion";
+
+{ -- One-shot init: first bar only. EL_Init is idempotent; return code 1
+     means "another chart already bound the socket" — still success. }
+If Enabled and InitDone = False Then Begin
+    InitRC = EL_Init(ZMQEndpoint);
+    If InitRC < 0 Then Begin
+        If LogErrors Then
+            Print("[TS2Python] EL_Init FAILED rc=", InitRC,
+                  " endpoint=", ZMQEndpoint,
+                  " symbol=", GetSymbolName);
+        { leave InitDone = False so we retry on the next tick }
+    End Else Begin
+        InitDone = True;
+        If LogErrors Then
+            Print("[TS2Python] EL_Init ok rc=", InitRC,
+                  " dll_version=", EL_DllVersion,
+                  " symbol=", GetSymbolName,
+                  " bar_type=", BarType,
+                  " bar_interval=", BarInterval);
+    End;
+End;
+
+{ -- Per-bar publish. Dispatch on BarType *and* BarInterval: BarType alone
+     cannot tell a 1-minute chart from a 5-minute one. }
+If Enabled and InitDone Then Begin
+    Sym = GetSymbolName;
+    { Bar-time string "yyyy-MM/dd-HH:mm:ss" 24-hour (e.g. "2026-04/18-13:30:45").
+      DLL parses this as the EL-side event time (ts_utc on the wire). The
+      authoritative wall-clock ts is still stamped by the DLL.
+
+      24-hour format is deliberate: the AM/PM designator ("tt") is locale-
+      dependent on Windows — a zh-TW TradeStation host emits "上午"/"下午",
+      which breaks both the DLL sscanf path and the Python strptime path,
+      silently collapsing every bar onto today's receive-time minute. }
+    TsStr = FormatDate("yyyy-MM/dd", ELDateToDateTime(Date))
+          + "-"
+          + FormatTime("HH:mm:ss", ElTimeToDateTime(Time));
+
+    { InsideBid / InsideAsk are live-quote functions. They return 0 when
+      there is no quote to report — during historical replay (chart load,
+      any non-realtime bar), and for symbols that carry no quote at all
+      such as breadth indices ($TICK, $ADD, ...).
+
+      They are passed through raw on purpose. The DLL normalises a
+      non-positive quote to JSON null, so the "absent" case is expressed
+      once, in one place, for every caller of the C ABI rather than being
+      re-derived by each EL script. See contract/semantics.md §3. }
+
+    If BarType = 0 Then Begin
+        { Tick data series — one call per trade print. }
+        PubRC = EL_PublishTick(
+            Sym,
+            TsStr,
+            Close,
+            Volume,
+            Insidebid,
+            Insideask,
+            Ticks);
+    End Else Begin
+        { Any bar series. BarType and BarInterval go out as-is; the DLL owns
+          the mapping to a wire timeframe and returns -5 for intervals it
+          cannot name. }
+        PubRC = EL_PublishBar(
+            Sym,
+            TsStr,
+            BarType,
+            BarInterval,
+            Open,
+            High,
+            Low,
+            Close,
+            Volume,
+            Insidebid,
+            Insideask,
+            Ticks);
+
+        If PubRC = -5 and UnsupportedLogged = False Then Begin
+            If LogErrors Then
+                Print("[TS2Python] no wire timeframe for bar_type=", BarType,
+                      " bar_interval=", BarInterval,
+                      " on symbol=", Sym,
+                      " — supported: 1/5/15/30/60 minute and daily.",
+                      " Indicator is idle on this chart");
+            UnsupportedLogged = True;
+        End;
+    End;
+
+    If PubRC < 0 and LogErrors Then
+        Print("[TS2Python] publish rc=", PubRC,
+              " symbol=", Sym,
+              " bar_type=", BarType,
+              " bar_interval=", BarInterval,
+              " ts=", TsStr,
+              " close=", Close);
+End;
+
+{ No-op plot so the indicator shows up cleanly on charts. }
+Plot1(0, "ts2python");

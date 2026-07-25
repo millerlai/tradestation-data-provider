@@ -3,11 +3,13 @@
 // Usage:
 //   TS2Python_TestHarness.exe                                 # default run
 //   TS2Python_TestHarness.exe --endpoint tcp://127.0.0.1:5555
+//   TS2Python_TestHarness.exe --mode noquote                  # bid/ask absent
 //   TS2Python_TestHarness.exe --mode stress --rate 10000 --seconds 10
 //   TS2Python_TestHarness.exe --mode multithread --threads 8 --per-thread 5000
 //
-// Pair with `scripts/simple_sub.py` running in another window to see the wire
-// output. Exits 0 on success, non-zero on any init / publish failure.
+// Pair with `contract/tools/record.py` in another window to see the wire
+// output, or to record a conformance fixture. Exits 0 on success,
+// non-zero on any init / publish failure.
 
 #pragma warning(disable: 4819)
 
@@ -25,7 +27,7 @@ namespace {
 
 struct Options {
     std::string endpoint = "tcp://127.0.0.1:5555";
-    std::string mode = "smoke";   // smoke | stress | multithread
+    std::string mode = "smoke";   // smoke | noquote | stress | multithread
     int         rate = 10000;
     int         seconds = 5;
     int         threads = 4;
@@ -55,7 +57,7 @@ Options parse_args(int argc, char** argv) {
             std::puts(
                 "TS2Python_TestHarness options:\n"
                 "  --endpoint <tcp://...>    default tcp://127.0.0.1:5555\n"
-                "  --mode <smoke|stress|multithread>\n"
+                "  --mode <smoke|noquote|stress|multithread>\n"
                 "  --rate <msgs/sec>         stress mode target rate\n"
                 "  --seconds <N>             stress mode duration\n"
                 "  --threads <N>             multithread mode threads\n"
@@ -98,6 +100,35 @@ int run_smoke(const Options& o) {
         /*bid*/    450.39,
         /*ask*/    450.41,
         /*tc*/     140.0);
+    if (rc_bar != 0) {
+        std::fprintf(stderr, "[harness] EL_PublishTickEx rc=%d\n", rc_bar);
+        return 3;
+    }
+    return 0;
+}
+
+// Reproduces what EL sends when there is no quote to report: historical
+// replay, and symbols that never carry one (breadth indices). InsideBid /
+// InsideAsk are 0 in both cases, and the DLL must turn that into JSON null
+// rather than a $0.00 quote. Without this mode the null path is unreachable
+// from the harness, and so unrecordable as a fixture.
+int run_noquote(const Options& o) {
+    (void)o;
+    std::printf("[harness] noquote: publishing with bid=ask=0 (history-replay shape)\n");
+    const char* ts_el = "2026-04/18-13:31:00";
+
+    const int rc_tick = EL_PublishTick("$TICK", ts_el,
+                                       /*price*/ 812.0, /*volume*/ 0.0,
+                                       /*bid*/ 0.0, /*ask*/ 0.0, /*tc*/ 1.0);
+    if (rc_tick != 0) {
+        std::fprintf(stderr, "[harness] EL_PublishTick rc=%d\n", rc_tick);
+        return 3;
+    }
+
+    const int rc_bar = EL_PublishTickEx("SPY", ts_el,
+                                        450.10, 450.75, 449.80, 450.40,
+                                        /*volume*/ 12000.0,
+                                        /*bid*/ 0.0, /*ask*/ 0.0, /*tc*/ 140.0);
     if (rc_bar != 0) {
         std::fprintf(stderr, "[harness] EL_PublishTickEx rc=%d\n", rc_bar);
         return 3;
@@ -180,6 +211,7 @@ int main(int argc, char** argv) {
 
     int result = 0;
     if      (o.mode == "smoke")       result = run_smoke(o);
+    else if (o.mode == "noquote")     result = run_noquote(o);
     else if (o.mode == "stress")      result = run_stress(o);
     else if (o.mode == "multithread") result = run_multithread(o);
     else {

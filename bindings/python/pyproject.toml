@@ -1,0 +1,169 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tradestation-data-provider"
+version = "0.2.0"
+description = "TradeStation EasyLanguage → Python data ingestion pipeline with pluggable output sinks (Parquet, CSV, in-process callbacks, ...)"
+requires-python = ">=3.11"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Miller Lai", email = "miller.lai@gmail.com" }]
+keywords = [
+    "tradestation",
+    "market-data",
+    "easylanguage",
+    "zeromq",
+    "parquet",
+    "ohlcv",
+    "ingestion",
+    "tick-data",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Office/Business :: Financial :: Investment",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+
+dependencies = [
+    # Upper bounds keep us safe from accidental major-bump breakage at
+    # `pip install` time; revisit on each major release (see CHANGELOG).
+    "pyzmq>=26.0,<28",
+    "polars>=1.0,<2",
+    "pyarrow>=16.0,<25",
+    "pyyaml>=6.0,<7",
+    "structlog>=24.0,<26",
+    # Windows Python stdlib ships without IANA tz data; polars needs it
+    # when reading TIMESTAMPTZ columns from DuckDB / Arrow.
+    "tzdata>=2024.1 ; sys_platform == 'win32'",
+    "duckdb>=1.5.2,<2",
+    "pydantic>=2.13.2,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "ruff>=0.6",
+    "mypy>=1.10",
+    "types-PyYAML>=6",
+]
+
+[project.scripts]
+tradestation-data-ingest = "tradestation_data.runtime.main:main"
+
+[project.urls]
+Homepage = "https://github.com/millerlai/tradestation-data-provider"
+Repository = "https://github.com/millerlai/tradestation-data-provider"
+Issues = "https://github.com/millerlai/tradestation-data-provider/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tradestation_data"]
+
+[tool.hatch.build.targets.sdist]
+# Only ship what a user / packager would actually need to rebuild the
+# wheel and run the tests. Skip the C++ side (built upstream as a DLL)
+# and developer-only artifacts.
+include = [
+    "/src",
+    "/tests",
+    "/config/sinks.yaml",
+    "/config/symbols.yaml",
+    "/README.md",
+    "/LICENSE",
+    "/pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = [
+    "error",
+    "ignore::DeprecationWarning",
+]
+
+[tool.coverage.run]
+source = ["src/tradestation_data"]
+branch = true
+omit = [
+    "tests/*",
+    "*/__main__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+    "^\\s*\\.\\.\\.\\s*$",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+# The vendored vcpkg tree lives at ../../cpp/ and is unreachable from this
+# project root, so it needs no exclude here. The repo-root .ruff.toml guards
+# against someone running ruff from the top of the tree instead.
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",      # pycodestyle + pyflakes
+    "I",                 # isort
+    "N",                 # pep8-naming
+    "UP",                # pyupgrade
+    "B",                 # bugbear
+    "SIM",               # simplify
+    "RUF",               # ruff-specific
+]
+ignore = [
+    "E501",              # line length (handled by formatter)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["N802", "N803"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+files = ["src"]
+
+[[tool.mypy.overrides]]
+# pyarrow ships no type stubs (no py.typed, no types-pyarrow on PyPI).
+# Two errors flow from this: `import-untyped` at the import site, and
+# `no-untyped-call` at every ParquetWriter / write_table / close call.
+# The first override targets pyarrow itself so the imports stop
+# flagging. The second narrows `no-untyped-call` to just the three
+# storage wrappers — the rest of `src/` keeps full strict rules.
+module = ["pyarrow", "pyarrow.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    "tradestation_data.storage.bar_writer",
+    "tradestation_data.storage.tick_writer",
+    "tradestation_data.storage.history_store",
+]
+disable_error_code = ["no-untyped-call"]

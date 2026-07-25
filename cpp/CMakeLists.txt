@@ -56,6 +56,13 @@ set_target_properties(TS2Python PROPERTIES
     OUTPUT_NAME "TS2Python"
     PREFIX ""
     WINDOWS_EXPORT_ALL_SYMBOLS OFF
+    # ts2python.h switches on TS2PYTHON_EXPORTS to pick dllexport over
+    # dllimport. CMake would otherwise define TS2Python_EXPORTS (target
+    # name, different case), leaving the header on the dllimport branch
+    # and every definition in ts2python.cpp failing with C2491. The
+    # MSBuild project sets this in PreprocessorDefinitions; DEFINE_SYMBOL
+    # is the CMake equivalent.
+    DEFINE_SYMBOL "TS2PYTHON_EXPORTS"
 )
 
 if(MSVC)
