@@ -95,13 +95,18 @@ def _expected_bars(
     tf_sec: int,
     tz: ZoneInfo,
 ) -> list[datetime]:
-    """Right-labeled bar ends for a session. 1m 09:30-16:00 → [09:31..16:00]."""
+    """Left-labeled bucket starts for a session. 1m 09:30-16:00 → [09:30..15:59].
+
+    Matches ``BAR_SCHEMA.bucket_start`` semantics: bucket = [t, t+step), so
+    a US RTH 09:30-16:00 session yields ``bucket_start`` values starting at
+    09:30 and ending at 15:59 (last bucket covers [15:59, 16:00)).
+    """
     start_dt = datetime.combine(day, start).replace(tzinfo=tz)
     end_dt = datetime.combine(day, end).replace(tzinfo=tz)
     step = timedelta(seconds=tf_sec)
     out: list[datetime] = []
-    t = start_dt + step
-    while t <= end_dt:
+    t = start_dt
+    while t < end_dt:
         out.append(t.astimezone(UTC))
         t += step
     return out
