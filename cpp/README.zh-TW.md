@@ -28,7 +28,7 @@ C++ DLL，把 TradeStation EasyLanguage 的呼叫橋到 ZeroMQ PUB socket。Pyth
   "vol": 12000, "bid": 450.39, "ask": 450.41, "tc": 140 }
 ```
 
-`ts` 是 DLL 收到時刻的 wall clock（UTC epoch）；`ts_utc` 是 EL 字串透過 `std::chrono::zoned_time`（"America/New_York" zone）轉成 UTC；`ts_str` 是 EL 原始 `yyyy-MM/dd-HH:mm:ss` 24 小時字串，原文 pass-through。Python 端對 bar 的 `bucket_start` **以 `ts_str` 為準**。細節見 `../docs/design.md §3.2 / §5` 及 `../docs/error_codes.md`。
+`ts` 是 DLL 收到時刻的 wall clock（UTC epoch）；`ts_utc` 是 EL 字串透過 `std::chrono::zoned_time`（"America/New_York" zone）轉成 UTC；`ts_str` 是 EL 原始 `yyyy-MM/dd-HH:mm:ss` 24 小時字串，原文 pass-through。Subscriber 對 bar 的 `bucket_start` **以 `ts_str` 為準**。規範見 [`../contract/semantics.md`](../contract/semantics.md) §1–2 及 [`../contract/v1/envelope.md`](../contract/v1/envelope.md)。
 
 ## 要求
 
@@ -168,7 +168,7 @@ cmake --install build/x86-release --prefix build/x86-release/stage
 
 ## C ABI
 
-DLL 版本 `EL_DllVersion() == 6`。完整語意（return codes、threading rules、lifecycle）見 `../docs/design.md` 與 `../docs/error_codes.md`。
+DLL 版本 `EL_DllVersion() == 6`。return codes 見 [`../contract/error_codes.md`](../contract/error_codes.md)，ABI × wire 版本對應見 [`../contract/compat.md`](../contract/compat.md)。
 
 ```c
 int __stdcall EL_DllVersion(void);
