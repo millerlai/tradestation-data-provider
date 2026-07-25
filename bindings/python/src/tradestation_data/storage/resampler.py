@@ -38,6 +38,61 @@ _MINUTES: dict[str, int] = {
     "1d": 60 * 24,
 }
 
+# ---- bucket alignment ----------------------------------------------------
+#
+# Buckets are anchored to the trading session, not to the Unix epoch, and the
+# grid is laid out in America/New_York wall-clock time. See
+# contract/semantics.md §2.2.
+#
+# Anchoring to the epoch (what a bare time_bucket does) happens to be right for
+# 5m/15m/30m — the ET offset is a whole number of hours and 09:30 is a multiple
+# of 30 minutes — but it is wrong for the two longer frames:
+#
+#   1h  epoch-aligned gives 09:00 ET buckets, so the first regular-session bar
+#       covers only 09:30-10:00: half a bar that looks like a whole one.
+#   1d  epoch-aligned splits on UTC midnight, which falls at 20:00 ET — exactly
+#       the end of the extended session. Post-market activity lands on the
+#       following day.
+#
+# Both anchors sit outside the DST fold (the transition is at 02:00 ET), so
+# converting a bucket edge back to UTC is never ambiguous.
+_SESSION_OPEN_LOCAL = "09:30:00"
+
+# 04:00 ET, matching aggregation.session.PRE_SESSION_CUTOFF_LOCAL: the
+# extended session runs 04:00 -> 20:00 ET, and anything before 04:00 belongs to
+# the previous session date. A daily bar must use the same boundary, or the
+# session logic and the daily rollup disagree about which day a bar is in.
+_SESSION_DATE_CUTOFF_LOCAL = "04:00:00"
+
+_ANCHOR_LOCAL: dict[str, str] = {
+    "1m": _SESSION_OPEN_LOCAL,
+    "5m": _SESSION_OPEN_LOCAL,
+    "15m": _SESSION_OPEN_LOCAL,
+    "30m": _SESSION_OPEN_LOCAL,
+    "1h": _SESSION_OPEN_LOCAL,
+    "1d": _SESSION_DATE_CUTOFF_LOCAL,
+}
+
+# Any date works as an origin; the time-of-day is what sets the grid. Fixed so
+# the SQL is deterministic.
+_ANCHOR_DATE = "2000-01-03"
+
+_ET_ZONE = "America/New_York"
+
+
+def _bucket_expr(column: str, timeframe: str) -> str:
+    """SQL that buckets a TIMESTAMPTZ column, session-anchored, back to UTC.
+
+    The round trip through local time is deliberate: bucketing in UTC with a
+    fixed origin would drift by an hour against the session twice a year, when
+    the ET offset changes but the origin does not.
+    """
+    interval = _INTERVALS[timeframe]
+    origin = f"TIMESTAMP '{_ANCHOR_DATE} {_ANCHOR_LOCAL[timeframe]}'"
+    local = f"timezone('{_ET_ZONE}', {column})"
+    bucketed = f"time_bucket(INTERVAL '{interval}', {local}, {origin})"
+    return f"timezone('{_ET_ZONE}', {bucketed})"
+
 
 def timeframe_to_minutes(timeframe: str | Timeframe) -> int:
     tf = str(timeframe)
@@ -107,11 +162,10 @@ class Resampler:
         if not files:
             return pl.DataFrame(schema=_EMPTY_SCHEMA)
 
-        interval = _INTERVALS[tf]
         pattern = (self._ticks_root / f"symbol={symbol}" / "date=*" / "ticks.parquet").as_posix()
         sql = f"""
         SELECT
-          time_bucket(INTERVAL '{interval}', timestamp) AS bucket_start,
+          {_bucket_expr("timestamp", tf)} AS bucket_start,
           first(price ORDER BY timestamp) AS open,
           max(price)                      AS high,
           min(price)                      AS low,
@@ -164,13 +218,12 @@ class Resampler:
         if not files:
             return pl.DataFrame(schema=_EMPTY_SCHEMA)
 
-        interval = _INTERVALS[tf]
         pattern = (src_dir / "date=*" / "bars.parquet").as_posix()
         # Alias the bucketed column to ``bkt`` to avoid an ambiguous
         # GROUP BY against the source's ``bucket_start`` column.
         sql = f"""
         SELECT
-          time_bucket(INTERVAL '{interval}', bucket_start) AS bkt,
+          {_bucket_expr("bucket_start", tf)} AS bkt,
           first(open  ORDER BY bucket_start) AS open,
           max(high)                          AS high,
           min(low)                           AS low,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import polars as pl
 import pytest
@@ -225,3 +226,131 @@ def test_resample_from_bars_rejects_unsupported_timeframe(tmp_path: Path) -> Non
     resampler = Resampler(tmp_path / "ticks", bars_root=tmp_path / "bars")
     with pytest.raises(ValueError, match="Unsupported timeframe"):
         resampler.resample_from_bars("SPY", T0, T0 + timedelta(hours=1), "7m")
+
+
+# ---- session-anchored bucket alignment (contract/semantics.md §2.2) -------
+#
+# 09:30 ET on 2026-04-20 is 13:30 UTC (EDT, UTC-4).
+
+_OPEN_UTC = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)
+_ET = ZoneInfo("America/New_York")
+
+
+def _et(df: pl.DataFrame) -> list[str]:
+    """bucket_start rendered in ET, which is where the alignment is visible."""
+    return [b.astimezone(_ET).strftime("%Y-%m-%d %H:%M") for b in df["bucket_start"].to_list()]
+
+
+def test_hourly_buckets_open_at_the_session_open_not_the_clock_hour(tmp_path: Path) -> None:
+    """Epoch-aligned hours would label the first RTH bar 09:00.
+
+    That bar would hold only 09:30-10:00 — half a bar wearing a whole bar's
+    timestamp, which nothing downstream could tell apart from a real one.
+    """
+    root = tmp_path / "ticks"
+    # One tick every 10 minutes for two hours from the open.
+    _write_ticks(
+        root, [_tick("SPY", _OPEN_UTC + timedelta(minutes=10 * i), 450.0 + i) for i in range(12)]
+    )
+
+    df = (
+        Resampler(root)
+        .resample("SPY", _OPEN_UTC - timedelta(hours=1), _OPEN_UTC + timedelta(hours=3), "1h")
+        .sort("bucket_start")
+    )
+
+    assert _et(df) == ["2026-04-20 09:30", "2026-04-20 10:30"]
+
+
+def test_intraday_frames_align_to_the_open(tmp_path: Path) -> None:
+    root = tmp_path / "ticks"
+    _write_ticks(root, [_tick("SPY", _OPEN_UTC + timedelta(minutes=i), 450.0) for i in range(60)])
+    rs = Resampler(root)
+    window = (_OPEN_UTC - timedelta(hours=1), _OPEN_UTC + timedelta(hours=2))
+
+    for tf, first in [("5m", "09:30"), ("15m", "09:30"), ("30m", "09:30")]:
+        df = rs.resample("SPY", *window, tf).sort("bucket_start")
+        assert _et(df)[0] == f"2026-04-20 {first}", tf
+
+
+def test_daily_bucket_keeps_the_post_market_on_the_same_session(tmp_path: Path) -> None:
+    """UTC midnight falls at 20:00 ET — the exact end of the extended session.
+
+    Bucketing on it would push every post-market print onto the next day.
+    """
+    root = tmp_path / "ticks"
+    _write_ticks(
+        root,
+        [
+            _tick("SPY", datetime(2026, 4, 20, 13, 30, tzinfo=UTC), 450.0),  # 09:30 ET
+            _tick("SPY", datetime(2026, 4, 20, 23, 59, tzinfo=UTC), 451.0),  # 19:59 ET
+            _tick("SPY", datetime(2026, 4, 21, 0, 30, tzinfo=UTC), 452.0),  # 20:30 ET
+        ],
+    )
+
+    df = (
+        Resampler(root)
+        .resample(
+            "SPY",
+            datetime(2026, 4, 19, tzinfo=UTC),
+            datetime(2026, 4, 22, tzinfo=UTC),
+            "1d",
+        )
+        .sort("bucket_start")
+    )
+
+    assert _et(df) == ["2026-04-20 04:00"]
+    assert df["close"].to_list() == [452.0]
+
+
+def test_daily_bucket_puts_pre_0400_on_the_previous_session(tmp_path: Path) -> None:
+    """Matches aggregation.session.PRE_SESSION_CUTOFF_LOCAL.
+
+    If the rollup used a different boundary from the session logic, the two
+    would disagree about which day a bar belongs to.
+    """
+    root = tmp_path / "ticks"
+    _write_ticks(
+        root,
+        [
+            _tick("SPY", datetime(2026, 4, 21, 7, 59, tzinfo=UTC), 450.0),  # 03:59 ET
+            _tick("SPY", datetime(2026, 4, 21, 8, 0, tzinfo=UTC), 451.0),  # 04:00 ET
+        ],
+    )
+
+    df = (
+        Resampler(root)
+        .resample(
+            "SPY",
+            datetime(2026, 4, 19, tzinfo=UTC),
+            datetime(2026, 4, 23, tzinfo=UTC),
+            "1d",
+        )
+        .sort("bucket_start")
+    )
+
+    assert _et(df) == ["2026-04-20 04:00", "2026-04-21 04:00"]
+
+
+@pytest.mark.parametrize(
+    ("day", "note"),
+    [("2026-03-06", "EST, before DST"), ("2026-03-10", "EDT, after DST")],
+)
+def test_hourly_grid_survives_dst(tmp_path: Path, day: str, note: str) -> None:
+    """The grid is laid out in ET wall-clock, so it does not drift twice a year.
+
+    A fixed UTC origin would slide by an hour against the session each time
+    the offset changes.
+    """
+    root = tmp_path / "ticks"
+    open_et = datetime.fromisoformat(f"{day}T10:30:00").replace(tzinfo=_ET)
+    _write_ticks(root, [_tick("SPY", open_et.astimezone(UTC), 450.0)])
+
+    df = Resampler(root).resample(
+        "SPY",
+        open_et.astimezone(UTC) - timedelta(days=1),
+        open_et.astimezone(UTC) + timedelta(days=1),
+        "1h",
+    )
+
+    assert _et(df) == [f"{day} 10:30"], note

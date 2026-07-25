@@ -57,6 +57,29 @@ changes; patch releases (`0.x.Y`) will not.
 - This `CHANGELOG.md`.
 
 ### Changed
+- **BREAKING (data): resampled buckets are anchored to the trading session, not
+  the Unix epoch.** `Resampler` used a bare `time_bucket`, which is epoch-aligned.
+  That happens to be correct for 5m/15m/30m — the ET offset is a whole number of
+  hours and 09:30 is a multiple of 30 minutes — but not for the longer frames:
+  `1h` produced 09:00 ET buckets, so the first regular-session bar held only
+  09:30–10:00 while carrying a full bar's timestamp, and `1d` split on UTC
+  midnight, which is 20:00 ET — the end of the extended session, so post-market
+  prints landed on the following day. `1d` also disagreed with
+  `aggregation.session`'s 04:00 ET rule about which day a bar belonged to.
+
+  The grid is now laid out in `America/New_York` wall-clock time, anchored at
+  09:30 for intraday and 04:00 for daily, so it does not drift against the
+  session when the offset changes twice a year. Neither anchor sits in the DST
+  fold. Specified in `contract/semantics.md` §2.2.
+
+  **Any cached 1h or 1d bars on disk were produced by the old alignment and are
+  wrong.** Clear them and let them rebuild:
+
+  ```
+  python scripts/clear_bar_cache.py --data-root ./data --timeframes 1h 1d --confirm
+  ```
+
+  5m/15m/30m caches are unaffected.
 - **BREAKING (wire): `bid` / `ask` may now be `null`.** EL's `InsideBid` / `InsideAsk`
   return 0 whenever there is no quote — historical replay, any non-live bar, and symbols
   that never carry one. The DLL previously forwarded that 0 verbatim, putting what reads
