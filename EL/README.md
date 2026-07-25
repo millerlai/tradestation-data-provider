@@ -21,7 +21,27 @@ TradeStation Chart → TS2Python_Exporter.el → TS2Python.dll → ZMQ PUB → s
 3. 貼上 `TS2Python_Exporter.el` 內容
 4. 確認 `TS2Python.dll` 已放在 TradeStation DLL 搜尋路徑（見 [`../cpp/README.md`](../cpp/README.md)）
 5. Verify indicator（F3）
-6. 掛到目標 chart（SPY、QQQ、`$TICK`, …），設定 data series 為 tick 或 1-second
+6. 掛到目標 chart（SPY、QQQ、`$TICK`, …），data series 設為 **tick 或 1 分鐘**
+
+## 支援的 chart 間隔
+
+| chart | 行為 |
+| --- | --- |
+| Tick series（`BarType = 0`） | 逐筆送出 |
+| **1 分鐘**（`BarType = 1` 且 `BarInterval = 1`） | 送出完整 OHLC |
+| 其他 intraday 間隔（5 分、15 分、60 分 …） | **閒置**，Print 一次原因 |
+| 日 / 週 / 月 / P&F | 閒置，Print 一次原因 |
+
+其他間隔之所以閒置而非送出：`BarType = 1` 涵蓋所有 intraday 分鐘圖，而 wire 目前
+寫死 `bar_1m`。從 5 分鐘圖送出會把 5 分鐘 bar 存進 `timeframe=1m` 分區，下游再從
+這批資料「推導」5m —— 全程沒有任何錯誤訊息。讓圖表安靜下來才是誠實的失敗方式。
+
+多 timeframe 將透過 wire 的 `tf` 欄位支援。
+
+> ⚠️ **待驗證**：秒級 chart 可能同樣回報 `BarType = 1`、`BarInterval = 1`，
+> 那樣 1 秒 bar 會通過檢查並被當成 1 分鐘 bar 送出。TradeStation 有
+> `BarType_ext` 可區分秒級與分鐘級 intraday，但各版本取值不同，尚未對照實機確認。
+> 在確認前請只使用分鐘圖。
 
 ## 設計約束
 

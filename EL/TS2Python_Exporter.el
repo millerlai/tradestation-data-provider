@@ -4,19 +4,37 @@
   Job:   Forward every bar/tick on the chart's symbol to TS2Python.dll so the
          Python agent can consume it via ZeroMQ.
 
-  Host:  Insert as an Indicator on any chart.
-         - BarType = 0 (tick)        → calls EL_PublishTick(Close, ...)
-         - BarType = 1 (minute, etc.)→ calls EL_PublishTickEx(O, H, L, C, ...)
-         - Other BarType (Daily/Weekly/Monthly/P&F) is skipped and logs once.
+  Host:  Insert as an Indicator on a chart the wire can describe.
+         - BarType = 0                      → EL_PublishTick(Close, ...)
+         - BarType = 1 and BarInterval = 1  → EL_PublishTickEx(O, H, L, C, ...)
+         - anything else                    → idle, logged once
 
-         On a 1-min chart we send the full OHLC so Python can rebuild the bar
-         losslessly instead of collapsing to a single close price.
+         On a 1-min chart we send the full OHLC so the subscriber can rebuild
+         the bar losslessly instead of collapsing it to a single close price.
+
+  WHY THE INTERVAL CHECK: BarType = 1 covers every intraday minute chart —
+  1-min, 5-min, 15-min, 60-min are all BarType 1, distinguished only by
+  BarInterval. The wire currently states "bar_1m" unconditionally, so
+  publishing from a 5-min chart would write 5-minute bars into the 1-minute
+  partition, and downstream resampling would then derive "5m" from data that
+  was already 5m. Nothing would report an error. Refusing to publish is the
+  honest failure: the chart goes quiet and the operator notices.
+
+  Multi-timeframe support is planned via a `tf` field on the wire; until the
+  wire can say which interval a bar is, this indicator only publishes the one
+  interval it can name.
+
+  KNOWN GAP — VERIFY BEFORE RELYING ON THIS: a second-based chart may also
+  report BarType = 1 with BarInterval = 1, in which case 1-second bars would
+  pass the check below and be published as 1-minute bars. TradeStation exposes
+  BarType_ext to separate second-based from minute-based intraday, but the
+  exact values differ across TS versions and have not been checked against a
+  live install here. Use minute charts only until that is confirmed.
 
   Zero state. All symbol/value plumbing comes from TS built-ins at runtime,
   so one compiled indicator covers every chart.
 
-  See repo docs/design.md §3.1 for the contract. Error codes live in
-  docs/error_codes.md.
+  Wire format and semantics: ../contract/. Error codes: ../contract/error_codes.md.
   =========================================================================== }
 
 Inputs:
@@ -29,6 +47,7 @@ Variables:
     PubRC(0),
     InitDone(False),
     UnsupportedLogged(False),
+    WrongIntervalLogged(False),
     Sym(""),
     TsStr("");
 
@@ -59,12 +78,13 @@ If Enabled and InitDone = False Then Begin
             Print("[TS2Python] EL_Init ok rc=", InitRC,
                   " dll_version=", EL_DllVersion,
                   " symbol=", GetSymbolName,
-                  " bar_type=", BarType);
+                  " bar_type=", BarType,
+                  " bar_interval=", BarInterval);
     End;
 End;
 
-{ -- Per-bar publish. Dispatch on BarType so that minute/second bars keep
-     their full OHLC on the wire. Tick series stays on the legacy path. }
+{ -- Per-bar publish. Dispatch on BarType *and* BarInterval: BarType alone
+     cannot tell a 1-minute chart from a 5-minute one. }
 If Enabled and InitDone Then Begin
     Sym = GetSymbolName;
     { Bar-time string "yyyy-MM/dd-HH:mm:ss" 24-hour (e.g. "2026-04/18-13:30:45").
@@ -99,8 +119,8 @@ If Enabled and InitDone Then Begin
             Insidebid,
             Insideask,
             Ticks);
-    End Else If BarType = 1 Then Begin
-        { Minute (or other intraday) bar — send the full OHLC. }
+    End Else If BarType = 1 and BarInterval = 1 Then Begin
+        { 1-minute bar — send the full OHLC. }
         PubRC = EL_PublishTickEx(
             Sym,
             TsStr,
@@ -112,6 +132,20 @@ If Enabled and InitDone Then Begin
             Insidebid,
             Insideask,
             Ticks);
+    End Else If BarType = 1 Then Begin
+        { Intraday, but not 1-minute. The wire has no way to say which
+          interval this is, so publishing would silently file these bars
+          under timeframe=1m. Stay quiet and say why. }
+        If WrongIntervalLogged = False Then Begin
+            If LogErrors Then
+                Print("[TS2Python] chart interval is ", BarInterval,
+                      " minutes; only 1-minute intraday bars can be published",
+                      " (the wire cannot yet state the interval).",
+                      " symbol=", Sym,
+                      " — indicator is idle on this chart");
+            WrongIntervalLogged = True;
+        End;
+        PubRC = 0;
     End Else Begin
         { Daily/Weekly/Monthly/P&F — out of scope for the Python agent.
           Log once so the operator notices if they attach the indicator
@@ -130,6 +164,7 @@ If Enabled and InitDone Then Begin
         Print("[TS2Python] publish rc=", PubRC,
               " symbol=", Sym,
               " bar_type=", BarType,
+              " bar_interval=", BarInterval,
               " ts=", TsStr,
               " close=", Close);
 End;
