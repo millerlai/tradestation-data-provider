@@ -6,17 +6,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from tradestation_data.domain import (
-    Bar,
-    Fill,
-    Order,
-    OrderIntent,
-    OrderStatus,
-    OrderType,
-    Position,
-    Side,
-    Tick,
-)
+from tradestation_data.domain import Bar, Tick
 
 _ET = ZoneInfo("America/New_York")
 
@@ -53,51 +43,6 @@ def test_bar_zero_volume_index_symbol() -> None:
     )
     assert bar.volume == 0
     assert bar.tick_count == 3
-
-
-def test_order_intent_basic() -> None:
-    intent = OrderIntent(
-        symbol="SPY",
-        side=Side.BUY,
-        quantity=100,
-        order_type=OrderType.MARKET,
-        client_ref="advisor-001",
-    )
-    assert intent.side == "buy"
-    assert intent.order_type == "market"
-    assert intent.limit_price is None
-
-
-def test_order_status_enum_values() -> None:
-    assert OrderStatus.FILLED == "filled"
-    assert OrderStatus.PENDING == "pending"
-
-
-def test_fill_basic() -> None:
-    ts = datetime(2026, 4, 18, 13, 30, tzinfo=UTC)
-    fill = Fill(
-        order_id="ord-1",
-        symbol="SPY",
-        side=Side.BUY,
-        quantity=100,
-        price=450.25,
-        timestamp=ts,
-    )
-    assert fill.quantity == 100
-
-
-def test_order_wraps_intent() -> None:
-    ts = datetime(2026, 4, 18, 13, 30, tzinfo=UTC)
-    intent = OrderIntent(symbol="SPY", side=Side.BUY, quantity=100, order_type=OrderType.MARKET)
-    order = Order(
-        order_id="ord-1",
-        intent=intent,
-        status=OrderStatus.ACCEPTED,
-        submitted_at=ts,
-        broker_ref="paper-1",
-    )
-    assert order.intent is intent
-    assert order.status == "accepted"
 
 
 def test_tick_timestamp_et_returns_et_view() -> None:
@@ -155,25 +100,3 @@ def test_bar_bucket_start_et_dst_fallback_preserves_distinct_instants() -> None:
     assert bar_est.bucket_start_et.hour == 1
     # UTC instants differ even though ET wall-clock reads the same.
     assert bar_edt.bucket_start != bar_est.bucket_start
-
-
-def test_position_flat_long_short() -> None:
-    long_pos = Position("SPY", 100, 450.0, 0.0, 25.0)
-    short_pos = Position("SPY", -50, 450.0, 0.0, -10.0)
-    assert long_pos.quantity > 0
-    assert short_pos.quantity < 0
-
-
-def test_side_buy_sell_classifiers() -> None:
-    assert Side.BUY.is_buy_side and not Side.BUY.is_sell_side
-    assert Side.BUY_TO_COVER.is_buy_side and not Side.BUY_TO_COVER.is_sell_side
-    assert Side.SELL.is_sell_side and not Side.SELL.is_buy_side
-    assert Side.SELL_SHORT.is_sell_side and not Side.SELL_SHORT.is_buy_side
-
-
-def test_side_string_values_are_stable_wire_format() -> None:
-    """Wire format depends on these literals — guard against accidental rename."""
-    assert Side.BUY == "buy"
-    assert Side.SELL == "sell"
-    assert Side.SELL_SHORT == "sell_short"
-    assert Side.BUY_TO_COVER == "buy_to_cover"

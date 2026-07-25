@@ -4,7 +4,6 @@ from datetime import UTC, date, datetime, timedelta
 
 from tradestation_data.aggregation import MarketSnapshot, SessionPolicy, SymbolView
 from tradestation_data.domain.bar import Bar
-from tradestation_data.domain.position import Position
 from tradestation_data.domain.tick import Tick
 
 # 13:30 UTC == 09:30 ET on 2026-04-20 (EDT). Aligned to the regular session open.
@@ -83,17 +82,6 @@ def test_symbols_lists_all_seen() -> None:
     assert sorted(snap.symbols()) == ["QQQ", "SPY"]
 
 
-def test_position_round_trip() -> None:
-    snap = MarketSnapshot()
-    assert snap.position_of("SPY") is None
-    pos = Position("SPY", 100, 450.0, 0.0, 10.0)
-    snap.set_position(pos)
-    assert snap.position_of("SPY") is pos
-
-    snap.clear_position("SPY")
-    assert snap.position_of("SPY") is None
-
-
 def test_view_of_returns_none_for_unknown() -> None:
     snap = MarketSnapshot()
     assert snap.view_of("SPY") is None
@@ -136,19 +124,6 @@ def test_views_batch_returns_immutable_copies_for_all_known_symbols() -> None:
 
     filtered = snap.views(["SPY"])
     assert set(filtered.keys()) == {"SPY"}
-
-
-def test_positions_returns_decoupled_copy() -> None:
-    snap = MarketSnapshot()
-    pos = Position("SPY", 100, 450.0, 0.0, 10.0)
-    snap.set_position(pos)
-
-    copy1 = snap.positions()
-    assert copy1 == {"SPY": pos}
-
-    # Mutating the returned dict must not affect the live snapshot.
-    copy1.clear()
-    assert snap.position_of("SPY") is pos
 
 
 # ---- session-aware retention ---------------------------------------------

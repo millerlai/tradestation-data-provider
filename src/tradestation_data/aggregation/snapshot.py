@@ -10,7 +10,6 @@ from tradestation_data.aggregation.session import (
     session_start_utc,
 )
 from tradestation_data.domain.bar import Bar
-from tradestation_data.domain.position import Position
 from tradestation_data.domain.tick import Tick
 
 DEFAULT_RECENT_BARS: int = 100
@@ -88,7 +87,6 @@ class MarketSnapshot:
     ) -> None:
         self._max_bars = max_bars_per_symbol
         self._states: dict[str, SymbolState] = {}
-        self._positions: dict[str, Position] = {}
         self._policies: dict[str, SessionPolicy] = dict(symbol_policies or {})
         # No policy at all → legacy behaviour (pure bar-count window).
         self._default_policy = default_policy
@@ -158,19 +156,6 @@ class MarketSnapshot:
             if v is not None:
                 out[sym] = v
         return out
-
-    def position_of(self, symbol: str) -> Position | None:
-        return self._positions.get(symbol)
-
-    def positions(self) -> dict[str, Position]:
-        """Return a shallow copy of all current positions (Position is frozen)."""
-        return dict(self._positions)
-
-    def set_position(self, position: Position) -> None:
-        self._positions[position.symbol] = position
-
-    def clear_position(self, symbol: str) -> None:
-        self._positions.pop(symbol, None)
 
     def symbols(self) -> list[str]:
         return list(self._states.keys())
