@@ -1,8 +1,9 @@
 version: 2
 updates:
-  # Python runtime + dev dependencies declared in pyproject.toml.
+  # Python runtime + dev dependencies declared in bindings/python/pyproject.toml.
+  # Each language binding gets its own entry as it is added.
   - package-ecosystem: "pip"
-    directory: "/"
+    directory: "/bindings/python"
     schedule:
       interval: "weekly"
       day: "monday"

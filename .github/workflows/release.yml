@@ -16,6 +16,9 @@ jobs:
   build:
     name: Build sdist + wheel
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bindings/python
     steps:
       - uses: actions/checkout@v6
 
@@ -51,7 +54,8 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: dist
-          path: dist/
+          # Not a `run:` step, so job-level working-directory does not apply.
+          path: bindings/python/dist/
           if-no-files-found: error
           retention-days: 7
 

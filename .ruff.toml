@@ -1,0 +1,12 @@
+# Repo-root guard only. The real Python project config lives in
+# bindings/python/pyproject.toml and wins for anything under that tree.
+#
+# This file exists because `ruff check .` from the repo root would otherwise
+# find no configuration, fall back to defaults, and walk into the vendored
+# vcpkg checkout — which it has already done once, rewriting third-party
+# sources (import sorting, F401, UP015) that must stay byte-identical to
+# upstream.
+extend-exclude = [
+    "cpp",
+    "contract/fixtures",
+]

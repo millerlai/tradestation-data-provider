@@ -122,12 +122,9 @@ directory = "htmlcov"
 line-length = 100
 target-version = "py311"
 src = ["src", "tests"]
-extend-exclude = [
-    # Vendored vcpkg / build helpers — third-party Python scripts that
-    # ship next to the C++ build system. Not part of this project.
-    "cpp/build-tools",
-    "cpp/vcpkg_installed",
-]
+# The vendored vcpkg tree lives at ../../cpp/ and is unreachable from this
+# project root, so it needs no exclude here. The repo-root .ruff.toml guards
+# against someone running ruff from the top of the tree instead.
 
 [tool.ruff.lint]
 select = [

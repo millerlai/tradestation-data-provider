@@ -130,8 +130,11 @@ tradestation-data-provider/
 │     ├─ pyproject.toml                  ⇢
 │     ├─ uv.lock                         ⇢
 │     ├─ README.md                       ★ 本 binding 專屬說明
+│     ├─ .python-version                 ★ 釘 3.12，與 CI matrix 對齊
+│     ├─ LICENSE                         ★ 副本 — 打包後端無法引用專案根之上
 │     ├─ config/
-│     │  └─ sinks.yaml                   ⇢ Python 專屬（值是 module:attr 路徑）
+│     │  ├─ sinks.yaml                   ⇢ Python 專屬（值是 module:attr 路徑）
+│     │  └─ symbols.yaml                 ⇢ 本 binding 的 symbol universe 範例
 │     ├─ src/tradestation_data/
 │     │  ├─ __init__.py · py.typed
 │     │  ├─ domain/                      [core] bar.py · tick.py · position.py
@@ -152,9 +155,7 @@ tradestation-data-provider/
 │     └─ tests/                          ⇢ 32 支現有測試
 │        └─ conformance/                 ★ 對 contract/fixtures 跑驗證
 │
-├─ config/
-│  └─ symbols.yaml                       （現有，留根）symbology — 語言中立，
-│                                        　 所有 binding 共用；規則本文進 semantics.md
+├─ .ruff.toml                            ★ 僅為 repo 根的防護，見 §3.3
 │
 ├─ docs/
 │  ├─ architecture.md                    ★ 本文
@@ -178,18 +179,43 @@ tradestation-data-provider/
 | 放哪 | 判準 | 例子 |
 | --- | --- | --- |
 | `contract/` | **換 binding 語言後必須一致**的東西 | 時間權威來源、session 規則、error code |
-| `config/`（根） | 語言中立的執行期設定 | `symbols.yaml`（symbology） |
-| `bindings/python/config/` | 只有該 binding 看得懂的設定 | `sinks.yaml`（值是 `module:attr`） |
+| `bindings/<lang>/config/` | 該 binding 的執行期設定與範例檔 | `sinks.yaml` `symbols.yaml` |
 | `bindings/<lang>/` | 該語言的實作、測試、腳本 | 其餘全部 |
 
-`config/sinks.yaml` 之所以必須下放，是因為它的內容是 Python import 路徑：
+`sinks.yaml` 屬於 binding 的理由最直接 —— 它的值就是 Python import 路徑：
 
 ```yaml
 class: tradestation_data.sinks.parquet:ParquetBarSink
 ```
 
-Go binding 讀到這行毫無意義。反之 `symbols.yaml` 描述的是市場事實（symbol 分類、
-session 政策），任何 binding 都需要。
+Go binding 讀到這行毫無意義。
+
+### 3.3 為何 repo 根沒有 `config/`
+
+原本規劃把 `symbols.yaml` 留在根，理由是 symbology 語言中立。實作時被一個硬限制推翻：
+
+> **hatchling 的 `license-files` 與 sdist `include` 都以 `pyproject.toml` 所在目錄為
+> 根，無法引用上層檔案。** `pyproject.toml` 一旦進 `bindings/python/`，repo 根的
+> `config/symbols.yaml` 與 `LICENSE` 就打包不進 sdist。
+
+重新檢視後，這個限制指向了更正確的切法：
+
+- **symbol 清單是使用者的標的選擇** —— 別人會交易不同的 symbol，它是**範例 config**。
+- **真正語言中立的是 `category` 的語意** —— `etf` / `breadth` / `volatility` /
+  `mega_cap` 各自對應什麼 session 政策 —— 那已經在
+  [`contract/semantics.md`](../contract/semantics.md) §4.1。
+- 何況 Go binding 未必用 YAML。
+
+結論：**規則進 contract，範例檔進 binding。** `LICENSE` 則在 `bindings/python/` 放一份
+副本，這是多語言 monorepo 的常規做法。
+
+### 3.4 repo 根的 `.ruff.toml`
+
+`bindings/python/pyproject.toml` 只在該子樹內生效。從 repo 根執行 `ruff check .`
+會找不到設定、退回預設值，然後走進 vendored 的 vcpkg 檢出目錄改寫第三方原始碼 ——
+**這已經發生過一次**（import 排序、F401、UP015 共動了 10 個檔案）。
+
+根目錄的 `.ruff.toml` 只做一件事：排除 `cpp/` 與 `contract/fixtures/`。
 
 ### 3.2 消費端職責殘留 — 已決議移除
 
