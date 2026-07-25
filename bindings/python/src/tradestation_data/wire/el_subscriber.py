@@ -22,11 +22,89 @@ log = logging.getLogger(__name__)
 # Windows timezone — wrong whenever the operator's system isn't ET).
 _ET_TZ: ZoneInfo = ZoneInfo("America/New_York")
 
-# Default set of symbols emitted by TradeStation as indices / breadth with
-# no bid/ask/volume semantics. See docs/design.md §6.
+# Symbols TradeStation emits as indices / breadth, with no bid/ask/volume
+# semantics. The wire carries bid/ask as plain floats for these (usually 0.0
+# or stale), so the invalidation has to happen here — it is a contract rule,
+# not a local convenience. See ../../../../contract/semantics.md §3.
 DEFAULT_INDEX_SYMBOLS: frozenset[str] = frozenset(
     {"$TICK", "$ADD", "$VOLD", "$TRIN", "$PCVA", "VXX"}
 )
+
+# Wire versions this binding understands. v1 has no seq/sid and therefore no
+# gap detection; v2 adds both. Reading a version above the maximum is an
+# error rather than a guess — an unknown high version may have changed field
+# semantics we would silently misread. See ../../../../contract/compat.md.
+SUPPORTED_WIRE_VERSIONS: frozenset[int] = frozenset({1, 2})
+
+
+class _SequenceTracker:
+    """Per-symbol gap detection for wire v2.
+
+    PUB/SUB drops silently at both high-water marks, so a missing message
+    looks exactly like a quiet market. The publisher stamps a per-symbol
+    monotonic ``seq`` and a per-session ``sid``; comparing them against what
+    we expected is the only way to notice loss.
+
+    Sequences are per symbol because a subscriber may filter on one topic —
+    a global counter's gaps would be indistinguishable from traffic it never
+    asked for. ``tick`` and ``bar_1m`` share a symbol's counter since they
+    interleave on the same topic.
+    """
+
+    def __init__(self) -> None:
+        self._sid: int | None = None
+        self._expected: dict[str, int] = {}
+        self.messages_lost = 0
+
+    def observe(self, symbol: str, seq: int, sid: int) -> int:
+        """Record one message; return how many were lost immediately before it."""
+        if sid != self._sid:
+            # New publisher session: counters restarted at the source, so a
+            # low seq here is a restart rather than 4 billion lost messages.
+            if self._sid is not None:
+                log.info(
+                    "publisher_session_changed",
+                    extra={"old_sid": self._sid, "new_sid": sid, "symbol": symbol},
+                )
+            self._sid = sid
+            self._expected = {}
+
+        expected = self._expected.get(symbol)
+        self._expected[symbol] = seq + 1
+
+        if expected is None:
+            # First message seen for this symbol. A late subscriber joining
+            # at seq=21 did not lose 20 messages — it was not listening for
+            # them. Establish the baseline silently.
+            log.debug("sequence_baseline", extra={"symbol": symbol, "seq": seq})
+            return 0
+
+        if seq == expected:
+            return 0
+
+        if seq < expected:
+            # TCP preserves per-publisher order, so this is a duplicate or a
+            # replay rather than reordering. Do not rewind the expectation.
+            log.warning(
+                "sequence_regressed",
+                extra={"symbol": symbol, "seq": seq, "expected": expected},
+            )
+            self._expected[symbol] = expected
+            return 0
+
+        lost = seq - expected
+        self.messages_lost += lost
+        log.warning(
+            "sequence_gap",
+            extra={
+                "symbol": symbol,
+                "expected": expected,
+                "received": seq,
+                "lost": lost,
+                "lost_total": self.messages_lost,
+            },
+        )
+        return lost
 
 
 class TradeStationELProvider:
@@ -96,6 +174,17 @@ class TradeStationELProvider:
         self._socket: zmq.asyncio.Socket | None = None
         self._subscribed: set[str] = set()
         self._closed = False
+        self._seq = _SequenceTracker()
+        self._warned_no_gap_detection = False
+
+    @property
+    def messages_lost(self) -> int:
+        """Messages the publisher sent but this subscriber never received.
+
+        Always 0 against a wire v1 publisher, which carries no sequence —
+        that means "cannot tell", not "none lost".
+        """
+        return self._seq.messages_lost
 
     async def connect(self) -> None:
         if self._socket is not None:
@@ -165,8 +254,21 @@ class TradeStationELProvider:
     def _parse_payload(self, symbol: str, payload: bytes) -> MarketEvent:
         data = json.loads(payload)
         version = data.get("v", 1)
-        if version != 1:
+        if version not in SUPPORTED_WIRE_VERSIONS:
             raise ValueError(f"Unsupported payload version: {version}")
+
+        seq = data.get("seq")
+        if seq is not None:
+            self._seq.observe(symbol, int(seq), int(data.get("sid", 0)))
+        elif not self._warned_no_gap_detection:
+            # Do not refuse the frame: an older DLL may still be deployed in
+            # the user's TradeStation, and refusing would break data
+            # collection entirely rather than degrade it.
+            self._warned_no_gap_detection = True
+            log.warning(
+                "gap_detection_unavailable",
+                extra={"wire_version": version, "reason": "payload carries no seq"},
+            )
 
         kind = data.get("kind", "tick")
         if kind == "bar_1m":

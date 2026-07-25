@@ -786,3 +786,152 @@ async def test_events_logs_and_continues_on_transient_zmq_error(caplog) -> None:
     provider._closed = True
     await gen.aclose()
     provider._socket = None
+
+
+# ---- wire v2: sequence tracking / gap detection ---------------------------
+
+
+def _v2(seq: int, sid: int = 7001, **over: object) -> dict[str, object]:
+    """A minimal wire-v2 tick payload."""
+    base: dict[str, object] = {
+        "v": 2,
+        "kind": "tick",
+        "seq": seq,
+        "sid": sid,
+        "ts": datetime(2026, 4, 18, 13, 30, 45, tzinfo=UTC).timestamp(),
+        "ts_utc": 0.0,
+        "ts_str": "",
+        "px": 450.0,
+        "vol": 100,
+        "bid": 449.99,
+        "ask": 450.01,
+        "tc": 1,
+    }
+    base.update(over)
+    return base
+
+
+def _tracker():
+    from tradestation_data.wire.el_subscriber import _SequenceTracker
+
+    return _SequenceTracker()
+
+
+def test_sequence_first_message_sets_baseline_without_reporting_loss() -> None:
+    """A late subscriber joining mid-stream did not lose what it never asked for."""
+    t = _tracker()
+    assert t.observe("SPY", 21, 7001) == 0
+    assert t.messages_lost == 0
+
+
+def test_sequence_contiguous_reports_no_loss() -> None:
+    t = _tracker()
+    t.observe("SPY", 1, 7001)
+    assert t.observe("SPY", 2, 7001) == 0
+    assert t.observe("SPY", 3, 7001) == 0
+    assert t.messages_lost == 0
+
+
+def test_sequence_gap_is_counted() -> None:
+    t = _tracker()
+    t.observe("SPY", 1, 7001)
+    assert t.observe("SPY", 5, 7001) == 3  # 2, 3, 4 never arrived
+    assert t.messages_lost == 3
+    # Tracking resumes from the message that did arrive.
+    assert t.observe("SPY", 6, 7001) == 0
+    assert t.messages_lost == 3
+
+
+def test_sequence_is_tracked_per_symbol() -> None:
+    """A gap on one topic must not be inferred from another topic's traffic."""
+    t = _tracker()
+    t.observe("SPY", 1, 7001)
+    t.observe("QQQ", 1, 7001)
+    assert t.observe("SPY", 2, 7001) == 0
+    assert t.observe("QQQ", 2, 7001) == 0
+    assert t.messages_lost == 0
+
+
+def test_publisher_restart_resets_instead_of_reporting_huge_loss() -> None:
+    """A new sid means counters restarted at the source, not that we lost data."""
+    t = _tracker()
+    t.observe("SPY", 900, 7001)
+    t.observe("SPY", 901, 7001)
+    assert t.observe("SPY", 1, 7002) == 0
+    assert t.messages_lost == 0
+    assert t.observe("SPY", 2, 7002) == 0
+
+
+def test_sequence_regression_does_not_rewind_expectation() -> None:
+    """Duplicates must not make the next real message look like a gap."""
+    t = _tracker()
+    t.observe("SPY", 1, 7001)
+    t.observe("SPY", 2, 7001)
+    assert t.observe("SPY", 2, 7001) == 0  # duplicate
+    assert t.messages_lost == 0
+    assert t.observe("SPY", 3, 7001) == 0  # still expected 3
+
+
+@pytest.mark.asyncio
+async def test_provider_parses_v2_and_exposes_messages_lost(zmq_inproc_bus) -> None:
+    ctx, pub, endpoint = zmq_inproc_bus
+    provider = TradeStationELProvider(endpoint=endpoint, context=ctx)
+    await provider.connect()
+    await provider.subscribe(["SPY"])
+    await asyncio.sleep(0)
+
+    await _publish(pub, "SPY", _v2(1))
+    tick, gen = await _next_tick(provider)
+    assert tick.price == pytest.approx(450.0)
+    assert provider.messages_lost == 0
+
+    await _publish(pub, "SPY", _v2(4, px=451.0))
+    tick2 = await asyncio.wait_for(anext(gen), timeout=1.0)
+    assert tick2.price == pytest.approx(451.0)
+    assert provider.messages_lost == 2  # seq 2 and 3 dropped
+
+    await gen.aclose()
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_v1_payload_still_accepted_after_v2_support(zmq_inproc_bus) -> None:
+    """An older DLL is still deployable; degrade gap detection, do not refuse."""
+    ctx, pub, endpoint = zmq_inproc_bus
+    provider = TradeStationELProvider(endpoint=endpoint, context=ctx)
+    await provider.connect()
+    await provider.subscribe(["SPY"])
+    await asyncio.sleep(0)
+
+    ts_epoch = datetime(2026, 4, 18, 13, 30, 45, tzinfo=UTC).timestamp()
+    await _publish(
+        pub,
+        "SPY",
+        {"v": 1, "ts": ts_epoch, "px": 450.23, "vol": 100, "bid": 450.22, "ask": 450.24, "tc": 5},
+    )
+
+    tick, gen = await _next_tick(provider)
+    assert tick.price == pytest.approx(450.23)
+    assert provider.messages_lost == 0  # "cannot tell", not "none lost"
+
+    await gen.aclose()
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_unknown_future_wire_version_is_rejected(zmq_inproc_bus) -> None:
+    """An unknown high version may have changed field meanings — do not guess."""
+    ctx, pub, endpoint = zmq_inproc_bus
+    provider = TradeStationELProvider(endpoint=endpoint, context=ctx)
+    await provider.connect()
+    await provider.subscribe(["SPY"])
+    await asyncio.sleep(0)
+
+    await _publish(pub, "SPY", _v2(1, v=99))
+    await _publish(pub, "SPY", _v2(2, px=452.0))
+
+    tick, gen = await _next_tick(provider)
+    assert tick.price == pytest.approx(452.0)  # v99 skipped, stream continues
+
+    await gen.aclose()
+    await provider.close()
