@@ -96,8 +96,10 @@ changes; patch releases (`0.x.Y`) will not.
   `MarketSnapshot.{position_of,positions,set_position,clear_position}`. Nothing in
   production code imported the order module, and position tracking is a consumer concern —
   a data provider does not know what you hold.
-- `bindings/python/.python-version` pins 3.12 to match the CI matrix. `requires-python`
-  has no upper bound, so a fresh `uv sync` had picked 3.14, for which pyarrow has no wheel.
+- **Python 3.14 is supported and tested.** A fresh `uv sync` had been resolving to 3.14
+  and failing, because the lockfile pinned pyarrow 21, which ships no cp314 wheel and so
+  fell back to building from source. Unpinning it (24.0.0) fixes that at the source; 3.14
+  joins the CI matrix and the classifiers.
 
 ### Fixed
 - **A 5-minute chart silently corrupted the 1-minute partition.** `BarType = 1` covers

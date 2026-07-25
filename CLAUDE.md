@@ -23,8 +23,9 @@ have to guess belongs in `contract/semantics.md`, with a fixture.
 
 - Wire v2 / DLL ABI 7 is current; v1 is superseded but **still supported** — the DLL sits
   in the user's TradeStation install and does not update when a binding does.
-- Python ≥ 3.11, managed with **uv**. `.python-version` pins 3.12 (`requires-python` has
-  no upper bound, and a fresh sync otherwise picks a version with no pyarrow wheel).
+- Python 3.11–3.14, managed with **uv**; all four are in the CI matrix. There is
+  deliberately no `.python-version` — one would override `uv sync --python <v>`, leaving
+  `uv run` on a different interpreter than the one just synced.
 - Package `tradestation_data` under `bindings/python/src/`. Console script
   `tradestation-data-ingest` → `tradestation_data.runtime.main:main`.
 - READMEs are split EN / zh-TW at the repo root and again under `bindings/python/`.
