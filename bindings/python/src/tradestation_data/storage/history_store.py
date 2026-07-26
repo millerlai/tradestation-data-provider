@@ -21,6 +21,10 @@ from tradestation_data.storage.resampler import Resampler
 
 log = logging.getLogger(__name__)
 
+# The zone BAR_SCHEMA / TICK_SCHEMA declare for their `*_et` columns. Read
+# paths have to restore it explicitly; see _restore_et_zone.
+_ET_ZONE = "America/New_York"
+
 
 class HistoryStore:
     """
@@ -68,7 +72,7 @@ class HistoryStore:
             con.close()
         df = pl.from_arrow(arrow_tbl)
         assert isinstance(df, pl.DataFrame)
-        return df
+        return _restore_et_zone(df)
 
     # ----- bars -----------------------------------------------------
 
@@ -171,7 +175,7 @@ class HistoryStore:
         assert isinstance(df, pl.DataFrame)
         if df.height == 0:
             return None
-        return df
+        return _restore_et_zone(df)
 
     def _miss_build_and_return(
         self, symbol: str, start: datetime, end: datetime, timeframe: str
@@ -273,6 +277,36 @@ class HistoryStore:
                 date_dir.rmdir()
 
 
+def _restore_et_zone(df: pl.DataFrame) -> pl.DataFrame:
+    """Re-label every ``*_et`` column as America/New_York after a DuckDB read.
+
+    ``SET TimeZone='UTC'`` is deliberate — without it DuckDB renders
+    TIMESTAMPTZ in whatever zone the session inherits, so the same query
+    would describe its own output differently on two machines. But it
+    applies to *every* column, including the ones persisted as ET, and
+    what comes back is labelled UTC.
+
+    The instant survives (TIMESTAMPTZ is absolute; only the rendering
+    zone changes), so this conversion is exact. The label does not
+    survive, and it is the whole point of storing an ET column:
+    ``bucket_start_et.dt.hour()`` returned 13 instead of 9 for an 09:30
+    ET bar. Worse, it disagreed with itself — the cache-miss path builds
+    the column with ``convert_time_zone`` and got the label right, so a
+    caller saw 9 or 13 depending on whether anyone had warmed that range
+    before.
+    """
+    et_cols = [
+        name
+        for name, dtype in df.schema.items()
+        if name.endswith("_et") and isinstance(dtype, pl.Datetime) and dtype.time_zone
+    ]
+    if not et_cols:
+        return df
+    return df.with_columns(
+        [pl.col(c).dt.convert_time_zone(_ET_ZONE) for c in et_cols],
+    )
+
+
 def _with_bucket_start_et(df: pl.DataFrame) -> pl.DataFrame:
     """Add ``bucket_start_et`` if the frame only carries the UTC column.
 
@@ -282,7 +316,7 @@ def _with_bucket_start_et(df: pl.DataFrame) -> pl.DataFrame:
     if "bucket_start_et" in df.columns:
         return df
     return df.with_columns(
-        pl.col("bucket_start").dt.convert_time_zone("America/New_York").alias("bucket_start_et")
+        pl.col("bucket_start").dt.convert_time_zone(_ET_ZONE).alias("bucket_start_et")
     )
 
 
