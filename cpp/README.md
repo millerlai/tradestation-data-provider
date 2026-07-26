@@ -4,7 +4,7 @@
 
 C++ DLL that bridges TradeStation EasyLanguage calls to a ZeroMQ PUB socket. The Python side ([`tradestation-data-provider`](../README.md), root of this repo) subscribes over `tcp://127.0.0.1:5555` and routes the events through its pluggable sink pipeline.
 
-This subdirectory is the **publisher** half of the system. The current ABI is **DLL version 6**.
+This subdirectory is the **publisher** half of the system. The current ABI is **DLL version 8**.
 
 ## Wire format
 
@@ -198,16 +198,21 @@ Output lands in `cpp/build/x86-release/stage/bin/`: `TS2Python.dll`, `TS2Python_
 
 ## Deploy to TradeStation
 
-1. Build **Release | x86** (TradeStation is strictly 32-bit; x64 will not load).
-2. Copy both DLLs into `C:\Program Files (x86)\TradeStation <version>\Program\`:
-   - `TS2Python.dll`
-   - the ZeroMQ runtime beside it — **`libzmq-mt-4_3_5.dll`**, not `libzmq.dll`. vcpkg emits a versioned filename, so copy whatever `.dll` sits next to `TS2Python.dll` in `cpp\Release\` rather than typing the name from memory; it changes when the pinned vcpkg revision moves.
+```powershell
+.\build.bat --x86                 # skip this to install the binary in prebuilt\
+.\install-to-tradestation.bat
+```
 
-   ```powershell
-   # From cpp\, after a Release|x86 build:
-   Copy-Item Release\*.dll "C:\Program Files (x86)\TradeStation <version>\Program\"
-   ```
-3. In the EasyLanguage editor, Verify the indicator that imports the DLL.
+`install-to-tradestation.bat` locates the TradeStation `Program` folder under the usual roots on `C:` and `D:` (recognised by `ORPlat.exe` / `TSDev.exe` / `TSCLUtil.exe` — there is no `TradeStation.exe`), and asks for the path with an example when it finds none. Then, before copying anything:
+
+- It reads the **PE header of the platform executable** to decide whether to install the x86 or the x64 build, and refuses a DLL whose architecture disagrees. TradeStation is a 32-bit process on a 64-bit Windows, so "x64 machine, therefore x64 DLL" is the mistake being guarded against.
+- It copies **every `.dll` beside `TS2Python.dll`**, which is how the ZeroMQ runtime comes along — **`libzmq-mt-4_3_5.dll`**, not `libzmq.dll`. vcpkg emits a versioned filename that moves when the pinned revision does, so it is never typed from memory.
+- It refuses to run while TradeStation is open (Windows locks the loaded DLL), reports a destination it cannot write to as needing an elevated prompt, and warns when the **Visual C++ 2015-2022 Redistributable (x86)** is missing — the DLL is linked against the dynamic CRT, and EasyLanguage reports its absence only as an unexplained load failure.
+- It asks separately before replacing a `TS2Python.dll` that is already installed, showing both files' dates.
+
+Source preference is: solution build (`cpp\Release`) → CMake build (`cpp\build\x86-release\Release`) → the binaries checked into [`prebuilt/`](prebuilt/) for people without a C++ toolchain. A local build always wins over the shipped one.
+
+Then, in the EasyLanguage editor, Verify the indicator that imports the DLL.
 
 ## C ABI
 

@@ -4,7 +4,7 @@
 
 C++ DLL，把 TradeStation EasyLanguage 的呼叫橋到 ZeroMQ PUB socket。Python 端（[`tradestation-data-provider`](../README.md)，本 repo 根目錄）透過 `tcp://127.0.0.1:5555` 訂閱，再把收到的事件交給可插拔的 sink pipeline。
 
-這個子目錄是整個系統的**發布端**。當前 ABI 是 **DLL version 6**。
+這個子目錄是整個系統的**發布端**。當前 ABI 是 **DLL version 8**。
 
 ## Wire format
 
@@ -198,16 +198,21 @@ cmake --install build/x86-release --prefix build/x86-release/stage
 
 ## 部署到 TradeStation
 
-1. Build **Release | x86**（TS 絕對是 32-bit process，x64 不會被載入）。
-2. 把下列檔案複製到 `C:\Program Files (x86)\TradeStation <version>\Program\`：
-   - `TS2Python.dll`
-   - 旁邊那個 ZeroMQ runtime —— **`libzmq-mt-4_3_5.dll`**，不是 `libzmq.dll`。vcpkg 輸出的是帶版本的檔名，所以請直接複製 `cpp\Release\` 裡與 `TS2Python.dll` 並排的那個 `.dll`，不要憑印象打檔名；它會隨釘住的 vcpkg 版本改變。
+```powershell
+.\build.bat --x86                 # 不想自己 build 就跳過，直接裝 prebuilt\ 裡的
+.\install-to-tradestation.bat
+```
 
-   ```powershell
-   # 在 cpp\ 底下，build 完 Release|x86 之後：
-   Copy-Item Release\*.dll "C:\Program Files (x86)\TradeStation <version>\Program\"
-   ```
-3. TradeStation EasyLanguage Editor 裡重新 Verify 使用這支 DLL 的 indicator。
+`install-to-tradestation.bat` 會在 `C:` 與 `D:` 的常見根目錄下找出 TradeStation 的 `Program` 資料夾（靠 `ORPlat.exe` / `TSDev.exe` / `TSCLUtil.exe` 辨識 —— 那裡沒有 `TradeStation.exe`），找不到就直接問你並附上範例路徑。複製任何檔案之前它會：
+
+- 讀**平台執行檔的 PE header** 決定要裝 x86 還是 x64，架構不符的 DLL 直接拒絕。TradeStation 是跑在 64 位元 Windows 上的 32 位元 process，「機器是 x64 所以裝 x64」正是這裡要擋的錯。
+- 複製**與 `TS2Python.dll` 並排的每一個 `.dll`**，ZeroMQ runtime 就是這樣一起帶過去的 —— **`libzmq-mt-4_3_5.dll`**，不是 `libzmq.dll`。vcpkg 輸出的是帶版號的檔名，會隨釘住的 vcpkg 版本改變，所以絕不憑印象打檔名。
+- TradeStation 還開著就拒絕執行（已載入的 DLL 會被 Windows 鎖住）；目標不可寫時會告訴你要用系統管理員身分執行；缺少 **Visual C++ 2015-2022 Redistributable (x86)** 時會警告 —— DLL 連的是 dynamic CRT，而 EasyLanguage 只會回報一個沒有原因的載入失敗。
+- 目標已有 `TS2Python.dll` 時，會單獨問你要不要取代，並列出兩個檔案的日期。
+
+來源的優先順序是：.sln 建置（`cpp\Release`）→ CMake 建置（`cpp\build\x86-release\Release`）→ 給沒有 C++ 工具鏈的人用、已 commit 進 repo 的 [`prebuilt/`](prebuilt/)。本機建置永遠優先於隨 repo 附上的版本。
+
+最後在 TradeStation EasyLanguage Editor 裡重新 Verify 使用這支 DLL 的 indicator。
 
 ## C ABI
 
