@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from glob import glob
 from pathlib import Path
 
 import duckdb
@@ -10,7 +11,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from tradestation_data.domain.bar import is_derived
-from tradestation_data.domain.timeframe import Timeframe
+from tradestation_data.domain.timeframe import (
+    NATIVE_ONLY_TIMEFRAMES,
+    SINGLE_FILE_TIMEFRAMES,
+    Timeframe,
+)
 from tradestation_data.storage.bar_writer import BAR_SCHEMA
 from tradestation_data.storage.resampler import Resampler
 
@@ -25,13 +30,17 @@ class HistoryStore:
       {root}/ticks/symbol=.../date=.../ticks.parquet         — Tier 1 raw
       {root}/bars/timeframe=1m/symbol=.../date=.../bars.parquet  — Tier 2 live
       {root}/bars/timeframe=<tf>/symbol=.../date=.../bars.parquet — Tier 3 lazy
+      {root}/bars/timeframe=1d/symbol=.../bars.parquet        — published, one file
 
     Public API (§3.6.6):
       - load_ticks(symbol, start, end)                 → Polars DataFrame
       - load_bars(symbol, start, end, timeframe)       → Polars DataFrame
           · cache hit  → read {root}/bars/timeframe=<tf>/...
           · cache miss → resample from Tier 1 → persist → return
-      - rebuild_bar_cache(symbol, start, end, timeframe) — force rebuild
+          · NATIVE_ONLY_TIMEFRAMES → whatever is on disk, or empty. Never
+            computed: a derived daily is a plausible-looking wrong answer.
+      - rebuild_bar_cache(symbol, start, end, timeframe) — force rebuild;
+        refuses NATIVE_ONLY_TIMEFRAMES, which are data rather than cache.
     """
 
     def __init__(self, root: Path | str) -> None:
@@ -74,6 +83,18 @@ class HistoryStore:
         cached = self._load_cached_bars(symbol, start, end, tf)
         if cached is not None:
             return cached
+        if tf in NATIVE_ONLY_TIMEFRAMES:
+            # Not a cache miss — there is nothing to miss. A `1d` bar is only
+            # ever what TradeStation published, so an empty answer is the
+            # truthful one. Building it from minutes would return a frame
+            # that looks right, carries neither the exchange's official close
+            # nor the split/dividend adjustment, and is indistinguishable
+            # from the real thing once persisted. §2.3.
+            log.info(
+                "native_only_timeframe_not_cached",
+                extra={"symbol": symbol, "timeframe": tf},
+            )
+            return pl.DataFrame()
         return self._miss_build_and_return(symbol, start, end, tf)
 
     def load_cached_bars(
@@ -100,6 +121,15 @@ class HistoryStore:
         timeframe: str | Timeframe,
     ) -> pl.DataFrame:
         tf = str(timeframe)
+        if tf in NATIVE_ONLY_TIMEFRAMES:
+            # Rebuilding means deleting and recomputing, and neither half is
+            # legal here: the file is the only copy, and the recomputed
+            # replacement would be wrong. Raising beats a no-op — a caller
+            # asking for this has the wrong model of the tier.
+            raise ValueError(
+                f"{tf!r} is published, not derived: it cannot be rebuilt. "
+                "Re-export it from TradeStation instead."
+            )
         self._delete_cache(symbol, tf)
         return self._miss_build_and_return(symbol, start, end, tf)
 
@@ -108,14 +138,25 @@ class HistoryStore:
     def _cache_dir(self, symbol: str, timeframe: str) -> Path:
         return self._bars_root / f"timeframe={timeframe}" / f"symbol={symbol}"
 
+    def _bar_glob(self, symbol: str, timeframe: str) -> str:
+        """Where this timeframe's files live, as one read_parquet pattern.
+
+        `SINGLE_FILE_TIMEFRAMES` have no `date=` level — see
+        :class:`~tradestation_data.storage.bar_writer.BarWriter`. Globbing
+        `date=*` there matches nothing, which reads as "no data" rather than
+        as an error, so this has to follow the same rule the writer does.
+        """
+        cache_dir = self._cache_dir(symbol, timeframe)
+        if timeframe in SINGLE_FILE_TIMEFRAMES:
+            return (cache_dir / "bars.parquet").as_posix()
+        return (cache_dir / "date=*" / "bars.parquet").as_posix()
+
     def _load_cached_bars(
         self, symbol: str, start: datetime, end: datetime, timeframe: str
     ) -> pl.DataFrame | None:
-        cache_dir = self._cache_dir(symbol, timeframe)
-        files = sorted(cache_dir.glob("date=*/bars.parquet"))
-        if not files:
+        pattern = self._bar_glob(symbol, timeframe)
+        if not glob(pattern):
             return None
-        pattern = (cache_dir / "date=*" / "bars.parquet").as_posix()
         con = duckdb.connect()
         try:
             con.execute("SET TimeZone='UTC'")
@@ -183,8 +224,12 @@ class HistoryStore:
             # pq.write_table overwrites, and a partly-covered range takes the
             # miss path for the whole span, so without this a single missing
             # day would rebuild — and overwrite — every native day beside it.
+            # Any charted interval can be native, not just 1m: a 5-minute
+            # chart publishes native 5m bars into this same directory.
             #
-            # Daily is where the loss would be real rather than cosmetic:
+            # Daily never reaches here at all — NATIVE_ONLY_TIMEFRAMES is
+            # refused before the miss path — but the reason is the sharpest
+            # statement of why this guard exists at all:
             # TradeStation's daily bar carries the exchange's official OHLC
             # and is split/dividend adjusted. Summing ticks cannot reproduce
             # either, so the replacement would look plausible and be wrong.

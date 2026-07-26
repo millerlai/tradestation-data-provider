@@ -95,12 +95,18 @@ EasyLanguage 傳的是 `BarType` 與 `BarInterval` 兩個數字，`tf` 字串由
 | BarType | BarInterval | `tf` |
 | ---: | ---: | --- |
 | 1（intraday） | 1 / 5 / 15 / 30 / 60 | `1m` `5m` `15m` `30m` `1h` |
-| 2（daily） | 1 | `1d` |
+| 2（daily） | **0 或 1** | `1d` |
 | 其他 | — | **無**，`EL_PublishBar` 回傳 `-5` 且不送出 |
 
 放在 C ABI 而非 EL，理由與報價正規化相同：只有一個實作，所有呼叫端自動一致。
 **不猜測**——`BarType = 1` 涵蓋所有 intraday 分鐘圖，猜錯就是把 5 分鐘 bar 歸進
 1 分鐘分區，而下游偵測不到。
+
+日線的 `BarInterval` 兩個值都收：**TradeStation 10 實測回報 `0`**（SPY 日線圖的
+EL log：`bar_type=2.00 bar_interval=0.00`），而 `1` 是 ABI 8 出廠時寫進本表的值 ——
+DLL 裝在本 repo 看不到的機器上，兩個都得認。`2` 以上仍然拒絕：`BarType = 2` 的
+interval 是「幾天一根」，收下去就是把 2 日線混進 `1d` 分區，而它長得跟真的日線
+一模一樣。
 
 ## 邊界與限制
 

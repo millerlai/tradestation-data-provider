@@ -41,6 +41,10 @@ class _DayPartition:
     day: date
     buffer: list[Tick] = field(default_factory=list)
     writer: pq.ParquetWriter | None = None
+    # Its day has rolled over: the file is closed and will take no more
+    # ticks. Kept in the table rather than dropped so a late tick is
+    # refused instead of reopening — pq.ParquetWriter truncates on open.
+    sealed: bool = False
 
     def path(self, root: Path) -> Path:
         return root / f"symbol={self.symbol}" / f"date={self.day.isoformat()}" / "ticks.parquet"
@@ -63,6 +67,11 @@ class TickWriter:
     footer is only written on `close()` — crashing loses the entire
     in-progress file for that partition. This is accepted: the live
     system treats tick loss on crash as tolerable.
+
+    That exposure is bounded to the *current* day: a partition is sealed
+    (flushed and closed) as soon as a tick for a later day of the same
+    symbol arrives, so finished sessions are readable while the process
+    keeps running instead of only after it stops.
     """
 
     def __init__(
@@ -93,8 +102,17 @@ class TickWriter:
         key = (tick.symbol, partition_day)
         part = self._partitions.get(key)
         if part is None:
+            self._seal_earlier_days(tick.symbol, partition_day)
             part = _DayPartition(symbol=tick.symbol, day=partition_day)
             self._partitions[key] = part
+        elif part.sealed:
+            # Reopening would truncate a finished day. Losing one late tick
+            # beats losing the session it belongs to.
+            log.warning(
+                "tick_partition_sealed",
+                extra={"symbol": tick.symbol, "date": partition_day.isoformat()},
+            )
+            return
         part.buffer.append(tick)
         self._buffered_ticks += 1
         if self._oldest_buffer_monotonic is None:
@@ -112,14 +130,14 @@ class TickWriter:
     def flush(self) -> int:
         total = 0
         for part in self._partitions.values():
-            if not part.buffer:
-                continue
             total += self._flush_partition(part)
-        self._buffered_ticks = 0
-        self._oldest_buffer_monotonic = None
         return total
 
     def _flush_partition(self, part: _DayPartition) -> int:
+        # The running totals are maintained here rather than reset in
+        # flush(), because sealing flushes one partition on its own.
+        if not part.buffer:
+            return 0
         path = part.path(self._root)
         path.parent.mkdir(parents=True, exist_ok=True)
         table = _ticks_to_table(part.buffer)
@@ -128,7 +146,27 @@ class TickWriter:
         part.writer.write_table(table)
         n = len(part.buffer)
         part.buffer.clear()
+        self._buffered_ticks -= n
+        if self._buffered_ticks == 0:
+            self._oldest_buffer_monotonic = None
         return n
+
+    def _seal_earlier_days(self, symbol: str, day: date) -> None:
+        """Finish every earlier day of the same symbol.
+
+        A partition whose day has rolled over will never take another
+        tick, so holding its writer open only keeps its file footerless —
+        unreadable to every reader until close(), however long the process
+        runs.
+        """
+        for key, part in self._partitions.items():
+            if part.sealed or key[0] != symbol or key[1] >= day:
+                continue
+            self._flush_partition(part)
+            if part.writer is not None:
+                part.writer.close()
+                part.writer = None
+            part.sealed = True
 
     def close(self) -> None:
         if self._closed:

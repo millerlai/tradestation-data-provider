@@ -34,7 +34,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from tradestation_data.domain.timeframe import TIER3_TIMEFRAMES
+from tradestation_data.domain.timeframe import NATIVE_ONLY_TIMEFRAMES, TIER3_TIMEFRAMES
 from tradestation_data.storage.history_store import partition_holds_native
 
 log = logging.getLogger("tradestation_data.tools.clear_bar_cache")
@@ -74,6 +74,16 @@ def main(argv: list[str] | None = None) -> int:
 
     targets: list[Path] = []
     for tf in args.timeframes:
+        if tf in NATIVE_ONLY_TIMEFRAMES:
+            # Named explicitly, since it is no longer in the default list.
+            # The provenance check below would spare these files anyway, but
+            # saying so is better than a silent "0 deleted".
+            log.warning(
+                "skipping_native_only_timeframe tf=%s — published, not cache; "
+                "it cannot be rebuilt, so it is never cleared",
+                tf,
+            )
+            continue
         tf_dir = bars_root / f"timeframe={tf}"
         if tf_dir.exists() and tf_dir.is_dir():
             targets.append(tf_dir)

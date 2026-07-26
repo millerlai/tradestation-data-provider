@@ -40,6 +40,7 @@ have to guess belongs in `contract/semantics.md`, with a fixture.
   `Timeframe` — the value range of the wire, `tf` included. A new domain type with no
   counterpart on the wire means scope is leaking back in.
 - `domain/timeframe.py` is the single source for the timeframe vocabulary: the enum,
+  `NATIVE_ONLY_TIMEFRAMES` (never computed), `SINGLE_FILE_TIMEFRAMES` (no `date=` level),
   the minutes table, the wire allow-list, the Tier-3 default, and `align_bucket_start`
   (the Python twin of `resampler._bucket_expr`). Adding an interval should be one edit
   there, not six scattered ones — and any new interval must divide one hour, or the
@@ -136,7 +137,7 @@ Background loops in IngestionRuntime: ingest / advance (wall-clock) / flush (sin
 
 `IngestionRuntime` writes to a `SinkPipeline` rather than directly to `BarWriter` / `TickWriter`. The pipeline broadcasts every Tick and every closed Bar to every registered sink and **isolates per-sink exceptions** (one bad sink doesn't take down the others). The pipeline is built from `config/sinks.yaml` via `tradestation_data.sinks.registry.build_pipeline_from_config()`; users register custom sinks by pointing the YAML `class:` field at any importable `module:attr` returning a Sink protocol implementation. Built-ins:
 
-- `ParquetBarSink`, `ParquetTickSink` — thin adapters over the legacy `BarWriter` / `TickWriter` under `storage/`; on-disk layout, schema, and flush semantics are unchanged.
+- `ParquetBarSink`, `ParquetTickSink` — thin adapters over the legacy `BarWriter` / `TickWriter` under `storage/`; on-disk layout and schema are unchanged. **Both buffer and both advertise `flush`** — bars used to be written one at a time, which cost one Parquet row group per bar. Both writers also *seal* a partition (flush + close its file) as soon as an event for a later day of the same series arrives: a `ParquetWriter` left open has no footer, so its file is unreadable to every reader until the process stops.
 - `InMemorySink` — bounded per-symbol deques; for tests / notebook use only.
 - `CallbackSink` — dynamic Python callback dispatch with per-symbol or catch-all registration. Instances are tracked in a module-level `WeakValueDictionary`; user code does `get_sink(name)` to look up the instance declared in `sinks.yaml` and register handlers on it. `close()` eagerly removes the registry entry so a subsequent `get_sink()` raises `KeyError` immediately, not after GC.
 
@@ -153,8 +154,11 @@ Hive-partitioned Parquet under `data/`. `ParquetBarSink` / `ParquetTickSink` pro
 | 1    | `ticks/symbol={SYM}/date={YYYY-MM-DD}/ticks.parquet`                     | `ParquetTickSink` (→ `TickWriter`) |
 | 2    | `bars/timeframe=1m/symbol={SYM}/date={YYYY-MM-DD}/bars.parquet`          | `ParquetBarSink`  (→ `BarWriter`)  |
 | 3    | `bars/timeframe={5m,15m,30m,1h}/symbol={SYM}/date={YYYY-MM-DD}/bars.parquet` | `Resampler` (lazy, on cache miss from `HistoryStore.load_bars`) or `aggregate_parquet.py` (batch) |
+| —    | `bars/timeframe=1d/symbol={SYM}/bars.parquet`                            | `ParquetBarSink` only — **published, never derived** |
 
-`HistoryStore` is the read-side facade — DuckDB + Polars over the Parquet glob; `load_bars` falls through to `Resampler` and persists the result. `BAR_SCHEMA` / `TICK_SCHEMA` carry both `*_utc` (`UTC`) and `*_et` (`America/New_York`) timestamps — both are persisted so downstream tooling never has to convert at query time. Tier 3 caches are derived; `clear_bar_cache.py` deletes them safely and `audit_bar_cache.py` cross-checks them against a Tier-1 rebuild.
+**`1d` is not a tier, it is data.** `NATIVE_ONLY_TIMEFRAMES` in `domain/timeframe.py` names it: TradeStation's daily bar carries the exchange's official close and the split/dividend adjustment, which no rollup reproduces, so nothing computes one. `load_bars` returns empty rather than building it, `rebuild_bar_cache` and `aggregate_parquet.py` refuse it, and `clear_bar_cache.py` leaves it alone. Its layout is flat — no `date=` level, one file per symbol rewritten whole on each flush (`SINGLE_FILE_TIMEFRAMES`), because a day partition of daily bars is one row inside a ~2.9 KB file. Any reader building a bars path must ask `domain/timeframe.py` which shape applies rather than assuming `date=`.
+
+`HistoryStore` is the read-side facade — DuckDB + Polars over the Parquet glob; `load_bars` falls through to `Resampler` and persists the result. `BAR_SCHEMA` / `TICK_SCHEMA` carry both `*_utc` (`UTC`) and `*_et` (`America/New_York`) timestamps — both are persisted so downstream tooling never has to convert at query time. Tier 3 caches are derived; `clear_bar_cache.py` deletes them safely and `audit_bar_cache.py` cross-checks them against a Tier-1 rebuild. **Native bars are not only 1m** — a 5-minute chart publishes native 5m bars into the Tier-3 directory, which is why the provenance guard (`source` = `derived:*`) is what decides deletion, never the path.
 
 `--data-root` is now only a fallback path used when `--sinks-config` is missing — the YAML's per-sink `root` parameter wins otherwise. When you need to redirect output, edit `sinks.yaml`, not the CLI flag.
 

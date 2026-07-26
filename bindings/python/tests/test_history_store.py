@@ -223,12 +223,13 @@ def test_resampled_bars_are_stamped_as_derived(tmp_path: Path) -> None:
 
 
 def test_derived_bars_never_overwrite_native_ones(tmp_path: Path) -> None:
-    """A native daily bar carries the exchange's official OHLC and adjustments.
+    """Any charted interval can be native, not just 1m: a 5-minute chart
+    publishes native 5m bars into the same directory the resampler writes.
 
-    Summing ticks cannot reproduce either, so a derived rollup replacing it
-    would look plausible and be wrong. pq.write_table overwrites, and a range
-    that is only partly cached rebuilds the whole span, so without the guard
-    one missing day would take the native days beside it with it.
+    pq.write_table overwrites, and a range that is only partly cached
+    rebuilds the whole span, so without the guard one missing bucket would
+    take the native ones beside it with it. (`1d` cannot reach this path at
+    all any more — see test_daily_is_never_derived.)
     """
     from tradestation_data.domain.bar import Bar
     from tradestation_data.storage.bar_writer import BarWriter
@@ -238,7 +239,7 @@ def test_derived_bars_never_overwrite_native_ones(tmp_path: Path) -> None:
     ticks_root = root / "ticks"
 
     native_close = 999.0
-    day = datetime(2026, 4, 20, 8, 0, tzinfo=UTC)  # 04:00 ET — the 1d bucket
+    day = datetime(2026, 4, 20, 14, 0, tzinfo=UTC)  # 10:00 ET — on the 5m grid
     with BarWriter(bars_root) as w:
         w.write(
             Bar(
@@ -251,7 +252,7 @@ def test_derived_bars_never_overwrite_native_ones(tmp_path: Path) -> None:
                 volume=10,
                 tick_count=3,
                 source="tradestation_el",
-                timeframe="1d",
+                timeframe="5m",
             )
         )
 
@@ -280,18 +281,18 @@ def test_derived_bars_never_overwrite_native_ones(tmp_path: Path) -> None:
         "SPY",
         datetime(2026, 4, 19, tzinfo=UTC),
         datetime(2026, 4, 22, tzinfo=UTC),
-        "1d",
+        "5m",
     )
 
     out = store.load_bars(
         "SPY",
         datetime(2026, 4, 19, tzinfo=UTC),
         datetime(2026, 4, 22, tzinfo=UTC),
-        "1d",
+        "5m",
     )
-    assert out["close"].to_list() == [native_close]
-    assert out["source"].to_list() == ["tradestation_el"]
-    assert list((bars_root / "timeframe=1d").rglob("bars.parquet")), (
+    assert native_close in out["close"].to_list()
+    assert "tradestation_el" in out["source"].to_list()
+    assert list((bars_root / "timeframe=5m").rglob("bars.parquet")), (
         "the native partition file must survive rebuild_bar_cache"
     )
 
@@ -329,3 +330,86 @@ def test_cache_partitions_on_the_et_date_like_the_writer(tmp_path: Path) -> None
 
     cache_dir = root / "bars" / "timeframe=1m" / "symbol=SPY"
     assert [p.name for p in sorted(cache_dir.glob("date=*"))] == ["date=2026-01-05"]
+
+
+def test_daily_is_never_derived(tmp_path: Path) -> None:
+    """`1d` is published, not computed.
+
+    TradeStation's daily bar carries the exchange's official close and the
+    split/dividend adjustment; a rollup of minutes reproduces neither and is
+    indistinguishable from the real thing once on disk. An empty answer is
+    the truthful one — see contract/semantics.md 2.3.
+    """
+    from tradestation_data.domain.tick import Tick
+    from tradestation_data.storage.tick_writer import TickWriter
+
+    root = tmp_path / "store"
+    with TickWriter(root / "ticks") as w:
+        for i in range(5):
+            w.write(
+                Tick(
+                    symbol="SPY",
+                    timestamp=datetime(2026, 4, 20, 14, 0, tzinfo=UTC) + timedelta(minutes=i),
+                    price=100.0 + i,
+                    volume=5,
+                    bid=None,
+                    ask=None,
+                    tick_count=1,
+                    source="tradestation_el",
+                )
+            )
+
+    store = HistoryStore(root)
+    out = store.load_bars(
+        "SPY",
+        datetime(2026, 4, 19, tzinfo=UTC),
+        datetime(2026, 4, 22, tzinfo=UTC),
+        "1d",
+    )
+    assert out.height == 0
+    assert not (root / "bars" / "timeframe=1d").exists(), (
+        "a miss must not leave a computed daily bar behind"
+    )
+
+    # The same rule from the other side: a rebuild is a delete plus a
+    # recompute, and neither half is legal on data that is the only copy.
+    with pytest.raises(ValueError, match="published, not derived"):
+        store.rebuild_bar_cache(
+            "SPY",
+            datetime(2026, 4, 19, tzinfo=UTC),
+            datetime(2026, 4, 22, tzinfo=UTC),
+            "1d",
+        )
+
+
+def test_daily_reads_the_single_file_layout(tmp_path: Path) -> None:
+    """BarWriter drops the date= level for 1d; the reader must follow it,
+    or a glob that matches nothing reads as 'no data' rather than an error."""
+    from tradestation_data.domain.bar import Bar
+    from tradestation_data.storage.bar_writer import BarWriter
+
+    root = tmp_path / "store"
+    with BarWriter(root / "bars") as w:
+        for i in range(3):
+            w.write(
+                Bar(
+                    symbol="SPY",
+                    bucket_start=datetime(2026, 4, 20, 8, 0, tzinfo=UTC) + timedelta(days=i),
+                    open=1.0,
+                    high=2.0,
+                    low=0.5,
+                    close=450.0 + i,
+                    volume=10,
+                    tick_count=3,
+                    source="tradestation_el",
+                    timeframe="1d",
+                )
+            )
+
+    out = HistoryStore(root).load_bars(
+        "SPY",
+        datetime(2026, 4, 19, tzinfo=UTC),
+        datetime(2026, 4, 24, tzinfo=UTC),
+        "1d",
+    )
+    assert out["close"].to_list() == [450.0, 451.0, 452.0]

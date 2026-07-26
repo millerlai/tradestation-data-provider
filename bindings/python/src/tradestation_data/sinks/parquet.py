@@ -1,10 +1,10 @@
 """Built-in Parquet sinks.
 
 These are thin adapters over :class:`BarWriter` / :class:`TickWriter` —
-the on-disk layout, schema, and flush semantics are unchanged from the
-pre-sink runtime. They exist so the sink-driven runtime can keep doing
-exactly what the old `tick_writer` / `bar_writer` parameters did, just
-behind the :class:`Sink` protocol.
+the on-disk layout and schema are unchanged from the pre-sink runtime.
+They exist so the sink-driven runtime can keep doing exactly what the old
+`tick_writer` / `bar_writer` parameters did, just behind the
+:class:`Sink` protocol. Both buffer now, so both advertise ``flush``.
 """
 
 from __future__ import annotations
@@ -19,12 +19,14 @@ from tradestation_data.storage.tick_writer import TickWriter
 
 
 class ParquetBarSink(BaseSink):
-    """Write closed 1m bars to Hive-partitioned Parquet.
+    """Write closed bars to Hive-partitioned Parquet.
 
     Layout: ``{root}/timeframe={timeframe}/symbol={SYM}/date={YYYY-MM-DD}/bars.parquet``.
-    Bars are written inline (no buffer), matching the previous BarWriter
-    behaviour — one minute per symbol is tiny, and crash-loss is bounded
-    to that single minute (Tier-1 ticks are the recovery source anyway).
+    Buffered with the same two triggers as the tick sink (max bars / max
+    seconds since the oldest buffered bar); the pipeline's flush loop
+    drives :meth:`flush` via :meth:`should_flush`. Writing each bar the
+    moment it closed cost one Parquet row group per bar — see
+    :class:`~tradestation_data.storage.bar_writer.BarWriter`.
     """
 
     def __init__(
@@ -32,13 +34,26 @@ class ParquetBarSink(BaseSink):
         *,
         name: str,
         root: Path | str,
+        max_buffered_bars: int = 1_000,
+        max_flush_seconds: float = 60.0,
         compression: str = "zstd",
     ) -> None:
         self.name = name
-        self._writer = BarWriter(root, compression=compression)
+        self._writer = BarWriter(
+            root,
+            max_buffered_bars=max_buffered_bars,
+            max_flush_seconds=max_flush_seconds,
+            compression=compression,
+        )
 
     def on_bar(self, bar: Bar) -> None:
         self._writer.write(bar)
+
+    def should_flush(self) -> bool:
+        return self._writer.should_flush()
+
+    def flush(self) -> None:
+        self._writer.flush()
 
     def close(self) -> None:
         self._writer.close()

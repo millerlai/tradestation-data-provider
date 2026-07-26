@@ -57,7 +57,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from tradestation_data.domain.bar import derived_source
-from tradestation_data.domain.timeframe import TIMEFRAME_MINUTES, align_bucket_start
+from tradestation_data.domain.timeframe import (
+    NATIVE_ONLY_TIMEFRAMES,
+    TIMEFRAME_MINUTES,
+    align_bucket_start,
+)
 
 BAR_SCHEMA: pa.Schema = pa.schema(
     [
@@ -74,6 +78,15 @@ BAR_SCHEMA: pa.Schema = pa.schema(
 
 
 def _tf_minutes(tf: str) -> int:
+    if tf in NATIVE_ONLY_TIMEFRAMES:
+        # Aggregating minutes into a daily bar produces something that looks
+        # exactly like the published one and carries neither the exchange's
+        # official close nor the split/dividend adjustment. Refusing here is
+        # the whole point: once written, nothing downstream can tell.
+        raise ValueError(
+            f"{tf!r} is published, not derived: export it from TradeStation "
+            "rather than aggregating it. See contract/semantics.md 2.3."
+        )
     if tf not in TIMEFRAME_MINUTES:
         raise ValueError(f"Unsupported timeframe: {tf!r}. Valid: {list(TIMEFRAME_MINUTES)}")
     return TIMEFRAME_MINUTES[tf]

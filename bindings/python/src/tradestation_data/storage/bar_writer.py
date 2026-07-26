@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import os
+import time
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
+import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from tradestation_data.domain.bar import Bar
+from tradestation_data.domain.timeframe import SINGLE_FILE_TIMEFRAMES
 
 log = logging.getLogger(__name__)
 
@@ -36,49 +40,91 @@ BAR_SCHEMA: pa.Schema = pa.schema(
 
 
 @dataclass(slots=True)
-class _DayPartition:
+class _Partition:
     timeframe: str
     symbol: str
-    day: date
+    # None for a SINGLE_FILE_TIMEFRAMES series: one file per symbol, with no
+    # date= level and therefore no day boundary to seal on.
+    day: date | None
+    buffer: list[Bar] = field(default_factory=list)
     writer: pq.ParquetWriter | None = None
+    # Its day has rolled over: the file is closed and will take no more
+    # bars. Kept in the table rather than dropped so a late bar is refused
+    # instead of reopening — pq.ParquetWriter truncates on open.
+    sealed: bool = False
+
+    @property
+    def rewrites(self) -> bool:
+        return self.day is None
 
     def path(self, root: Path) -> Path:
-        return (
-            root
-            / f"timeframe={self.timeframe}"
-            / f"symbol={self.symbol}"
-            / f"date={self.day.isoformat()}"
-            / "bars.parquet"
-        )
+        base = root / f"timeframe={self.timeframe}" / f"symbol={self.symbol}"
+        if self.day is None:
+            return base / "bars.parquet"
+        return base / f"date={self.day.isoformat()}" / "bars.parquet"
 
 
 class BarWriter:
     """
     Tier 2 bar cache writer.
 
-    Layout: `{root}/timeframe={tf}/symbol={SYM}/date={YYYY-MM-DD}/bars.parquet`
+    Layout: `{root}/timeframe={tf}/symbol={SYM}/date={YYYY-MM-DD}/bars.parquet`,
+    except for `SINGLE_FILE_TIMEFRAMES` (`1d`), which drop the `date=` level
+    and keep one `{root}/timeframe=1d/symbol={SYM}/bars.parquet` per symbol.
+    A day partition of daily bars holds exactly one row, and a closed Parquet
+    file costs ~2.9 KB of schema and footer regardless — 2,903 bytes to carry
+    about 60. Those files are **rewritten whole on every flush**: the rows
+    already on disk are read back, merged with the new ones (later wins on a
+    repeated `bucket_start`, which is what a chart reload sends), sorted, and
+    written to a temporary file that replaces the old one atomically. That is
+    affordable because the file is small — twenty years of one symbol is
+    ~5,000 rows — and it means the file is complete and readable after every
+    flush rather than only after `close()`.
 
     **The partition follows `bar.timeframe`.** Routing on the bar is what
     keeps a 5-minute bar out of the 1-minute partition once the wire can
     say which interval it is; before that, mislabelled bars were
     indistinguishable from real 1-minute data downstream.
 
-    Unlike `TickWriter`, bars are not buffered — one bar per symbol per
-    minute is tiny (~15 rows/min across the universe). We write each
-    emitted bar immediately so a mid-session crash costs at most one
-    minute of bar cache (which is recoverable anyway from Tier 1 ticks).
+    Buffered, with the same two flush triggers as `TickWriter`:
+
+      - `max_buffered_bars`  : total buffered bars across all partitions
+      - `max_flush_seconds`  : time since the oldest buffered bar arrived
+
+    Bars used to be written one at a time, which cost **one Parquet row
+    group per bar** — every row carrying a full set of per-column headers
+    and statistics. Measured on a real session: 78 five-minute bars
+    occupied 145,977 bytes as 78 row groups and 5,936 as one. Chart
+    reloads make it worse, because a whole session arrives as a burst.
+    The flush interval bounds crash-loss to the same one minute of bar
+    cache the unbuffered version promised (and Tier-1 ticks can rebuild
+    intraday bars anyway).
+
+    A day partition is **sealed** when a bar for a later day of the same
+    (timeframe, symbol) arrives: its buffer is flushed and its file
+    closed. Without that, a `ParquetWriter` stays open until `close()` and
+    its file has no footer — unreadable to every reader, however long the
+    process runs. A daily chart replaying two years used to leave 499 such
+    files behind, all of them 943 bytes of unreadable prefix. Rewritten
+    partitions never need sealing: every flush leaves a complete file.
     """
 
     def __init__(
         self,
         root: Path | str,
         *,
+        max_buffered_bars: int = 1_000,
+        max_flush_seconds: float = 60.0,
         compression: str = "zstd",
     ) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
+        self._max_bars = max_buffered_bars
+        self._max_seconds = max_flush_seconds
         self._compression = compression
-        self._partitions: dict[tuple[str, str, date], _DayPartition] = {}
+        self._partitions: dict[tuple[str, str, date | None], _Partition] = {}
+        self._buffered_bars = 0
+        self._oldest_buffer_monotonic: float | None = None
         self._closed = False
 
     def write(self, bar: Bar) -> None:
@@ -88,30 +134,118 @@ class BarWriter:
         # Partition on the ET calendar date so all bars from one US trading
         # session land in a single date= directory, regardless of the UTC
         # rollover (which splits a session at 19:00/20:00 ET otherwise).
-        partition_day = bar.bucket_start_et.date()
+        # Coarse timeframes have no date= level at all.
+        partition_day = None if timeframe in SINGLE_FILE_TIMEFRAMES else bar.bucket_start_et.date()
         key = (timeframe, bar.symbol, partition_day)
         part = self._partitions.get(key)
         if part is None:
-            part = _DayPartition(timeframe=timeframe, symbol=bar.symbol, day=partition_day)
+            if partition_day is not None:
+                self._seal_earlier_days(timeframe, bar.symbol, partition_day)
+            part = _Partition(timeframe=timeframe, symbol=bar.symbol, day=partition_day)
             self._partitions[key] = part
-        self._append(part, bar)
+        elif part.sealed:
+            # Reopening would truncate a finished day. Losing one late bar
+            # beats losing the session it belongs to.
+            log.warning(
+                "bar_partition_sealed",
+                extra={
+                    "symbol": bar.symbol,
+                    "timeframe": timeframe,
+                    "date": part.day.isoformat() if part.day else "",
+                },
+            )
+            return
+        part.buffer.append(bar)
+        self._buffered_bars += 1
+        if self._oldest_buffer_monotonic is None:
+            self._oldest_buffer_monotonic = time.monotonic()
 
-    def _append(self, part: _DayPartition, bar: Bar) -> None:
-        table = _bars_to_table([bar])
-        if part.writer is None:
-            path = part.path(self._root)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            part.writer = pq.ParquetWriter(path, BAR_SCHEMA, compression=self._compression)
-        part.writer.write_table(table)
+    def should_flush(self) -> bool:
+        if self._buffered_bars == 0:
+            return False
+        if self._buffered_bars >= self._max_bars:
+            return True
+        if self._oldest_buffer_monotonic is None:
+            return False
+        return (time.monotonic() - self._oldest_buffer_monotonic) >= self._max_seconds
+
+    def flush(self) -> int:
+        total = 0
+        for part in self._partitions.values():
+            total += self._flush_partition(part)
+        return total
+
+    def _flush_partition(self, part: _Partition) -> int:
+        if not part.buffer:
+            return 0
+        path = part.path(self._root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if part.rewrites:
+            self._rewrite(path, part.buffer)
+        else:
+            if part.writer is None:
+                part.writer = pq.ParquetWriter(path, BAR_SCHEMA, compression=self._compression)
+            part.writer.write_table(_bars_to_table(part.buffer))
+        n = len(part.buffer)
+        part.buffer.clear()
+        self._buffered_bars -= n
+        if self._buffered_bars == 0:
+            self._oldest_buffer_monotonic = None
+        return n
+
+    def _rewrite(self, path: Path, bars: list[Bar]) -> None:
+        """Merge `bars` into the whole file at `path` and replace it.
+
+        Reading the existing rows back is what makes a restart safe: this
+        file is the only copy of a native daily bar, and pq.write_table
+        truncates. A repeated `bucket_start` keeps the later row — that is
+        a chart reload re-sending days we already have, and the fresher
+        copy is the one TradeStation just adjusted.
+        """
+        incoming = pl.from_arrow(_bars_to_table(bars))
+        assert isinstance(incoming, pl.DataFrame)
+        frames = [pl.read_parquet(path), incoming] if path.exists() else [incoming]
+        merged = (
+            pl.concat(frames, how="vertical")
+            .unique(subset=["bucket_start"], keep="last", maintain_order=True)
+            .sort("bucket_start")
+        )
+        # Write beside the target and rename over it: a crash mid-write
+        # would otherwise leave a truncated file where the only copy was.
+        tmp = path.with_suffix(".parquet.tmp")
+        pq.write_table(merged.to_arrow().cast(BAR_SCHEMA), tmp, compression=self._compression)
+        os.replace(tmp, path)
+
+    def _seal_earlier_days(self, timeframe: str, symbol: str, day: date) -> None:
+        """Finish every earlier day of the same (timeframe, symbol).
+
+        A partition whose day has rolled over will never take another bar,
+        so holding its writer open only keeps its file footerless. Sealing
+        here is what makes a finished session readable while the process
+        keeps running.
+        """
+        for part in self._partitions.values():
+            if part.sealed or part.day is None:
+                continue
+            if part.timeframe != timeframe or part.symbol != symbol or part.day >= day:
+                continue
+            self._flush_partition(part)
+            if part.writer is not None:
+                part.writer.close()
+                part.writer = None
+            part.sealed = True
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        for part in self._partitions.values():
-            if part.writer is not None:
-                part.writer.close()
-                part.writer = None
+        try:
+            self.flush()
+        finally:
+            for part in self._partitions.values():
+                if part.writer is not None:
+                    part.writer.close()
+                    part.writer = None
 
     def __enter__(self) -> BarWriter:
         return self

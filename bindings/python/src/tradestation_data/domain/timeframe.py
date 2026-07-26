@@ -39,10 +39,30 @@ TIMEFRAME_MINUTES: dict[str, int] = {
 # interval we cannot place must be refused, not filed under a default.
 SUPPORTED_TIMEFRAMES: frozenset[str] = frozenset(tf.value for tf in Timeframe)
 
-# Everything the live 1-minute writer does not produce itself, i.e. the
-# frames a Tier 3 cache can hold. Derived from the enum so a new member is
-# never silently left out of the cache tooling.
-TIER3_TIMEFRAMES: tuple[str, ...] = tuple(tf.value for tf in Timeframe if tf is not Timeframe.M1)
+# Intervals that must never be computed — only taken as published.
+# TradeStation's daily bar carries the exchange's official OHLC and is
+# split/dividend adjusted; summing minutes or ticks reproduces neither, and
+# the result is indistinguishable from the real thing on disk. See
+# contract/semantics.md §2.3. Anything here is data, not cache: it is not
+# rebuildable, so nothing may overwrite or evict it.
+NATIVE_ONLY_TIMEFRAMES: frozenset[str] = frozenset({Timeframe.D1})
+
+# Intervals coarse enough that one file per calendar day would hold a row or
+# two. A closed Parquet file costs ~2.9 KB of schema and footer whatever it
+# holds, so a `1d` day partition spent 2,903 bytes carrying about 60 of data.
+# These live in a single file per symbol, rewritten whole on each flush.
+SINGLE_FILE_TIMEFRAMES: frozenset[str] = frozenset({Timeframe.D1})
+
+# Everything the live 1-minute writer does not produce itself *and* that may
+# legitimately be computed, i.e. the frames a Tier 3 cache can hold. Derived
+# from the enum so a new member is never silently left out of the cache
+# tooling — and excludes NATIVE_ONLY_TIMEFRAMES, because deleting one of
+# those on the promise that it can be rebuilt is data loss.
+TIER3_TIMEFRAMES: tuple[str, ...] = tuple(
+    tf.value
+    for tf in Timeframe
+    if tf is not Timeframe.M1 and tf.value not in NATIVE_ONLY_TIMEFRAMES
+)
 
 _ET_TZ: ZoneInfo = ZoneInfo("America/New_York")
 

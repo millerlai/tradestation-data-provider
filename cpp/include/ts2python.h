@@ -77,7 +77,10 @@ TS2P_API int TS2P_CALL EL_PublishTickEx(
 // in EL so that every caller of this ABI agrees on it:
 //
 //   bar_type 1 (intraday), bar_interval 1/5/15/30/60  ->  1m/5m/15m/30m/1h
-//   bar_type 2 (daily),    bar_interval 1             ->  1d
+//   bar_type 2 (daily),    bar_interval 0 or 1        ->  1d
+//
+// TradeStation 10 reports BarInterval = 0 on a daily chart; 1 is what this
+// ABI documented before that was measured. Both mean the same chart.
 //
 // Anything else returns -5 without publishing. Guessing an interval would
 // file bars under the wrong partition, which nothing downstream can detect.
