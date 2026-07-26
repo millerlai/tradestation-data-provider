@@ -207,7 +207,7 @@ cmake --install build/x86-release --prefix build/x86-release/stage
 
 - 讀**平台執行檔的 PE header** 決定要裝 x86 還是 x64，架構不符的 DLL 直接拒絕。TradeStation 是跑在 64 位元 Windows 上的 32 位元 process，「機器是 x64 所以裝 x64」正是這裡要擋的錯。
 - 複製**與 `TS2Python.dll` 並排的每一個 `.dll`**，ZeroMQ runtime 就是這樣一起帶過去的 —— **`libzmq-mt-4_3_5.dll`**，不是 `libzmq.dll`。vcpkg 輸出的是帶版號的檔名，會隨釘住的 vcpkg 版本改變，所以絕不憑印象打檔名。
-- TradeStation 還開著就拒絕執行（已載入的 DLL 會被 Windows 鎖住）；目標不可寫時會告訴你要用系統管理員身分執行；缺少 **Visual C++ 2015-2022 Redistributable (x86)** 時會警告 —— DLL 連的是 dynamic CRT，而 EasyLanguage 只會回報一個沒有原因的載入失敗。
+- 檢查每個即將被覆蓋的檔案**能不能開起來寫**，開不了才拒絕。TradeStation 開著本身不是停下來的理由：DLL 要等 EasyLanguage 真的載入它之後才會被 Windows 鎖住，所以平台開著、但指標從沒上過圖時照樣能裝。目標不可寫時會告訴你要用系統管理員身分執行；缺少 **Visual C++ 2015-2022 Redistributable (x86)** 時會警告 —— DLL 連的是 dynamic CRT，而 EasyLanguage 只會回報一個沒有原因的載入失敗。
 - 目標已有 `TS2Python.dll` 時，會單獨問你要不要取代，並列出兩個檔案的日期。
 
 來源的優先順序是：.sln 建置（`cpp\Release`）→ CMake 建置（`cpp\build\x86-release\Release`）→ 給沒有 C++ 工具鏈的人用、已 commit 進 repo 的 [`prebuilt/`](prebuilt/)。本機建置永遠優先於隨 repo 附上的版本。

@@ -201,31 +201,54 @@ for %%f in ("!SRC!\libzmq*.dll") do set /a ZMQ_COUNT+=1
 
 rem ---------------------------------------------------------------------------
 rem  [4] Two things that make the copy fail halfway if not checked first.
+rem      Order matters: the folder has to be writable before "this file cannot
+rem      be opened for writing" can be read as "TradeStation has it loaded".
 rem ---------------------------------------------------------------------------
-set "RUNNING="
-for %%e in (%TS_EXES%) do (
-    tasklist /fi "imagename eq %%e" 2>nul | find /i "%%e" >nul && set "RUNNING=!RUNNING! %%e"
-)
-if defined RUNNING (
-    echo.
-    echo ERROR: TradeStation is running ^(!RUNNING! ^), so Windows holds the
-    echo        loaded DLL open and it cannot be replaced. Close it and run
-    echo        this again.
-    goto :fail
-)
-
 set "PROBE=%DEST%\ts2python-install-probe.tmp"
 break > "%PROBE%" 2>nul
 if not exist "%PROBE%" (
     echo.
+    rem  !DEST!, not %%DEST%%: the usual path holds "(x86)", and a bare
+    rem  percent-expansion inside a block closes the block on that paren.
     echo ERROR: cannot write to
-    echo            %DEST%
+    echo            !DEST!
     echo        Program Files needs an elevated shell: right-click cmd.exe or
     echo        Windows Terminal, choose "Run as administrator", then run this
     echo        script again.
     goto :fail
 )
 del "%PROBE%" >nul 2>&1
+
+rem  TradeStation being open is not on its own a reason to refuse. Windows
+rem  locks the DLL only once EasyLanguage has actually loaded it - which
+rem  happens when a chart or study importing it runs - so installing over a
+rem  TradeStation that has not touched the indicator works. The files
+rem  themselves are therefore tested, not the process list; the process list
+rem  is only read to explain a lock when there is one.
+set "RUNNING="
+for %%e in (%TS_EXES%) do (
+    tasklist /fi "imagename eq %%e" 2>nul | find /i "%%e" >nul && set "RUNNING=!RUNNING! %%e"
+)
+
+set "LOCKED="
+for %%f in ("!SRC!\*.dll") do call :lock_check "%DEST%\%%~nxf"
+if defined LOCKED (
+    echo.
+    echo ERROR: these files cannot be opened for writing, so replacing them
+    echo        would fail halfway:
+    echo           !LOCKED!
+    if defined RUNNING (
+        echo        TradeStation is running ^(!RUNNING! ^) and has the DLL
+        echo        loaded. Close it - or just the charts using the indicator -
+        echo        and run this again.
+    )
+    goto :fail
+)
+if defined RUNNING (
+    echo.
+    echo NOTE: TradeStation is running ^(!RUNNING! ^), but nothing holds the
+    echo       DLL open, so it can still be replaced.
+)
 
 rem ---------------------------------------------------------------------------
 rem  The DLL is linked against the dynamic CRT, so the Visual C++
@@ -319,6 +342,9 @@ for %%f in ("!SRC!\*.dll") do (
 echo.
 if not "%COPY_FAILED%"=="0" (
     echo === INSTALL FAILED - %COPY_FAILED% file^(s^) not copied ===
+    echo   Nothing held those files when they were checked above, so something
+    echo   took them in between - usually TradeStation loading the indicator.
+    echo   Close it and run this again.
     goto :fail
 )
 
@@ -367,6 +393,18 @@ for /l %%i in (1,1,%NFOUND%) do if /i "!FOUND_%%i!"=="!CAND!" set "DUP=1"
 if defined DUP goto :eof
 set /a NFOUND+=1
 set "FOUND_!NFOUND!=!CAND!"
+goto :eof
+
+rem  lock_check <file> - add the file's name to LOCKED when it exists and
+rem  cannot be opened for writing. Opening for append and closing writes
+rem  nothing, so the file is left as it was; a DLL the loader has mapped
+rem  refuses the open, which is exactly the case that would make the copy
+rem  below fail halfway.
+:lock_check
+if not exist "%~1" goto :eof
+2>nul (
+    >>"%~1" (call )
+) || set "LOCKED=!LOCKED! %~nx1"
 goto :eof
 
 rem  find_marker <dir> - set MARKER to the first TS_EXES entry that exists in
