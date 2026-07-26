@@ -286,6 +286,28 @@ python scripts/dump_parquet.py                                   # inspect a par
 python ../../contract/tools/record.py                            # raw ZMQ wire inspector
 ```
 
+## Sample data
+
+`data/` is in `.gitignore`, but eight small Parquet files are committed anyway (`git add -f`, ~89 KB total) so the offline tools and `HistoryStore` can be tried without TradeStation, a DLL, or a live feed. Your own captures still land in ignored paths — only these eight are tracked.
+
+| Path | Rows | Coverage |
+|---|---|---|
+| `data/bars/timeframe=1d/symbol=SPY/bars.parquet` | 499 | 2024-07-29 … 2026-07-24, one flat file (`SINGLE_FILE_TIMEFRAMES` — no `date=` level) |
+| `data/bars/timeframe=1m/symbol=SPY/date=2026-07-23/` | 389 | RTH only |
+| `data/bars/timeframe=1m/symbol=SPY/date=2026-07-24/` | 390 | RTH only, 09:30…15:59 |
+| `data/bars/timeframe=5m/symbol=SPY/date=2026-07-20…24/` | 166–168 each | extended hours, 06:00…19:55 ET |
+
+```powershell
+python scripts/dump_parquet.py data/bars/timeframe=1m/symbol=SPY/date=2026-07-24/bars.parquet --head 3
+python scripts/dump_parquet.py data/bars/timeframe=1d/symbol=SPY/bars.parquet --tail 5 --tz native
+```
+
+Three things to know before you trust these as reference output:
+
+- **`1m/date=2026-07-23` is pre-fix data.** It starts at 09:31 and ends at 15:59 — right-labelled, captured before `_parse_bar` learned to step back one interval (`contract/semantics.md` §2). Every other file is left-labelled and correct. Keep it as a regression sample, don't copy its shape.
+- **1m and 5m are not comparable.** The 1m days are RTH-only; the 5m days include pre/post-market. Summing one against the other mixes two different session templates. `5m/date=2026-07-20` also misses its first bar (starts 06:05) and `date=2026-07-24` is two bars short.
+- **Don't reconcile `1d` volume against intraday sums.** They are different measurements and will not match — see `contract/semantics.md` §3.4. On this data the daily total is about 3× the intraday sum even with pre/post-market included, which that section flags as still unexplained.
+
 ## Project layout
 
 ```
