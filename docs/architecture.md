@@ -131,6 +131,10 @@ tradestation-data-provider/
 ├─ cpp/                                  ① bridge DLL — 語言固定為 C++
 │  ├─ CMakeLists.txt · CMakePresets.json · vcpkg.json
 │  ├─ TS2Python.sln · *.vcxproj (+.filters)
+│  ├─ vcpkg-local.props · .targets       　 從 submodule 匯入 vcpkg，不靠全域整合
+│  ├─ setup-build-env.bat                　 submodule → bootstrap → 裝相依（冪等）
+│  ├─ verify-build-env.bat               　 逐項檢查環境，每項附修正指令
+│  ├─ build.bat                          　 x86 + x64 一次建完
 │  ├─ README.md · README.zh-TW.md
 │  ├─ include/ts2python.h                　 C ABI（EL_Init / EL_PublishTick[Ex] / …）
 │  ├─ src/ts2python.cpp                  　 ZMQ PUB publisher · seq/sid · 報價正規化

@@ -329,15 +329,24 @@ async def _amain(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     _configure_logging(args.log_level, json_output=args.log_json)
-    # On Windows Python 3.8+ the default is ProactorEventLoop, which does
-    # not support loop.add_reader() — and pyzmq's asyncio Socket registers
-    # its notification FD via add_reader. The result: SUB sockets connect
-    # cleanly but await recv_multipart() never wakes up even when data
-    # arrives. Force the selector loop so zmq.asyncio actually works.
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    # pyzmq's asyncio Socket registers its notification FD through
+    # loop.add_reader(), which Windows' default ProactorEventLoop does not
+    # implement. The failure is silent: SUB sockets connect cleanly, then
+    # await recv_multipart() forever with no error to explain it. Force a
+    # selector loop.
+    #
+    # loop_factory, not set_event_loop_policy(): the whole policy API is
+    # deprecated from 3.14 and slated for removal in 3.16, at which point
+    # the old spelling would stop this CLI from starting at all — on
+    # Windows, which is the only platform TradeStation runs on. Preserve
+    # this when adding new entry points; examples/_compat.py is the copy
+    # to lift for your own.
+    # Passed as a value rather than branching around two asyncio.run calls:
+    # loop_factory=None is exactly the default, and mypy narrows
+    # sys.platform hard enough to call the second branch unreachable.
+    loop_factory = asyncio.SelectorEventLoop if sys.platform == "win32" else None
     try:
-        return asyncio.run(_amain(args))
+        return asyncio.run(_amain(args), loop_factory=loop_factory)
     except KeyboardInterrupt:
         return 130
 

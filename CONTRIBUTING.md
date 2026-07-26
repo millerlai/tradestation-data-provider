@@ -30,7 +30,7 @@ The bundled `scripts/` wrappers all shell out to `uv run …` via `scripts/_comm
 ## Before opening a PR
 
 CI runs `ruff check`, `ruff format --check`, `mypy`, and `pytest` on Python
-3.11 / 3.12 / 3.13 × Ubuntu + Windows. Run them locally first — the same commands above
+3.12 / 3.13 / 3.14 × Ubuntu + Windows. Run them locally first — the same commands above
 are exactly what CI invokes.
 
 Specifically, you must keep these green:
@@ -40,15 +40,20 @@ Specifically, you must keep these green:
 3. **`uv run ruff check .`** — no lint warnings.
 4. **`uv run mypy`** — strict mode, zero errors on `src/`.
 
-Pytest is configured with `filterwarnings = ["error", "ignore::DeprecationWarning"]`
-in `pyproject.toml`. A *new* warning will fail the build — fix the root cause, don't
-broaden the filter.
+Pytest is configured with `filterwarnings = ["error", ...]` in `pyproject.toml`, so
+a *new* warning fails the build — fix the root cause, don't broaden the filter.
+
+The exemptions listed there are deliberately per-message, not per-category. A blanket
+`ignore::DeprecationWarning` used to sit there and it hid a real one: the shipped code
+was calling an asyncio API that 3.14 deprecates and 3.16 removes, and the suite stayed
+green throughout. The remaining ignores name three specific messages that are blocked
+on pytest-asyncio; delete them when it grows a `loop_factory` hook.
 
 ## Coding conventions
 
 These match the existing codebase; please follow them in new code.
 
-- **Lint / format**: ruff (line length 100, target py311; rules `E,F,W,I,N,UP,B,SIM,RUF`).
+- **Lint / format**: ruff (line length 100, target py312; rules `E,F,W,I,N,UP,B,SIM,RUF`).
 - **Types**: mypy strict on `src/`. `tests/` is excluded but new helpers should still
   carry annotations.
 - **Dataclasses**: use `slots=True`; add `frozen=True` for value types. The codebase is

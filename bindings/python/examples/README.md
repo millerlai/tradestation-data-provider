@@ -29,9 +29,11 @@ Examples 01 and 02 need something on the other end of the socket. You do not
 need TradeStation for that — the C++ harness drives the DLL directly:
 
 ```powershell
-# Terminal A. --warmup-ms gives you time to start the subscriber; a PUB
-# socket silently drops everything it sends while nobody is attached.
-cpp\build\x86-release\Release\TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
+# Terminal A, from the repo root. --warmup-ms gives you time to start the
+# subscriber; a PUB socket silently drops everything it sends while nobody
+# is attached. This path is where cpp\build.bat and Visual Studio put the
+# harness; a CMake preset build leaves it in cpp\build\x86-release\Release\.
+cpp\Release\TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
 
 # Terminal B
 cd bindings\python
@@ -40,8 +42,18 @@ uv run python examples\01_print_events.py --count 6
 
 Harness modes: `smoke` (ticks + a bar over three symbols), `noquote`
 (absent quotes), `bars` (every non-1m timeframe plus the refusal path),
-`session` (first/last bar of a session), `stress`, `multithread`. Building it
-is in [`cpp/README.md`](../../../cpp/README.md).
+`session` (first/last bar of a session), `stress`, `multithread`.
+
+Do not have the harness yet? Two commands, from the repo root:
+
+```powershell
+cd cpp
+.\setup-build-env.bat    # once per clone
+.\build.bat              # -> cpp\Release\TS2Python_TestHarness.exe
+```
+
+Full details, including what to do when a build fails, are in
+[`cpp/README.md`](../../../cpp/README.md).
 
 ## Testing your own sink
 
@@ -75,10 +87,9 @@ Three causes, in order of likelihood:
 
 ## Notes
 
-- `_compat.py` is shared plumbing, not an example. It exists because
-  `asyncio.set_event_loop_policy()` — the spelling `runtime/main.py` uses —
-  is deprecated in Python 3.14 and slated for removal in 3.16, while this
-  package still supports 3.11.
+- `_compat.py` is shared plumbing, not an example. It exists so the three
+  socket-using examples do not each repeat the Windows event-loop setup.
+  `runtime/main.py` uses the same `asyncio.run(loop_factory=...)` shape.
 - The examples import `tradestation_data` as an installed package, so they
   work the same way your own code will. `uv sync` puts it there.
 - They are excluded from the published sdist and wheel; they are repository

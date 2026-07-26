@@ -81,19 +81,30 @@ flowchart TB
 動手寫解析程式前**務必先讀** [`contract/semantics.md`](contract/semantics.md)：
 那裡是 JSON Schema 表達不了的規則，而 binding 之間真正會分歧的正是這些。
 
-**建置 DLL** → [`cpp/README.md`](cpp/README.md)
+**建置 DLL** → [`cpp/README.zh-TW.md`](cpp/README.zh-TW.md)
 
 ```powershell
 cd cpp
+.\setup-build-env.bat     # 每個 clone 跑一次：vcpkg submodule、bootstrap、相依套件
+.\verify-build-env.bat    # exit 0 代表可以 build；缺什麼都會直接給修正指令
+.\build.bat               # Release，x86 + x64  ->  cpp\Release\
+```
+
+`build.bat` 會自己找到 MSBuild，不需要開 Developer Command Prompt。
+CMake 也可以，但輸出位置不同 —— 找 harness 時要注意路徑：
+
+```powershell
 cmake --preset x86-release          # 或 x86-release-vs2022
-cmake --build --preset x86-release
+cmake --build --preset x86-release  #  ->  cpp\build\x86-release\Release\
 ```
 
 **不開 TradeStation 也能檢視 wire：**
 
 ```powershell
-# 終端機 A —— 直接驅動 DLL
-cpp/build/x86-release/Release/TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
+# 終端機 A —— 直接驅動 DLL。路徑取決於你用哪個 toolchain 建的：
+#   build.bat / Visual Studio  ->  cpp\Release\
+#   cmake --preset             ->  cpp\build\x86-release\Release\
+cpp\Release\TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
 
 # 終端機 B
 python contract/tools/record.py
