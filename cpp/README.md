@@ -4,7 +4,7 @@
 
 C++ DLL that bridges TradeStation EasyLanguage calls to a ZeroMQ PUB socket. The Python side ([`tradestation-data-provider`](../README.md), root of this repo) subscribes over `tcp://127.0.0.1:5555` and routes the events through its pluggable sink pipeline.
 
-This subdirectory is the **publisher** half of the system. The current ABI is **DLL version 6**.
+This subdirectory is the **publisher** half of the system. The current ABI is **DLL version 8**.
 
 ## Wire format
 

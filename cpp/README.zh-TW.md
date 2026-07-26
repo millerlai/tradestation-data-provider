@@ -4,7 +4,7 @@
 
 C++ DLL，把 TradeStation EasyLanguage 的呼叫橋到 ZeroMQ PUB socket。Python 端（[`tradestation-data-provider`](../README.md)，本 repo 根目錄）透過 `tcp://127.0.0.1:5555` 訂閱，再把收到的事件交給可插拔的 sink pipeline。
 
-這個子目錄是整個系統的**發布端**。當前 ABI 是 **DLL version 6**。
+這個子目錄是整個系統的**發布端**。當前 ABI 是 **DLL version 8**。
 
 ## Wire format
 
