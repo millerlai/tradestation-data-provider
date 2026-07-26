@@ -115,8 +115,10 @@ It finds the TradeStation `Program` folder under the usual locations on `C:` and
 installed is decided by the architecture of the `ORPlat.exe` sitting there, not by
 the bitness of Windows: TradeStation is a 32-bit process on a 64-bit OS. Nothing is
 copied until you confirm, and replacing a `TS2Python.dll` that is already installed
-is asked as its own question. Close TradeStation first — Windows keeps the loaded
-DLL locked.
+is asked as its own question. TradeStation can stay open: Windows locks the DLL
+only once EasyLanguage has actually loaded it, so the installer tests whether the
+files can be opened for writing rather than looking at the process list, and stops
+only when one really is held.
 
 **Not wanting to build it yourself is fine.** Prebuilt x86 and x64 binaries are
 checked into [`cpp/prebuilt/`](cpp/prebuilt/), built from this repo and tested on

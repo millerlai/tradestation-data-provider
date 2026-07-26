@@ -109,7 +109,8 @@ cd cpp
 直接問你，並附上範例路徑。裝哪一版由那裡的 `ORPlat.exe` 的架構決定，**不是**看
 Windows 是幾位元：TradeStation 是跑在 64 位元 OS 上的 32 位元 process。沒有經過
 確認不會複製任何檔案；目標已經有 `TS2Python.dll` 時，會另外單獨問你要不要取代。
-執行前請先關閉 TradeStation —— 已載入的 DLL 會被 Windows 鎖住。
+TradeStation 開著也沒關係：DLL 要等 EasyLanguage 真的載入它之後才會被 Windows 鎖
+住，所以腳本檢查的是「檔案能不能開起來寫」而不是 process 清單，真的被鎖住才會停。
 
 **不想自己 build 也沒關係。** [`cpp/prebuilt/`](cpp/prebuilt/) 裡放了從本 repo 建出
 的 x86 與 x64 binary，已在 Windows 11 + TradeStation 10 上測試過；本機沒有建置輸出
