@@ -25,6 +25,9 @@ wire 上有三個時間戳，用途**不可互換**：
   **`America/New_York` 時區**解析，再轉 UTC。
   - 必須用 IANA tz database 的 `America/New_York`，**不可用系統本地時區**，也不可用
     固定 UTC 偏移。DLL 主機的系統時區與此無關。
+  - 解析出來的是 bar 的**收盤**時間（EL 的 `Time`），**還不是** `bucket_start`：
+    必須再依 §2 減去一個 `tf` 換成左標籤，然後依 §2.2 對齊格線。只做到解析就寫入，
+    整條序列會靜默偏移一格。
 - `ts_utc` 僅用於交叉檢查：與 `ts` 差距 > **5 秒**時記錄警告，**不得拋錯或丟棄資料**。
   這種漂移幾乎都是 DST 表差異造成。
 - `ts_str` 為 `""`（EL 未傳）或解析失敗時，`ts_utc` 為 `0.0`；binding 需有明確的
@@ -59,7 +62,11 @@ bucket_start:  09:30, 09:31, …, 15:58, 15:59
 > 序列，導致完整 session 被誤判為缺漏。左/右標籤是市場資料最典型的靜默錯誤 ——
 > 兩邊都「看起來對」，只差一根。
 >
-> **conformance fixture 必須涵蓋 session 首尾兩根 bar。**
+> **conformance fixture 必須涵蓋 session 首尾兩根 bar，而且必須送 wire 的真實形狀
+> ——右標籤的 `09:31` / `16:00`，不是 contract 自己的答案。** `session.jsonl` 一度
+> 送 `09:30` / `15:59`，於是 fixture 因構造而與規格一致，這條規則等於沒被驗證，
+> 右標籤的 bar 就這樣一路寫進了 Parquet。fixture 的職責是複現 publisher，不是
+> 複述 spec。
 
 ### 2.1 `bucket_start` 必須向下取整到分鐘
 
@@ -130,13 +137,17 @@ wire 的 `ts_str` 是 EL 圖表自己的 `Date`/`Time`，**不保證落在上述
 一列來自重採樣的 04:00 ET 錨點 —— 違反 §2.3 rule 2，且任何 `bucket_start` 上的
 join 都會重複計數。
 
-> **未決（需 live TradeStation 才能確認）**：TradeStation 的 intraday bar 用**收盤**
-> 時間標示（5 分鐘圖的首根 RTH bar 其 `Time` 為 `0935`）還是開盤時間，無法在本 repo
-> 驗證。若是收盤時間，native 的 5m/15m/30m/1h bar 在向下取整後會比 derived 的同一根
-> **晚一格**。1m 不受影響（取整後兩者相同），`1d` 也不受影響（一律錨到 04:00 ET）。
-> 確認方式：在 5 分鐘圖上 `Print(Time)` 看首根 RTH bar 是 `0930` 還是 `0935`；
-> 若為後者，`_parse_bar` 需在對齊前先減去一個 `tf`。在確認之前，同時採集
-> native 與 derived 的非 1m intraday bar 應避免混用。
+> **已確認（2026-07-26，live TradeStation）**：EasyLanguage 的 `Time` 是 bar 的
+> **收盤**時間，`TsStr` 又由它逐字組成，所以 wire 上的 `ts_str` 一律是**右標籤**。
+>
+> 這裡原本寫著「1m 不受影響（取整後兩者相同）」——**那句是錯的**。偏移是整整一格，
+> 不是能被向下取整吸收的秒數差：一份 live 採集的 1m SPY 檔案落地成 09:31…16:00
+> 共 390 根，恰好是 §2 明令禁止的那個序列。根數相同、數值合理，所以沒有任何一層
+> 報錯。
+>
+> 因此 **binding 必須在對齊前先減去一個 `tf`**，native 與 derived 一視同仁。
+> `1d` 這類 session 錨定的 interval 例外，而且必須例外：對齊本身已經丟棄時分秒
+> 改用 04:00 ET，若先減一天，只會把 bar 記到前一個交易日。
 
 > 這條也是被實作與規格不一致逼出來的：reference binding 的 `Resampler` 原本用
 > epoch 錨定，而 `1h` / `1d` 的行為從未被測試涵蓋；改成 ET 牆鐘之後又引入了上述
@@ -169,6 +180,9 @@ join 都會重複計數。
 `1d` 是唯一「native 明確較優」的區間 —— TradeStation 的日線帶有**交易所官方收盤價
 與除權息調整**，這兩樣都**無法**由 tick 加總還原。derived 的日線是個長得一模一樣的
 近似值，換掉 native 之後看起來完全合理，卻是錯的。
+
+日線的 `vol` 同樣是交易所的官方彙總量，與 intraday 加總分屬兩種口徑，**不可互相
+驗證或回填**（§3.4）。發現兩者對不上時，那通常不是 bug。
 
 > 注意規則 1 到 3 適用於**每一個**區間，不是只有 `1d`：5 分鐘圖送出的是 native 的
 > 5m bar，跟 resampler 寫進同一個 `timeframe=5m/` 目錄。判斷依據永遠是 provenance
@@ -236,6 +250,65 @@ binding 應把 `bid` / `ask` 視為無效，若**任一**成立：
 
 `vol` 對 index / breadth symbol 同樣不具意義。`vol == 0` 時衍生的 VWAP 應為 null
 而非除以零。
+
+#### `1d` 的 volume 與 intraday 加總對不上，而且本來就不該相等
+
+把一天的 1m（或 5m）bar 的 `vol` 加總，**不會**等於同一天 `1d` bar 的 `vol`。兩者
+是不同口徑的兩份事實，不是任一方算錯：
+
+| 來源 | 口徑 |
+| --- | --- |
+| `1d` | 交易所結算後發布的**官方彙總成交量**（consolidated daily volume）|
+| intraday | 盤中即時串流（SIP tick data）當下組出來的連續撮合量 |
+
+差異來自四個層面：
+
+1. **盤後延遲申報與大宗交易** —— block trades、OTC、dark pool 撮合、late prints
+   （Form T）。這些不會落進盤中任何一根 intraday bar，有些在收盤數小時後才申報，
+   但全部計入官方日線總量。
+2. **資料源涵蓋範圍** —— 日線彙整全美所有交易所（consolidated tape：NYSE、NASDAQ、
+   ARCA、BATS…）；盤中串流可能受訂閱層級或過濾規則限制，涵蓋較窄，加總自然偏小。
+3. **收盤集合競價**（closing cross / MOC）—— 16:00 的集合競價量體很大，日線必然
+   包含；intraday 若以 `[15:55, 16:00)` 為最後一根，那一刻的成交可能落在邊界外，
+   或被單獨記成一筆 16:00 的 tick 而未計入。
+4. **Session 設定** —— intraday 圖表的 session template 由使用者決定，涵蓋範圍
+   隨設定改變；`1d` 由 TradeStation 的日線伺服器獨立提供，**完全不受本地圖表設定
+   影響**。
+
+因此：**不要用 intraday 加總去「驗證」`1d`，也不要反過來用 `1d` 回填 intraday。**
+這是 §2.3 規定 `1d` 只能取 native、不得由 rollup 產生的另一個理由。
+
+> **本 repo 實測（SPY 2026-07-23）**：`1d` 的 OHLC 是 **RTH 口徑**。`high` / `low`
+> 與 09:30–15:55 的 intraday 極值**完全相同**，而當天最高價其實出現在盤前
+> （盤前 746.21，日線 742.56）—— 日線並未納入盤前盤後的價格極值。`open` / `close`
+> 差 0.02–0.03，是官方開收盤價與「該分鐘第一／最後一筆成交」之間的正常差距。
+>
+> **但 volume 的落差遠超過上述四個原因所能解釋的範圍。** 即使把盤前盤後全部加進來
+> （06:00–19:55，168 根 5m bar），intraday 的 `vol` 合計仍只有日線的三分之一：
+> 18,505,973 對 55,437,545。late prints 與 closing cross 一般是個位數到十幾個
+> 百分比，不是三倍。
+>
+> **所以這一節不足以解釋任意大的差距。** 看到三倍量級時，先懷疑 `vol` / `tc` 兩個
+> 欄位裝的到底是什麼，而不是急著用上面四點合理化 —— 見下節。
+
+#### `tc` 在 `1d` 上不是成交筆數 —— 未決
+
+EL indicator 送出的 `vol` 取自 EasyLanguage 的 `Volume`、`tc` 取自 `Ticks`
+（`EL/TS2Python_Exporter.el`）。這兩個保留字在 intraday 與 daily 上的語意並不相同。
+
+已確認的事實：**在 `1d` 上 `vol` 與 `tc` 完全相同**（本 repo 的 SPY 日線 499 筆
+全數如此），也就是說 `1d` 的 `tc` 只是 `vol` 的複本，不帶任何資訊 —— 日線來自 EOD
+彙總，本來就沒有逐筆概念。
+
+> **未決（需 live TradeStation 確認）**：intraday 的 `Volume` / `Ticks` 各自裝
+> 什麼，尚未證實。已知在 intraday 上兩者不相等且 `tc` 明顯大於 `vol`，但
+> 「`vol` 是股數、`tc` 是筆數」這個直覺讀法與實測對不上。
+>
+> 確認方式：在分鐘圖與日線圖各跑一次
+> `Print(Date, " ", Time, " V=", Volume, " T=", Ticks);`，並一併確認圖表的
+> Volume 設定是 Trade Volume 還是 Tick Count —— 該設定會直接改變這兩個欄位的意義。
+>
+> 在確認之前，binding **不應**把 `tc` 當成成交筆數使用，也不應假設 `vol` 是股數。
 
 ### 3.5 `Bar` 是否保留 bid / ask 由 binding 決定
 

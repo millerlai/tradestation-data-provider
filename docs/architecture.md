@@ -291,6 +291,11 @@ Bar 以 **`bucket_start` 左標籤**表示，區間為半開的 `[t, t+step)`。
 一個 US RTH 09:30–16:00 的 1m session 產生 390 根 bar，`bucket_start` 為
 **09:30 … 15:59**（最後一根涵蓋 `[15:59, 16:00)`），**不是** 09:31 … 16:00。
 
+**但 wire 上的 `ts_str` 是右標籤** —— EasyLanguage 的 `Time` 是 bar 的收盤時間，
+indicator 逐字透傳。左標籤是 contract 的規範，不是 publisher 的行為，所以轉換點只有
+一個：`wire/el_subscriber.py::_parse_bar` 在對齊格線前減去一個 `tf`（`1d` 這類
+session 錨定的 interval 例外）。這一步曾經缺席，落地的 1m 資料就是 09:31…16:00。
+
 > 這條規範是被真實 bug 逼出來的：`scripts/verify_parquet.py` 的 `_expected_bars()`
 > 原本產生右標籤序列（09:31…16:00），與 `BAR_SCHEMA.bucket_start` 不符，導致完整的
 > session 被誤判為缺漏。左/右標籤是市場資料最典型的靜默錯誤來源之一 —— 兩邊都「看起來

@@ -221,8 +221,9 @@ async def test_provider_parses_bar_1m_event(zmq_inproc_bus) -> None:
     await provider.subscribe(["SPY"])
     await asyncio.sleep(0)
 
-    # Bar minute-bucket 13:30:00 UTC. ts_el lands mid-bucket (13:30:45) —
-    # provider must floor it to the minute for bucket_start.
+    # No ts_str, so bucket_start comes from the receive-side ts — a clock
+    # read *after* the bar closed. 13:30:45 floors to 13:30, then steps back
+    # one interval (§2, left-labelled) to the 13:29 bucket the bar covers.
     ts_el = datetime(2026, 4, 18, 13, 30, 45, tzinfo=UTC).timestamp()
     await _publish(
         pub,
@@ -254,7 +255,7 @@ async def test_provider_parses_bar_1m_event(zmq_inproc_bus) -> None:
     assert event.volume == 12000
     assert event.tick_count == 140
     assert event.source == "tradestation_el"
-    assert event.bucket_start == datetime(2026, 4, 18, 13, 30, 0, tzinfo=UTC)
+    assert event.bucket_start == datetime(2026, 4, 18, 13, 29, 0, tzinfo=UTC)
 
     await gen.aclose()
     await provider.close()
@@ -273,7 +274,8 @@ async def test_bar_1m_prefers_ts_str_over_ts_el(zmq_inproc_bus) -> None:
     await provider.subscribe(["SPY"])
     await asyncio.sleep(0)
 
-    # 09:31 ET = 13:31 UTC on 2026-04-17 (EDT, UTC-4).
+    # 09:31 ET = 13:31 UTC on 2026-04-17 (EDT, UTC-4). EL stamps the close,
+    # so that bar is the left-labelled 09:30 one → 13:30 UTC.
     # ts_el is intentionally garbage (would drift bucket by 8 hours if used)
     # to prove the provider trusts ts_str instead.
     wrong_ts_el = datetime(2026, 4, 17, 5, 31, 0, tzinfo=UTC).timestamp()
@@ -300,7 +302,7 @@ async def test_bar_1m_prefers_ts_str_over_ts_el(zmq_inproc_bus) -> None:
     gen = provider.events()
     event = await asyncio.wait_for(anext(gen), timeout=1.0)
     assert isinstance(event, Bar)
-    assert event.bucket_start == datetime(2026, 4, 17, 13, 31, 0, tzinfo=UTC)
+    assert event.bucket_start == datetime(2026, 4, 17, 13, 30, 0, tzinfo=UTC)
 
     await gen.aclose()
     await provider.close()
@@ -309,7 +311,7 @@ async def test_bar_1m_prefers_ts_str_over_ts_el(zmq_inproc_bus) -> None:
 @pytest.mark.asyncio
 async def test_bar_1m_ts_str_handles_dst_boundary(zmq_inproc_bus) -> None:
     """Pick a date in standard time (EST, UTC-5) to verify DST-aware
-    conversion. 2026-01-15 09:31 EST = 14:31 UTC."""
+    conversion. 2026-01-15 09:31 EST = 14:31 UTC, left-labelled 14:30."""
     from tradestation_data.domain.bar import Bar
 
     ctx, pub, endpoint = zmq_inproc_bus
@@ -341,7 +343,7 @@ async def test_bar_1m_ts_str_handles_dst_boundary(zmq_inproc_bus) -> None:
     gen = provider.events()
     event = await asyncio.wait_for(anext(gen), timeout=1.0)
     assert isinstance(event, Bar)
-    assert event.bucket_start == datetime(2026, 1, 15, 14, 31, 0, tzinfo=UTC)
+    assert event.bucket_start == datetime(2026, 1, 15, 14, 30, 0, tzinfo=UTC)
 
     await gen.aclose()
     await provider.close()
@@ -387,8 +389,9 @@ async def test_bar_1m_rejects_localized_am_pm_ts_str(zmq_inproc_bus) -> None:
     gen = provider.events()
     event = await asyncio.wait_for(anext(gen), timeout=1.0)
     assert isinstance(event, Bar)
-    # Fell back to ts (13:31 UTC floored) — not 01:31 AM/PM guesswork.
-    assert event.bucket_start == datetime(2026, 4, 18, 13, 31, 0, tzinfo=UTC)
+    # Fell back to ts (13:31 UTC floored, then left-labelled to 13:30) —
+    # not 01:31 AM/PM guesswork.
+    assert event.bucket_start == datetime(2026, 4, 18, 13, 30, 0, tzinfo=UTC)
 
     await gen.aclose()
     await provider.close()
@@ -405,7 +408,8 @@ async def test_bar_1m_falls_back_to_ts_when_ts_el_missing(zmq_inproc_bus) -> Non
     await asyncio.sleep(0)
 
     # DLL failed to parse the EL string → ts_el absent; bucket must derive
-    # from the receive-side ts, floored to the minute.
+    # from the receive-side ts, floored to the minute and stepped back one
+    # interval onto the left edge.
     ts = datetime(2026, 4, 18, 13, 31, 12, tzinfo=UTC).timestamp()
     await _publish(
         pub,
@@ -426,7 +430,7 @@ async def test_bar_1m_falls_back_to_ts_when_ts_el_missing(zmq_inproc_bus) -> Non
     gen = provider.events()
     event = await asyncio.wait_for(anext(gen), timeout=1.0)
     assert isinstance(event, Bar)
-    assert event.bucket_start == datetime(2026, 4, 18, 13, 31, 0, tzinfo=UTC)
+    assert event.bucket_start == datetime(2026, 4, 18, 13, 30, 0, tzinfo=UTC)
     assert event.volume == 0
 
     await gen.aclose()
@@ -551,8 +555,8 @@ async def test_bar_1m_prefers_ts_str_over_ts_utc(zmq_inproc_bus) -> None:
     await provider.subscribe(["SPY"])
     await asyncio.sleep(0)
 
-    # ts_str = 09:31 ET on 2026-04-17 → 13:31 UTC (EDT).
-    # ts_utc is deliberately off by an hour — parser must still return 13:31.
+    # ts_str = 09:31 ET on 2026-04-17 → 13:31 UTC (EDT) → left edge 13:30.
+    # ts_utc is deliberately off by an hour — parser must still return 13:30.
     bad_ts_utc = datetime(2026, 4, 17, 12, 31, 0, tzinfo=UTC).timestamp()
     await _publish(
         pub,
@@ -575,8 +579,8 @@ async def test_bar_1m_prefers_ts_str_over_ts_utc(zmq_inproc_bus) -> None:
     gen = provider.events()
     event = await asyncio.wait_for(anext(gen), timeout=1.0)
     assert isinstance(event, Bar)
-    assert event.bucket_start == datetime(2026, 4, 17, 13, 31, 0, tzinfo=UTC)
-    assert event.bucket_start_et.hour == 9 and event.bucket_start_et.minute == 31
+    assert event.bucket_start == datetime(2026, 4, 17, 13, 30, 0, tzinfo=UTC)
+    assert event.bucket_start_et.hour == 9 and event.bucket_start_et.minute == 30
 
     await gen.aclose()
     await provider.close()
@@ -659,6 +663,8 @@ def test_parse_bar_logs_mismatch_when_ts_str_and_ts_utc_disagree(caplog) -> None
     provider = TradeStationELProvider(endpoint="inproc://mismatch")
     # ts_str says 2026-04-17 09:31 ET (= 13:31 UTC). Pair with ts_utc that
     # rounds to a DIFFERENT UTC minute to hit the "mismatch" debug branch.
+    # The cross-check runs on the raw parse, before the left-label step, so
+    # the comparison is unaffected and only bucket_start moves to 13:30.
     bad_ts_utc = datetime(2026, 4, 17, 14, 31, 0, tzinfo=UTC).timestamp()
     payload = {
         "v": 1,
@@ -675,7 +681,7 @@ def test_parse_bar_logs_mismatch_when_ts_str_and_ts_utc_disagree(caplog) -> None
     }
     with caplog.at_level("DEBUG", logger="tradestation_data.wire.el_subscriber"):
         bar = provider._parse_payload("SPY", json.dumps(payload).encode())
-    assert bar.bucket_start == datetime(2026, 4, 17, 13, 31, 0, tzinfo=UTC)
+    assert bar.bucket_start == datetime(2026, 4, 17, 13, 30, 0, tzinfo=UTC)
     assert any("ts_str vs ts_utc mismatch" in rec.message for rec in caplog.records)
 
 

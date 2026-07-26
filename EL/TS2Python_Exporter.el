@@ -126,7 +126,14 @@ If Enabled and InitDone and SubMinuteChart = False Then Begin
       24-hour format is deliberate: the AM/PM designator ("tt") is locale-
       dependent on Windows — a zh-TW TradeStation host emits "上午"/"下午",
       which breaks both the DLL sscanf path and the Python strptime path,
-      silently collapsing every bar onto today's receive-time minute. }
+      silently collapsing every bar onto today's receive-time minute.
+
+      Time IS THE BAR'S CLOSE, so TsStr is right-labelled: the first RTH
+      1-minute bar goes out as 09:31, not 09:30. That is left as-is on
+      purpose — the wire carries EL's raw fact and each binding converts to
+      the contract's left label itself (contract/semantics.md §2). Shifting
+      it here would change the meaning of the wire without any binding
+      knowing, which is the one thing this transport must never do. }
     TsStr = FormatDate("yyyy-MM/dd", ELDateToDateTime(Date))
           + "-"
           + FormatTime("HH:mm:ss", ElTimeToDateTime(Time));

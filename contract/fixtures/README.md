@@ -10,7 +10,7 @@
 | `smoke.jsonl` | `expected/smoke.json` | wire v3 · tick + bar · per-symbol `seq` · index symbol 的 bid/ask 無效化（§3.2）· bucket 向下取整到分鐘（§2.1） |
 | `noquote.jsonl` | `expected/noquote.json` | 無報價 → wire 上為 `null`（§3.1）。含 **非 index symbol**（SPY）的無報價 tick —— `$TICK` 單獨無法區分 §3.1 與 §3.2 |
 | `bars.jsonl` | `expected/bars.json` | 每一個非 1m 的 `tf`（`5m`/`15m`/`30m`/`1h`/`1d`）· `1d` 錨在 04:00 ET（§2.2）· `1d` 出現兩次，對應 `BarInterval` 的 `0`（TradeStation 10 實測值）與 `1`，wire 上必須無從分辨 · legacy `EL_PublishTickEx` 只能是 `1m` · **無法對應的間隔回 `-5` 且不送出**（該 mode 另發了 3 筆被拒） |
-| `session.jsonl` | `expected/session.json` | session 首尾兩根 bar（09:30 / 15:59 ET），釘住左標籤（§2） |
+| `session.jsonl` | `expected/session.json` | session 首尾兩根 bar，釘住左標籤（§2）。**wire 送 EL 的收盤時間 `09:31` / `16:00`，期望值是左標籤的 `09:30` / `15:59`** —— 右標籤→左標籤的轉換就靠這兩根把關 |
 | `v1_legacy.jsonl` | `expected/v1_legacy.json` | wire v1 向下相容 · 無 `seq` 時降級為「無從得知」（§6.6） |
 | `v1_noquote.jsonl` | `expected/v1_noquote.json` | v1 用 `"bid":0.000000` 表示無報價（§3.1）—— binding 必須自行判 `<= 0` 無效 |
 

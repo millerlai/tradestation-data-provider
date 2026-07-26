@@ -65,7 +65,7 @@
 | **`sid`** | uint64 | publisher session id —— `EL_Init` 當下的 UTC epoch 秒 |
 | `ts` | float | DLL 收訊端 wall clock（UTC epoch，含亞秒）。**僅用於延遲量測** |
 | `ts_utc` | float | `ts_str` 經 `std::chrono::zoned_time`（America/New_York）轉出的 UTC epoch。解析失敗為 `0.0` |
-| `ts_str` | string | EL 原始字串 `yyyy-MM/dd-HH:mm:ss`（24 小時制），逐字透傳。EL 未傳時為 `""` |
+| `ts_str` | string | EL 原始字串 `yyyy-MM/dd-HH:mm:ss`（24 小時制），逐字透傳。EL 未傳時為 `""`。對 bar 而言這是**收盤**時間，binding 須依 `semantics.md` §2 減一個 `tf` 換成左標籤 |
 | `px` | float | 成交價（僅 `tick`） |
 | `o` `h` `l` `c` | float | OHLC（僅 `bar_1m`） |
 | `vol` | float | 成交量。**注意是 float 不是 int** |

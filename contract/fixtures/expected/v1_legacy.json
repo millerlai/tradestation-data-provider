@@ -10,7 +10,13 @@
     "Recorded from a real v1 DLL rather than hand-authored: the v1 source was",
     "checked out from git and built separately for this purpose. A hand-written",
     "v1 fixture would only restate what we believe v1 looked like, which is",
-    "exactly the failure mode fixtures exist to prevent."
+    "exactly the failure mode fixtures exist to prevent.",
+    "",
+    "bucket_start: ts_str '2026-04/18-13:30:45' read as America/New_York (EDT)",
+    "gives 2026-04-18T17:30:45Z, §2.1-floored to 17:30:00Z. EL stamps the close",
+    "and §2 labels the left edge, so one interval comes off: 17:29:00Z. The",
+    "right-labelled wire is not a v3 change — v1 carried EL's Time the same way,",
+    "so the same step applies to every wire version this binding accepts."
   ],
   "notes": [
     "This fixture exists to pin the backward-compatibility obligation in",
@@ -80,7 +86,7 @@
     {
       "symbol": "SPY",
       "kind": "bar_1m",
-      "bucket_start": "2026-04-18T17:30:00Z",
+      "bucket_start": "2026-04-18T17:29:00Z",
       "open": 450.1,
       "high": 450.75,
       "low": 449.8,

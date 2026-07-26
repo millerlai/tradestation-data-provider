@@ -158,6 +158,8 @@ Hive-partitioned Parquet under `data/`. `ParquetBarSink` / `ParquetTickSink` pro
 
 **`1d` is not a tier, it is data.** `NATIVE_ONLY_TIMEFRAMES` in `domain/timeframe.py` names it: TradeStation's daily bar carries the exchange's official close and the split/dividend adjustment, which no rollup reproduces, so nothing computes one. `load_bars` returns empty rather than building it, `rebuild_bar_cache` and `aggregate_parquet.py` refuse it, and `clear_bar_cache.py` leaves it alone. Its layout is flat — no `date=` level, one file per symbol rewritten whole on each flush (`SINGLE_FILE_TIMEFRAMES`), because a day partition of daily bars is one row inside a ~2.9 KB file. Any reader building a bars path must ask `domain/timeframe.py` which shape applies rather than assuming `date=`.
 
+**Do not "verify" a `1d` bar by summing intraday bars.** The daily `vol` is the exchange's official consolidated total (late prints, block trades, dark pool, closing cross); intraday is what the live SIP stream happened to carry. They are two different measurements and will not match — `contract/semantics.md` §3.4 has the four reasons. Measured on SPY, though, the gap is *3×* even with pre/post-market included, which is far more than those reasons explain, so the `vol` / `tc` fields themselves are still under suspicion: on `1d`, `tc` is byte-for-byte equal to `vol` across all 499 rows and carries no information. What EasyLanguage's `Volume` / `Ticks` actually hold on intraday charts is **unresolved** — §3.4 records the `Print()` that settles it. Until then, don't read `tc` as a trade count.
+
 `HistoryStore` is the read-side facade — DuckDB + Polars over the Parquet glob; `load_bars` falls through to `Resampler` and persists the result. `BAR_SCHEMA` / `TICK_SCHEMA` carry both `*_utc` (`UTC`) and `*_et` (`America/New_York`) timestamps — both are persisted so downstream tooling never has to convert at query time. Tier 3 caches are derived; `clear_bar_cache.py` deletes them safely and `audit_bar_cache.py` cross-checks them against a Tier-1 rebuild. **Native bars are not only 1m** — a 5-minute chart publishes native 5m bars into the Tier-3 directory, which is why the provenance guard (`source` = `derived:*`) is what decides deletion, never the path.
 
 `--data-root` is now only a fallback path used when `--sinks-config` is missing — the YAML's per-sink `root` parameter wins otherwise. When you need to redirect output, edit `sinks.yaml`, not the CLI flag.
@@ -175,7 +177,15 @@ and every binding must agree. Change them there first.**
   `hh:mm:ss tt` broke on zh-TW Windows hosts where `FormatTime("tt")` emits localised
   AM/PM.
 - Bars are **left-labelled**: `bucket_start` covers `[t, t+step)`, so an RTH 1m session
-  runs 09:30…15:59, not 09:31…16:00.
+  runs 09:30…15:59, not 09:31…16:00. **The wire is right-labelled** — EasyLanguage's
+  `Time` is the bar's *close* and the indicator forwards it verbatim — so `_parse_bar`
+  subtracts one `tf` before the grid snap, exempting `SESSION_ANCHORED_TIMEFRAMES`
+  (`1d`), where alignment discards the time-of-day for the 04:00 ET anchor anyway and
+  subtracting would move the bar into the previous session. That step went missing once
+  and every stored 1m file came out as 09:31…16:00: same 390 rows, all values plausible,
+  nothing raised. `contract/fixtures/session.jsonl` is what pins it — it publishes the
+  real 09:31 / 16:00 shape, so a fixture that emits the contract's own labels is not a
+  test, it is a tautology.
 - Ticks use the DLL's receive-side `ts` (UTC epoch) as authoritative.
 - `aggregation/session.py` owns session-edge logic. US equity session = 09:30–16:00 ET;
   bars before 04:00 ET belong to the *previous* session. Per-symbol retention via

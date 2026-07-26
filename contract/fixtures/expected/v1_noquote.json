@@ -13,7 +13,9 @@
     "fixtures exist to prevent.",
     "",
     "bucket_start: ts_str '2026-04/18-13:31:00' read as America/New_York (EDT)",
-    "gives 2026-04-18T17:31:00Z, matching the DLL's own ts_utc of 1776533460.0."
+    "gives 2026-04-18T17:31:00Z, matching the DLL's own ts_utc of 1776533460.0.",
+    "That is the bar's close, and §2 labels a bar by its left edge, so one",
+    "interval comes off: 17:30:00Z, covering [17:30, 17:31)."
   ],
   "notes": [
     "semantics.md §3.1 says v1 has no way to express 'no quote' and that a",
@@ -59,7 +61,7 @@
     {
       "symbol": "SPY",
       "kind": "bar_1m",
-      "bucket_start": "2026-04-18T17:31:00Z",
+      "bucket_start": "2026-04-18T17:30:00Z",
       "open": 450.1,
       "high": 450.75,
       "low": 449.8,
