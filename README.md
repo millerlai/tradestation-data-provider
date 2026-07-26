@@ -103,6 +103,41 @@ cmake --preset x86-release          # or x86-release-vs2022
 cmake --build --preset x86-release  #  ->  cpp\build\x86-release\Release\
 ```
 
+**Installing the DLL into TradeStation:**
+
+```powershell
+cd cpp
+.\install-to-tradestation.bat
+```
+
+It finds the TradeStation `Program` folder under the usual locations on `C:` and
+`D:` — and asks for the path, with an example, when it cannot. Which build gets
+installed is decided by the architecture of the `ORPlat.exe` sitting there, not by
+the bitness of Windows: TradeStation is a 32-bit process on a 64-bit OS. Nothing is
+copied until you confirm, and replacing a `TS2Python.dll` that is already installed
+is asked as its own question. Close TradeStation first — Windows keeps the loaded
+DLL locked.
+
+**Not wanting to build it yourself is fine.** Prebuilt x86 and x64 binaries are
+checked into [`cpp/prebuilt/`](cpp/prebuilt/), built from this repo and tested on
+Windows 11 with TradeStation 10; the installer falls back to them when there is no
+local build, and prefers a local build when there is one.
+
+Two dependencies have to be in place, and neither announces itself when missing —
+EasyLanguage reports only that the DLL could not be loaded, naming no cause:
+
+| Dependency | Who handles it |
+| --- | --- |
+| `libzmq-mt-4_3_5.dll` | the installer — it copies every `.dll` beside `TS2Python.dll`, because the versioned name moves with the pinned vcpkg revision |
+| Microsoft Visual C++ 2015-2022 Redistributable, **x86** | you — the DLL is linked against the dynamic CRT. The installer checks and prints the download link if it is missing |
+
+The full `dumpbin /dependents` breakdown is in
+[`cpp/prebuilt/README.md`](cpp/prebuilt/README.md).
+
+**Installing the EasyLanguage indicator** → [`EL/README.md`](EL/README.md) — paste
+the source into the EasyLanguage Editor, Verify, apply it to a tick or 1-minute
+chart. Install the DLL first: Verify needs it in place already.
+
 **Inspecting the wire without TradeStation:**
 
 ```powershell

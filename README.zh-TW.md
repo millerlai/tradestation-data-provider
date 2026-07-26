@@ -98,6 +98,37 @@ cmake --preset x86-release          # 或 x86-release-vs2022
 cmake --build --preset x86-release  #  ->  cpp\build\x86-release\Release\
 ```
 
+**把 DLL 安裝到 TradeStation：**
+
+```powershell
+cd cpp
+.\install-to-tradestation.bat
+```
+
+它會在 `C:` 與 `D:` 的常見位置找出 TradeStation 的 `Program` 資料夾 —— 找不到就
+直接問你，並附上範例路徑。裝哪一版由那裡的 `ORPlat.exe` 的架構決定，**不是**看
+Windows 是幾位元：TradeStation 是跑在 64 位元 OS 上的 32 位元 process。沒有經過
+確認不會複製任何檔案；目標已經有 `TS2Python.dll` 時，會另外單獨問你要不要取代。
+執行前請先關閉 TradeStation —— 已載入的 DLL 會被 Windows 鎖住。
+
+**不想自己 build 也沒關係。** [`cpp/prebuilt/`](cpp/prebuilt/) 裡放了從本 repo 建出
+的 x86 與 x64 binary，已在 Windows 11 + TradeStation 10 上測試過；本機沒有建置輸出
+時安裝腳本會自動改用它們，有本機建置時則優先用你自己建的。
+
+有兩個相依項必須就位，而且缺了哪一個都不會有明確訊息 —— EasyLanguage 只會說 DLL
+載不起來，不會說原因：
+
+| 相依項 | 由誰負責 |
+| --- | --- |
+| `libzmq-mt-4_3_5.dll` | 安裝腳本 —— 它會把 `TS2Python.dll` 旁邊所有 `.dll` 一起複製，因為這個帶版號的檔名會隨釘住的 vcpkg 版本變動 |
+| Microsoft Visual C++ 2015-2022 Redistributable，**x86** | 你自己 —— DLL 連的是 dynamic CRT。安裝腳本會檢查，缺少時直接印出下載連結 |
+
+完整的 `dumpbin /dependents` 清單見 [`cpp/prebuilt/README.md`](cpp/prebuilt/README.md)。
+
+**安裝 EasyLanguage indicator** → [`EL/README.zh-TW.md`](EL/README.zh-TW.md) ——
+把原始碼貼進 EasyLanguage Editor、Verify、掛到 tick 或 1 分鐘 chart。
+請先裝 DLL：Verify 的時候它就必須已經在位。
+
 **不開 TradeStation 也能檢視 wire：**
 
 ```powershell
