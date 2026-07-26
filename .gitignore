@@ -51,6 +51,11 @@ cpp/vcpkg_installed/
 *.dll
 *.exp
 *.pdb
+
+# ...except the binaries we ship. cpp/prebuilt/ is the only place a .dll is
+# checked in on purpose: it is what install-to-tradestation.bat falls back to
+# for users who have no Visual Studio. Refresh it from a Release build.
+!cpp/prebuilt/**/*.dll
 *.obj
 *.ilk
 *.recipe
