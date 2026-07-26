@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Second half of the repo-local vcpkg integration — see vcpkg-local.props for
+  the rationale.
+
+  vcpkg splits its MSBuild integration in two: the .props half declares
+  properties and must be imported early, the .targets half consumes them and
+  must be imported after Microsoft.Cpp.targets. It is the .targets half that
+  appends the installed include directory to ExternalIncludePath (the one
+  that makes #include <zmq.hpp> resolve), adds the lib directory, runs the
+  manifest install, and deploys dependent DLLs next to the output.
+
+  Importing only the .props half is a silent half-configuration: properties
+  are set, nothing consumes them, and the build still fails with C1083.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <Import Project="$(TS2PythonVcpkgRoot)scripts\buildsystems\msbuild\vcpkg.targets"
+          Condition="Exists('$(TS2PythonVcpkgRoot)scripts\buildsystems\msbuild\vcpkg.targets')" />
+
+</Project>

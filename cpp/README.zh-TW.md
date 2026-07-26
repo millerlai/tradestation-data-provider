@@ -36,82 +36,55 @@ C++ DLL，把 TradeStation EasyLanguage 的呼叫橋到 ZeroMQ PUB socket。Pyth
 - **Compiler**：Visual Studio 2022 / 2026（Community 以上），含 "Desktop development with C++" workload。
 - **Dependencies**：`libzmq` + `cppzmq` — 由 `cpp/vcpkg.json` 以 manifest 模式管理。
 
-## 一次性準備 — 安裝 vcpkg
+## 一次性準備
 
-vcpkg 是 Microsoft 的 C/C++ 套件管理器。本專案用 **manifest mode**（`vcpkg.json`）：build 時 MSBuild 會呼叫 vcpkg，由它下載並編譯 `zeromq` + `cppzmq` 到 `cpp/vcpkg_installed/`。**沒 bootstrap vcpkg → 會 `LNK1104: 無法開啟檔案 'libzmq.lib'`。**
-
-vcpkg 以 **git submodule** 形式釘在 `cpp/build-tools/vcpkg/`，所以每個 clone 都拿到完全相同的 vcpkg 版本與 port 版本，可重現性高、不用挑全域安裝目錄。
-
-### Step 1. Clone（含 submodule）
-
-第一次 clone：
+兩支腳本，都在 `cpp\` 底下執行：
 
 ```powershell
-git clone --recurse-submodules https://github.com/millerlai/tradestation-data-provider.git
+cd cpp
+.\setup-build-env.bat        # 取出 vcpkg、bootstrap、安裝相依套件
+.\verify-build-env.bat       # 逐項確認環境；exit 0 代表可以 build
 ```
 
-已 clone 但當時沒帶 submodule：
+`setup-build-env.bat` 可重複執行 —— 改過 `vcpkg.json` 之後、或任何時候不確定環境狀態，直接再跑一次即可。`verify-build-env.bat` 不改動任何東西，只逐項印出 `[ OK ]` 或**修正指令**。
+
+接著 build：
 
 ```powershell
-cd <your-repo-root>          # 例：D:\project\tradestation-data-provider
-git submodule update --init --recursive
+.\build.bat                  # Release，x86 與 x64
+.\build.bat Debug            # Debug，x86 與 x64
+.\build.bat all              # 四種組態全跑
+.\build.bat --x86            # 只 build x86 —— TradeStation 載入的那個
+.\build.bat --rebuild        # 完整重建，不做增量
 ```
 
-> 以下指令一律以 repo 根目錄為起點；`<your-repo-root>` 請替換成你實際 clone 的位置。
-
-完成後 `ls cpp\build-tools\vcpkg` 應該看到 `bootstrap-vcpkg.bat`、`ports\`、`scripts\` 等檔案。
-
-### Step 2. Bootstrap（在 submodule 內產生 `vcpkg.exe`）
-
-用**一般使用者權限的 PowerShell**（不需要系統管理員）：
+`build.bat` 會自己找到 MSBuild，不需要開 Developer Command Prompt。或者直接操作方案：
 
 ```powershell
-cd <your-repo-root>\cpp\build-tools\vcpkg
-.\bootstrap-vcpkg.bat
+# Visual Studio：開 cpp\TS2Python.sln，選 Release | x86，Build
+msbuild TS2Python.sln /p:Configuration=Release /p:Platform=x86
+
+# CMake（只支援 x86，CMakeLists.txt 會擋掉其他架構）：
+cmake --preset x86-release
+cmake --build --preset x86-release
 ```
 
-跑完後 `ls vcpkg.exe` 應該存在（約 10 MB）。這支執行檔**不進 git**（被 `.gitignore` 忽略），每個 checkout 各自 bootstrap 一次即可。
+> **這裡刻意不需要 `vcpkg integrate install`。** 見[為什麼不用 `vcpkg integrate install`](#why-no-vcpkg-integrate-install-zh) —— 跑它不只是多餘，它正是以前把 build 弄壞的元凶。
 
-### Step 3. 設 `VCPKG_ROOT` 環境變數（指向 submodule）
+### setup-build-env.bat 做什麼
 
-```powershell
-setx VCPKG_ROOT <your-repo-root>\cpp\build-tools\vcpkg
-```
+| 步驟 | 動作 | 什麼情況會失敗 |
+| --- | --- | --- |
+| 1 | 用 `vswhere` 找出含 C++ toolset 的 Visual Studio | 沒安裝 "Desktop development with C++" workload |
+| 2 | `cpp/build-tools/vcpkg/` 是空的就跑 `git submodule update --init --recursive` | 用 `.zip` 下載而非 `git clone`（`.zip` 不含 submodule） |
+| 3 | 沒有 `vcpkg.exe` 就跑 `bootstrap-vcpkg.bat` | 網路或防毒軟體擋下載 |
+| 4 | `vcpkg install --triplet x86-windows` 裝到 `cpp/vcpkg_installed/` | 某個 port 編譯失敗，vcpkg 會印出 log 路徑 |
 
-> `setx` 寫入的是**永久**使用者環境變數，但**對目前這個 PowerShell 視窗無效**。  
-> **關掉 PowerShell，重開一個新視窗**，然後 `echo $env:VCPKG_ROOT` 確認指向 submodule 路徑。
+加 `--with-x64` 可以連 x64 triplet 一起裝，那只有開發用的 x64 組態需要。TradeStation 載入的是 32 位元 DLL，x86 才是真正要緊的那個。
 
-### Step 4. 整合進 Visual Studio
-
-在**新開的 PowerShell**（`VCPKG_ROOT` 已生效）執行：
-
-```powershell
-& "$env:VCPKG_ROOT\vcpkg.exe" integrate install
-```
-
-這步是**全機生效、只要做一次**。它做的事：寫一個 `.targets` 到 `%LOCALAPPDATA%\vcpkg\`，指向**這個 submodule 裡的 `vcpkg.exe`**，讓 MSBuild 在 build 任何 `.vcxproj` 時自動注入 vcpkg 的 include / lib 路徑。
-
-- **不需要管理員權限**（寫到 `%LOCALAPPDATA%`，是使用者層級）。
-- 成功訊息：`Applied user-wide integration for this vcpkg root.`
-- 之後所有 VS / MSBuild 專案只要 `VcpkgEnabled=true` + 有 `vcpkg.json` 就會自動觸發 manifest install。
-
-> 如果這台機器有其他專案也用 vcpkg submodule，同一時間只有一個 `integrate install` 生效。切換專案時重跑 Step 3 + 4 指向該專案的 submodule 即可。
->
-> 完全取消整合：`& "$env:VCPKG_ROOT\vcpkg.exe" integrate remove`。
-
-### Step 5. 驗證安裝成功
-
-```powershell
-cd <your-repo-root>\cpp
-& "$env:VCPKG_ROOT\vcpkg.exe" install --triplet x86-windows
-ls vcpkg_installed\x86-windows\lib\
-```
-
-預期看到版本化名稱的 lib 檔（如 `libzmq-mt-4_3_5.lib`）。vcxproj 靠 `VcpkgAutoLink=true` + `zmq.h` 裡的 `#pragma comment(lib, ...)` 自動 link，不用手動填 `<AdditionalDependencies>`。
+vcpkg 以 **git submodule** 釘在 `cpp/build-tools/vcpkg/`，所以每個 clone 解析到的 vcpkg 版本與 port 版本完全一致。
 
 ### 升級 / 釘版 vcpkg
-
-vcpkg 是 submodule，升級方式與一般 submodule 相同：
 
 ```powershell
 cd cpp\build-tools\vcpkg
@@ -120,16 +93,81 @@ git checkout <new-commit-or-tag>      # 例 tag 2026.04.15
 cd ..\..\..
 git add cpp/build-tools/vcpkg         # 更新 superproject 指標
 git commit -m "bump vcpkg to 2026.04.15"
-# 重 bootstrap（vcpkg.exe 可能有更新）
-cd cpp\build-tools\vcpkg && .\bootstrap-vcpkg.bat
+cd cpp && .\setup-build-env.bat       # 重新 bootstrap 並重裝
 ```
 
-### 常見準備錯誤
+## 疑難排解
 
-- **`cpp/build-tools/vcpkg/` 是空的** → 忘記 `git submodule update --init --recursive`。
-- **`'vcpkg.exe' 找不到`** → 沒做 Step 2 bootstrap，或 bootstrap 失敗（網路問題 / 防毒軟體擋）。重跑 `bootstrap-vcpkg.bat` 看詳細錯誤。
-- **`LNK1104: 'libzmq.lib'`** → 通常是 (a) 沒做 Step 4 `integrate install`、(b) `VCPKG_ROOT` 在 VS 啟動時還沒生效（關掉 VS 全部視窗重開），或 (c) 手動在 vcxproj `<AdditionalDependencies>` 寫了 `libzmq.lib` 但 vcpkg 實際輸出的是版本化檔名（移掉讓 auto-link 處理）。
-- **第一次 Build 卡很久** → 正常。vcpkg 在下載並編譯 `zeromq` 源碼，x86-windows triplet 約 3-5 分鐘。之後會從 binary cache 秒讀。
+先跑 `verify-build-env.bat` —— 底下每一項它都會診斷並直接給出修正指令。以下說明的是「為什麼會發生」。
+
+### `error C1083: 無法開啟包含檔案: 'zmq.hpp'`
+
+編譯器從來不知道 vcpkg 的 header 在哪。不是相依套件沒裝，就是 vcpkg 的 MSBuild 整合沒有生效。
+
+```powershell
+cd cpp
+.\setup-build-env.bat
+```
+
+若還是一樣，檢查 `cpp\vcpkg_installed\x86-windows\x86-windows\include\zmq.hpp` 是否存在。
+
+**triplet 名稱出現兩次是刻意的。** 外層是「每個 triplet 各自的 install root」，內層才是該 root 裡面正常的 triplet 資料夾。看起來像寫錯，其實不是。若把兩層併成單一共用的 `vcpkg_installed\`，x86 與 x64 的 build 會互相刪掉對方的套件：manifest 模式把 install root 當成受管理的樹，每次都對齊當前的 install plan，所以 build x64 會移除 x86 的套件，於是**下一次** x86 build 就在剛剛才成功的機器上噴 C1083。兩個 root 必須分開。
+
+若 header 不存在，刪掉整個 `cpp\vcpkg_installed\` 再跑一次 `setup-build-env.bat`。
+
+<a id="why-no-vcpkg-integrate-install-zh"></a>
+#### 為什麼不用 `vcpkg integrate install`
+
+一般教學都叫你每台機器跑一次。它會寫出 `%LOCALAPPDATA%\vcpkg\vcpkg.user.props`，裡面是**指向某一個 vcpkg checkout 的絕對路徑** —— 就是你當時所在的那一個。之後這台機器上所有 C++ 專案都會用那一份。
+
+它有兩種方式產生這個錯誤：
+
+1. **從來沒跑過。** 沒有東西匯入 vcpkg，沒有任何 include 目錄被加進去，`zmq.hpp` 自然找不到。
+2. **在別的專案跑過，而那個專案後來被搬走或刪掉了。** 產生出來的檔案用 `Exists(...)` 當匯入條件，所以失效路徑會靜默判為 false、什麼都不匯入 —— 而 `%LOCALAPPDATA%\vcpkg\vcpkg.user.props` 還好端端躺在那裡，看起來設定完全正常。這不是假設：本 repo 遇到的就是這個，它指向一個早已不存在的 `TradeStation-TradingAgent` checkout。
+
+所以這裡的專案改成**直接從 submodule 匯入 vcpkg**（`cpp/vcpkg-local.props` 與 `cpp/vcpkg-local.targets`），並設定 vcpkg 自己的 `VCPkgLocalAppDataDisabled`，讓那個全域檔案即使存在也被忽略。clone 之後跑 `setup-build-env.bat` 就夠了，失效的全域整合再也影響不到這個 build。
+
+`verify-build-env.bat` 的 `[6]` 仍然會回報失效的全域整合 —— 對本 repo 無害，但這台機器上**其他**用 vcpkg 的專案都會壞，直到你從一個存在的 checkout 重跑 `vcpkg integrate install`，或用 `vcpkg integrate remove` 清掉為止。
+
+### `LNK1104: 無法開啟檔案 'libzmq.lib'`
+
+跟 C1083 同一個根因，只是晚一個階段：header 找到了，但 library 目錄沒有。跑 `setup-build-env.bat`。
+
+如果有人手動在 `<AdditionalDependencies>` 填了 `libzmq.lib`，請移除 —— vcpkg 輸出的是**版本化**檔名（`libzmq-mt-4_3_5.lib`），專案是靠 `VcpkgAutoLink` 加上 `zmq.h` 裡的 `#pragma comment(lib, ...)` 自動連結的。
+
+### `MSB4126: 指定的方案組態 "Release|Win32" 無效`
+
+方案層級的平台叫 **`x86`**，`Win32` 是它對應到的**專案**層級名稱。Visual Studio 下拉選單顯示的是 `x86`。命令列要寫：
+
+```powershell
+msbuild TS2Python.sln /p:Configuration=Release /p:Platform=x86
+```
+
+### `找不到 v145 的建置工具`
+
+`v145` 隨 Visual Studio 2026 提供。在 VS 2022 上請改用它的 toolset：
+
+```powershell
+msbuild TS2Python.sln /p:TS2PythonToolset=v143 /p:Configuration=Release /p:Platform=x86
+```
+
+`verify-build-env.bat` 的 `[2]` 會列出實際安裝了哪些 toolset。
+
+### `cpp/build-tools/vcpkg/` 是空的
+
+repo 是用 `.zip` 下載的，而 `.zip` 不含 submodule。改用 clone：
+
+```powershell
+git clone --recurse-submodules https://github.com/millerlai/tradestation-data-provider.git
+```
+
+### 第一次 Build 要跑好幾分鐘
+
+正常 —— vcpkg 正在為 x86-windows triplet 從原始碼編譯 `zeromq`。之後會走 binary cache，數秒完成。
+
+### `warning MSB4011: GetGlobalProperties.task ... 已經匯入`
+
+無害，且是上游問題：vcpkg 自己的 `vcpkg.targets` 與 `Bootstrap.targets` 都匯入了同一個 task 檔。MSBuild 會略過重複的那次，build 仍然成功。
 
 ## Build — 方式 A：Visual Studio 解決方案（推薦日常開發）
 
@@ -143,7 +181,7 @@ cd cpp\build-tools\vcpkg && .\bootstrap-vcpkg.bat
   - Win32 Debug：`cpp/Debug/`
   - Win32 Release：`cpp/Release/`
   - x64 變體：`cpp/x64/<Debug|Release>/`
-- vcpkg 自動把 `libzmq.dll` 複製到輸出資料夾（applocal deployment），harness 可直接執行。
+- vcpkg 自動把 ZeroMQ runtime DLL 複製到輸出資料夾（applocal deployment），harness 可直接執行。注意檔名是**帶版本的** —— 目前是 `libzmq-mt-4_3_5.dll`，不是 `libzmq.dll` —— 且會隨釘住的 vcpkg 版本變動。
 
 ## Build — 方式 B：CMake + 命令列
 
@@ -154,7 +192,7 @@ cmake --build --preset x86-release
 cmake --install build/x86-release --prefix build/x86-release/stage
 ```
 
-輸出：`cpp/build/x86-release/stage/bin/TS2Python.dll`、`TS2Python_TestHarness.exe`、`libzmq.dll`。
+輸出：`cpp/build/x86-release/stage/bin/` 底下的 `TS2Python.dll`、`TS2Python_TestHarness.exe`，以及帶版本的 ZeroMQ runtime（目前釘版為 `libzmq-mt-4_3_5.dll`）。
 
 > 兩種方式可以並存，但不要混用：VS .sln 用 `cpp/Debug`、`cpp/Release` 做輸出；CMake 用 `cpp/build/`。如果切換工具鏈，建議先刪掉另一邊的 output 資料夾避免 stale DLL 被 linker 抓到。
 
@@ -163,7 +201,12 @@ cmake --install build/x86-release --prefix build/x86-release/stage
 1. Build **Release | x86**（TS 絕對是 32-bit process，x64 不會被載入）。
 2. 把下列檔案複製到 `C:\Program Files (x86)\TradeStation <version>\Program\`：
    - `TS2Python.dll`
-   - `libzmq.dll`（vcpkg 從 `cpp/vcpkg_installed/x86-windows/bin/` 或 CMake `stage/bin/` 取）。
+   - 旁邊那個 ZeroMQ runtime —— **`libzmq-mt-4_3_5.dll`**，不是 `libzmq.dll`。vcpkg 輸出的是帶版本的檔名，所以請直接複製 `cpp\Release\` 裡與 `TS2Python.dll` 並排的那個 `.dll`，不要憑印象打檔名；它會隨釘住的 vcpkg 版本改變。
+
+   ```powershell
+   # 在 cpp\ 底下，build 完 Release|x86 之後：
+   Copy-Item Release\*.dll "C:\Program Files (x86)\TradeStation <version>\Program\"
+   ```
 3. TradeStation EasyLanguage Editor 裡重新 Verify 使用這支 DLL 的 indicator。
 
 ## C ABI

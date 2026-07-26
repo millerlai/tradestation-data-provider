@@ -75,8 +75,15 @@ C++ and wire inspection, from the repo root:
 
 ```powershell
 cd cpp
+.\setup-build-env.bat               # once per clone; idempotent
+.\verify-build-env.bat              # exit 0 = ready; names the fix for anything missing
+.\build.bat                         # Release x86 + x64; also `Debug` / `all` / `--x86` / `--rebuild`
+
 cmake --preset x86-release          # or x86-release-vs2022
 cmake --build --preset x86-release
+
+# The MSBuild path — note the SOLUTION platform is x86, not Win32
+msbuild TS2Python.sln /p:Configuration=Release /p:Platform=x86
 
 # Drive the DLL without TradeStation, then watch or record the wire.
 # Leave enough warmup for the subscriber to attach — PUB drops with no subscriber.
@@ -199,6 +206,9 @@ pyzmq's asyncio integration uses `loop.add_reader()`, which the default Windows 
 - Lint/format: ruff (line length 100, target py311; rules `E,F,W,I,N,UP,B,SIM,RUF`; tests get `N802/N803` relaxed). Run it from `bindings/python/`. The repo-root `.ruff.toml` exists only to stop a top-level `ruff check .` from falling back to defaults and rewriting the vendored vcpkg checkout — which has happened.
 - Types: mypy strict on `src/`; `tests/` is excluded.
 - C++ builds Win32 (x86) only — TradeStation is a 32-bit process. `DEFINE_SYMBOL` on the `TS2Python` target supplies `TS2PYTHON_EXPORTS`; CMake's automatic `<target>_EXPORTS` differs in case and leaves the header on the `dllimport` branch.
+- The MSBuild build imports vcpkg **from the submodule** via `cpp/vcpkg-local.props` + `.targets`, and sets `VCPkgLocalAppDataDisabled` so `%LOCALAPPDATA%\vcpkg\vcpkg.user.props` is ignored. Do not "fix" a build by running `vcpkg integrate install` — that global file holds an absolute path to one checkout, and a stale one silently skips its own `Exists()` guard, which is precisely the `C1083: 'zmq.hpp'` this arrangement exists to prevent. `cpp/verify-build-env.bat` reports it.
+- `PlatformToolset` comes from `$(TS2PythonToolset)`, declared in each vcxproj's Globals group (it has to precede the configuration groups that read it). Default `v145` (VS 2026); override with `/p:TS2PythonToolset=v143`.
+- **Never point `VcpkgInstalledDir` at a root shared by both triplets.** vcpkg manifest mode reconciles an install root against the current plan, so an x64 build would delete the x86 packages and the next x86 build fails with C1083 on a machine where it just worked. The default per-triplet root — which is why the triplet appears twice in `vcpkg_installed\x86-windows\x86-windows\include` — is what keeps them isolated.
 - Coverage: branch coverage on `src/tradestation_data`, excludes match `pragma: no cover`, `raise NotImplementedError`, `if TYPE_CHECKING`, ellipsis-only stubs.
 - Dataclasses: use `slots=True` (and `frozen=True` for value types) — the codebase is consistent on this.
 - Logging: stdlib `logging` everywhere, with structured kwargs via `extra={...}`. `runtime/main.py` ships both a plain formatter (`_ExtraDumpFilter` flattens `extra` into the message tail) and `--log-json` (`_JsonFormatter`). Keep new log sites in the same shape. Sink-related events use the conventions `sink_on_tick_failed`, `sink_on_bar_failed`, `sink_flush_failed`, `sink_close_failed`, `sinks_loaded`, `sinks_config_invalid` — match these when adding new sink paths.
