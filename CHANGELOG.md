@@ -101,7 +101,44 @@ changes; patch releases (`0.x.Y`) will not.
   fell back to building from source. Unpinning it (24.0.0) fixes that at the source; 3.14
   joins the CI matrix and the classifiers.
 
+### Changed
+- **`1d` is published data, not a cache tier.** `contract/semantics.md` §2.3 gains rule 4:
+  a binding must not compute a daily bar at all, even into an empty partition. A derived
+  daily is byte-for-byte as plausible as the real one and carries neither the exchange's
+  official close nor the split/dividend adjustment, so the only safe rule is not to make
+  one. `HistoryStore.load_bars` returns empty instead of building it, `rebuild_bar_cache`
+  and `aggregate_parquet.py` refuse it, `clear_bar_cache.py` drops it from the default
+  sweep and refuses it when named, and it is out of `TIER3_TIMEFRAMES`.
+- **`1d` moves to one file per symbol**: `bars/timeframe=1d/symbol={SYM}/bars.parquet`,
+  no `date=` level, rewritten whole on every flush (merging what is already on disk, later
+  wins on a repeated `bucket_start`, replaced atomically). A day partition of daily bars is
+  one row inside a file that costs ~2,903 bytes of schema and footer to carry about 60 of
+  it; 499 sessions took 1.4 MB where one file takes 7.7 KB. Every reader now asks
+  `domain/timeframe.py` which shape a timeframe uses instead of assuming `date=`.
+
 ### Fixed
+- **A finished day's Parquet file was unreadable until the process stopped.** Both writers
+  held one `ParquetWriter` open per partition until `close()`, and a Parquet file has no
+  footer before that — so every reader rejects it. A daily chart replaying two years left
+  499 such files, 943 bytes of unreadable prefix each. Both writers now *seal* a partition
+  — flush, close, mark — as soon as an event for a later day of the same series arrives; a
+  late event for a sealed day is dropped with a warning rather than reopening, because
+  `pq.ParquetWriter` truncates on open and losing one bar beats losing the session.
+- **Bars cost one Parquet row group each.** `BarWriter` wrote every bar the moment it
+  closed, and each `write_table` is a row group carrying a full set of per-column headers
+  and statistics. A real session's 78 five-minute bars took 145,977 bytes as 78 row groups
+  and 5,936 as one. `BarWriter` now buffers like `TickWriter`, with `max_buffered_bars` /
+  `max_flush_seconds` (default 1,000 / 60s — the same one-minute crash-loss bound the
+  unbuffered version claimed), and `ParquetBarSink` advertises `flush` so the runtime's
+  flush loop drives it.
+- **A daily chart published nothing.** TradeStation 10 reports `BarInterval = 0` on a
+  daily chart, not `1`, and `wire_timeframe()` accepted only `(BarType 2, BarInterval 1)`
+  — so `EL_PublishBar` returned `-5`, the indicator printed one line and went idle for the
+  life of the chart while minute charts worked normally. The number was never measured
+  against a live install; the harness asserted the value the ABI had assumed. Both `0` and
+  `1` now map to `1d`, `2` and above are still refused (on `BarType 2` the interval is a
+  day multiplier, and a 2-day bar in the `1d` partition is indistinguishable from real
+  daily data), and `bars.jsonl` carries both readings.
 - **A 5-minute chart silently corrupted the 1-minute partition.** `BarType = 1` covers
   every intraday minute chart — 1/5/15/60-minute are all `BarType 1`, told apart only by
   `BarInterval`, which the indicator never read — and the DLL stated `bar_1m`

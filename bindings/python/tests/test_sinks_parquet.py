@@ -37,7 +37,7 @@ def _tick() -> Tick:
     )
 
 
-def test_parquet_bar_sink_writes_inline(tmp_path: Path) -> None:
+def test_parquet_bar_sink_writes_on_close(tmp_path: Path) -> None:
     sink = ParquetBarSink(name="bars", root=tmp_path)
     sink.on_bar(_bar())
     sink.close()
@@ -49,11 +49,26 @@ def test_parquet_bar_sink_writes_inline(tmp_path: Path) -> None:
     assert table.column("close").to_pylist() == [450.3]
 
 
-def test_parquet_bar_sink_does_not_advertise_flush(tmp_path: Path) -> None:
-    sink = ParquetBarSink(name="bars", root=tmp_path)
+def test_parquet_bar_sink_buffers_until_flush(tmp_path: Path) -> None:
+    sink = ParquetBarSink(
+        name="bars",
+        root=tmp_path,
+        max_buffered_bars=10,
+        max_flush_seconds=3600,  # never expire by time during the test
+    )
+    out = tmp_path / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
+
+    assert sink.should_flush() is False  # nothing buffered yet
+    sink.on_bar(_bar())
+    assert sink.should_flush() is False  # below both triggers
+    assert not out.exists()
+
+    sink.flush()
+    assert out.exists()  # written, but the footer only lands on close
     assert sink.should_flush() is False
-    sink.flush()  # no-op
+
     sink.close()
+    assert pq.read_table(out).num_rows == 1
 
 
 def test_parquet_tick_sink_buffers_until_flush(tmp_path: Path) -> None:

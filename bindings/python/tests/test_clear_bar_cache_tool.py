@@ -89,23 +89,39 @@ def test_confirm_removes_derived_partitions(tmp_path):
 
 
 def test_native_daily_bars_survive_a_confirmed_clear(tmp_path):
-    """The default run covers 1d, and native daily bars now live there.
+    """A daily bar is published data, not cache.
 
-    Since the wire started carrying `tf`, a daily chart writes a *native*
-    bar into bars/timeframe=1d/. It holds the exchange's official close and
-    the split/dividend adjustment, neither of which a tick rollup can
-    reproduce — deleting it by directory name would swap real data for a
-    plausible approximation with nothing to show it happened.
+    It holds the exchange's official close and the split/dividend
+    adjustment, neither of which any rollup can reproduce, so `1d` is out
+    of the default sweep entirely — and the provenance check would spare it
+    even if something put it back.
     """
     native = _write_bar(tmp_path, "1d", "tradestation_el")
-    derived = _write_bar(tmp_path, "1d", "derived:ticks", symbol="QQQ")
+    derived_5m = _write_bar(tmp_path, "5m", "derived:ticks", symbol="QQQ")
 
     rc = ccm.main(["--data-root", str(tmp_path), "--confirm"])
 
     assert rc == 0
     assert native.exists(), "native daily bar was deleted"
-    assert not derived.exists(), "derived daily bar should have been evicted"
+    assert not derived_5m.exists(), "derived 5m bar should have been evicted"
     assert pq.read_table(native)["source"].to_pylist() == ["tradestation_el"]
+
+
+def test_naming_1d_explicitly_is_refused(tmp_path, caplog):
+    """It is no longer in the default list, so asking for it is deliberate.
+    Say why nothing happened instead of reporting a clean '0 deleted'."""
+    native = _write_bar(tmp_path, "1d", "tradestation_el")
+
+    with caplog.at_level("WARNING"):
+        rc = ccm.main(["--data-root", str(tmp_path), "--timeframes", "1d", "--confirm"])
+
+    assert rc == 0
+    assert native.exists()
+    assert any("skipping_native_only_timeframe" in r.message for r in caplog.records)
+
+
+def test_tier3_default_excludes_native_only_timeframes(tmp_path):
+    assert "1d" not in ccm.TIER3_TIMEFRAMES
 
 
 def test_unreadable_partition_is_kept_not_deleted(tmp_path):

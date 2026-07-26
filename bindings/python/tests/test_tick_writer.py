@@ -152,3 +152,35 @@ def test_should_flush_false_when_oldest_monotonic_reset(tmp_path: Path) -> None:
     writer._oldest_buffer_monotonic = None  # simulate reset without flush
     assert writer.should_flush() is False
     writer.close()
+
+
+def test_finished_day_is_readable_before_close(tmp_path: Path) -> None:
+    """A ParquetWriter held open leaves its file without a footer, so no
+    reader will touch it. A tick for the next day means the old one can
+    never grow again — seal it."""
+    root = tmp_path / "ticks"
+    writer = TickWriter(root, max_buffered_ticks=1000, max_flush_seconds=3600)
+    try:
+        writer.write(_tick("SPY", T0, 450.0))
+        writer.write(_tick("SPY", T0 + timedelta(days=1), 451.0))
+
+        day_one = root / "symbol=SPY" / "date=2026-04-18" / "ticks.parquet"
+        assert pq.read_table(day_one).num_rows == 1  # would raise without the footer
+    finally:
+        writer.close()
+
+
+def test_late_tick_for_a_sealed_day_does_not_truncate_it(tmp_path: Path, caplog) -> None:
+    root = tmp_path / "ticks"
+    writer = TickWriter(root, max_buffered_ticks=1000, max_flush_seconds=3600)
+    try:
+        writer.write(_tick("SPY", T0, 450.0))
+        writer.write(_tick("SPY", T0 + timedelta(days=1), 451.0))
+        with caplog.at_level("WARNING"):
+            writer.write(_tick("SPY", T0 + timedelta(seconds=1), 450.5))
+        assert any("tick_partition_sealed" in r.message for r in caplog.records)
+    finally:
+        writer.close()
+
+    day_one = root / "symbol=SPY" / "date=2026-04-18" / "ticks.parquet"
+    assert pq.read_table(day_one).num_rows == 1
