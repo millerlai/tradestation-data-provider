@@ -58,9 +58,7 @@ class BarWriter:
 
     Layout: `{root}/timeframe={tf}/symbol={SYM}/date={YYYY-MM-DD}/bars.parquet`
 
-    **The partition follows `bar.timeframe`, not the writer's setting.** The
-    `timeframe` argument is only the default for bars that do not name one
-    (everything the tick aggregator produces). Routing on the bar is what
+    **The partition follows `bar.timeframe`.** Routing on the bar is what
     keeps a 5-minute bar out of the 1-minute partition once the wire can
     say which interval it is; before that, mislabelled bars were
     indistinguishable from real 1-minute data downstream.
@@ -75,12 +73,10 @@ class BarWriter:
         self,
         root: Path | str,
         *,
-        timeframe: str = "1m",
         compression: str = "zstd",
     ) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
-        self._default_timeframe = timeframe
         self._compression = compression
         self._partitions: dict[tuple[str, str, date], _DayPartition] = {}
         self._closed = False
@@ -88,7 +84,7 @@ class BarWriter:
     def write(self, bar: Bar) -> None:
         if self._closed:
             raise RuntimeError("BarWriter is closed")
-        timeframe = bar.timeframe or self._default_timeframe
+        timeframe = bar.timeframe
         # Partition on the ET calendar date so all bars from one US trading
         # session land in a single date= directory, regardless of the UTC
         # rollover (which splits a session at 19:00/20:00 ET otherwise).

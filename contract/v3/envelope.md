@@ -73,7 +73,7 @@ v1/v2 用 `kind: "bar_1m"` 把兩件事綁在同一個字串裡。v3 拆開：
 | `kind` | string | `"tick"` 或 `"bar"` |
 | **`tf`** | string | **僅 `bar` 有**。`1m` `5m` `15m` `30m` `1h` `1d` |
 | `seq` | uint64 | per-symbol 單調遞增，從 `1` 起算。見 `../semantics.md` §6 |
-| `sid` | uint64 | publisher session id（`EL_Init` 當下的 UTC epoch 秒） |
+| `sid` | uint64 | publisher session id（`EL_Init` 當下的 UTC epoch **微秒**）。只需比較是否相等，不得解讀為時間戳 |
 | `ts` | float | DLL 收訊端 wall clock。**僅用於延遲量測** |
 | `ts_utc` | float | `ts_str` 經 `zoned_time` 轉出。解析失敗為 `0.0`。**僅作交叉稽核** |
 | `ts_str` | string | EL 原始字串 `yyyy-MM/dd-HH:mm:ss`，逐字透傳。**bar bucket 的權威來源** |

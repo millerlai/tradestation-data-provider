@@ -9,8 +9,10 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from tradestation_data.domain.bar import is_derived
+from tradestation_data.domain.timeframe import Timeframe
 from tradestation_data.storage.bar_writer import BAR_SCHEMA
-from tradestation_data.storage.resampler import Resampler, Timeframe, is_derived
+from tradestation_data.storage.resampler import Resampler
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +76,22 @@ class HistoryStore:
             return cached
         return self._miss_build_and_return(symbol, start, end, tf)
 
+    def load_cached_bars(
+        self,
+        symbol: str,
+        start: datetime,
+        end: datetime,
+        timeframe: str | Timeframe,
+    ) -> pl.DataFrame | None:
+        """Read what is on disk, and only that. None when nothing is cached.
+
+        ``load_bars`` self-heals on a miss: it resamples and writes the result
+        back. That makes it the wrong side of a comparison for anything
+        auditing the cache, which would otherwise be diffing a freshly built
+        frame against itself. This is the read-only view for those callers.
+        """
+        return self._load_cached_bars(symbol, start, end, str(timeframe))
+
     def rebuild_bar_cache(
         self,
         symbol: str,
@@ -132,15 +150,31 @@ class HistoryStore:
                 )
         if df.height == 0:
             return df
+        # Add the ET view before returning, not just before writing. A cache
+        # hit reads BAR_SCHEMA back off disk and always carries
+        # ``bucket_start_et``; without this the very first call — the one that
+        # builds the cache — would hand back a frame one column short, and the
+        # same code would work or KeyError depending on whether someone had
+        # asked for that range before.
+        df = _with_bucket_start_et(df)
         self._persist_cache(symbol, timeframe, df)
         return df
 
     def _persist_cache(self, symbol: str, timeframe: str, df: pl.DataFrame) -> None:
+        # Partition on the ET calendar date, exactly as BarWriter.write does.
+        # Splitting on the UTC date instead would put an evening EST bar in a
+        # different date= directory than the writer did, so the native-guard
+        # below would be checking the wrong file — and _load_cached_bars
+        # globs date=*, so a second copy would come back as a duplicate row.
+        df = _with_bucket_start_et(df)
         dates = (
-            df.select(pl.col("bucket_start").dt.date().alias("day")).unique().to_series().to_list()
+            df.select(pl.col("bucket_start_et").dt.date().alias("day"))
+            .unique()
+            .to_series()
+            .to_list()
         )
         for day in dates:
-            day_df = df.filter(pl.col("bucket_start").dt.date() == day)
+            day_df = df.filter(pl.col("bucket_start_et").dt.date() == day)
             out_dir = self._cache_dir(symbol, timeframe) / f"date={day.isoformat()}"
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / "bars.parquet"
@@ -154,7 +188,7 @@ class HistoryStore:
             # TradeStation's daily bar carries the exchange's official OHLC
             # and is split/dividend adjusted. Summing ticks cannot reproduce
             # either, so the replacement would look plausible and be wrong.
-            if _partition_holds_native(out_path):
+            if partition_holds_native(out_path):
                 log.warning(
                     "bar_cache_write_skipped_native_present",
                     extra={
@@ -170,27 +204,46 @@ class HistoryStore:
             pq.write_table(table, out_path, compression="zstd")
 
     def _delete_cache(self, symbol: str, timeframe: str) -> None:
+        """Evict computed partitions. Native ones are not cache — they are data.
+
+        The write-side guard in `_persist_cache` is worthless on its own here:
+        `rebuild_bar_cache` deletes before it rebuilds, so without this check
+        the guard would look at an empty directory and wave the derived bar
+        through. §2.3 rule 3 is "derived must not overwrite native", and
+        unlink-then-write is an overwrite spelled differently.
+        """
         cache_dir = self._cache_dir(symbol, timeframe)
         if not cache_dir.exists():
             return
         for parquet_file in cache_dir.rglob("bars.parquet"):
+            if partition_holds_native(parquet_file):
+                log.warning(
+                    "bar_cache_delete_skipped_native_present",
+                    extra={"path": str(parquet_file)},
+                )
+                continue
             parquet_file.unlink()
         for date_dir in sorted(cache_dir.glob("date=*"), reverse=True):
             if date_dir.is_dir() and not any(date_dir.iterdir()):
                 date_dir.rmdir()
 
 
-def _polars_bars_to_arrow(df: pl.DataFrame) -> pa.Table:
-    """Convert a resampled Polars DataFrame to the canonical BAR_SCHEMA.
+def _with_bucket_start_et(df: pl.DataFrame) -> pl.DataFrame:
+    """Add ``bucket_start_et`` if the frame only carries the UTC column.
 
-    BAR_SCHEMA carries both ``bucket_start`` (UTC) and ``bucket_start_et``
-    (America/New_York) — older resampler pipelines emit only the UTC
-    column, so derive the ET view here to keep the cache layer honest.
+    BAR_SCHEMA persists both views so downstream tooling never converts at
+    query time; the resampler emits only the UTC one.
     """
-    if "bucket_start_et" not in df.columns:
-        df = df.with_columns(
-            pl.col("bucket_start").dt.convert_time_zone("America/New_York").alias("bucket_start_et")
-        )
+    if "bucket_start_et" in df.columns:
+        return df
+    return df.with_columns(
+        pl.col("bucket_start").dt.convert_time_zone("America/New_York").alias("bucket_start_et")
+    )
+
+
+def _polars_bars_to_arrow(df: pl.DataFrame) -> pa.Table:
+    """Convert a resampled Polars DataFrame to the canonical BAR_SCHEMA."""
+    df = _with_bucket_start_et(df)
     table = df.select(
         [
             "bucket_start",
@@ -207,7 +260,7 @@ def _polars_bars_to_arrow(df: pl.DataFrame) -> pa.Table:
     return table.cast(BAR_SCHEMA)
 
 
-def _partition_holds_native(path: Path) -> bool:
+def partition_holds_native(path: Path) -> bool:
     """True if this partition file contains any bar that did not come from us.
 
     Provenance lives in the ``source`` column: computed bars are stamped

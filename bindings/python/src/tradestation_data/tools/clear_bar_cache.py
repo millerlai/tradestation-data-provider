@@ -1,14 +1,20 @@
 """
 T2.5.E.2 — clear Tier 3 bar cache.
 
-Wipes `{data_root}/bars/timeframe=<tf>/...` for every Tier 3 timeframe
-(5m / 15m / 30m / 1h / 1d), leaving the Tier 2 live 1-min cache alone.
-Run this after a BAR_SCHEMA change or any resampler logic change — the
-next `HistoryStore.load_bars()` call will lazily rebuild on demand.
+Wipes computed bars (provenance `derived:*`) under the requested timeframes
+(default: everything but 1m). Run this after a BAR_SCHEMA change or any
+resampler logic change — the next `HistoryStore.load_bars()` call will lazily
+rebuild on demand.
 
-Safety: refuses to run without `--confirm`. The 1-min cache is *never*
-touched by this tool (that'd be data loss, not just cache eviction) —
-use the audit script if you suspect 1m drift.
+**Provenance decides what goes, not the directory name.** Since the wire
+started carrying `tf`, a native daily bar from TradeStation lives in
+`timeframe=1d/` alongside derived ones — and a native daily carries the
+exchange's official close and its split/dividend adjustment, neither of which
+a tick rollup can reconstruct. Deleting the directory would replace real data
+with a plausible-looking approximation, silently. So this tool reads the
+`source` column and only removes bars this binding computed.
+
+Safety: refuses to run without `--confirm`.
 
 Example:
   # Dry run — list what would be deleted
@@ -26,13 +32,14 @@ from __future__ import annotations
 
 import argparse
 import logging
-import shutil
 from pathlib import Path
+
+from tradestation_data.domain.timeframe import TIER3_TIMEFRAMES
+from tradestation_data.storage.history_store import partition_holds_native
 
 log = logging.getLogger("tradestation_data.tools.clear_bar_cache")
 
-TIER3_TIMEFRAMES: tuple[str, ...] = ("5m", "15m", "30m", "1h", "1d")
-PROTECTED_TIMEFRAMES: frozenset[str] = frozenset({"1m"})
+__all__ = ["TIER3_TIMEFRAMES", "main"]
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -60,16 +67,6 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(message)s",
     )
 
-    # Guardrail: reject any attempt to clear the 1m live cache.
-    protected_requested = [tf for tf in args.timeframes if tf in PROTECTED_TIMEFRAMES]
-    if protected_requested:
-        log.error(
-            "refusing to clear protected timeframes %s — Tier 2 live cache is not "
-            "regenerable from this tool",
-            protected_requested,
-        )
-        return 2
-
     bars_root = args.data_root / "bars"
     if not bars_root.exists():
         log.warning("bars_root_not_found path=%s (nothing to do)", bars_root)
@@ -85,33 +82,59 @@ def main(argv: list[str] | None = None) -> int:
         log.info("no_cache_dirs_found under %s for timeframes=%s", bars_root, args.timeframes)
         return 0
 
-    total_files = 0
+    derived: list[Path] = []
+    native_kept = 0
     for tgt in targets:
-        files = list(tgt.rglob("*.parquet"))
-        total_files += len(files)
-        log.info("target path=%s parquet_files=%d", tgt, len(files))
+        for p in sorted(tgt.rglob("bars.parquet")):
+            if partition_holds_native(p):
+                native_kept += 1
+            else:
+                derived.append(p)
+
+    log.info(
+        "scan_complete derived_files=%d native_files_kept=%d",
+        len(derived),
+        native_kept,
+    )
 
     if not args.confirm:
         log.warning(
-            "dry_run — %d file(s) across %d dir(s) would be removed. "
+            "dry_run — %d derived file(s) would be removed, %d native kept. "
             "Pass --confirm to actually delete.",
-            total_files,
-            len(targets),
+            len(derived),
+            native_kept,
         )
         return 0
 
     deleted = 0
-    for tgt in targets:
+    for f in derived:
         try:
-            shutil.rmtree(tgt)
-            log.info("removed path=%s", tgt)
+            f.unlink()
             deleted += 1
         except OSError:
-            log.exception("failed_to_remove path=%s", tgt)
+            log.exception("failed_to_remove path=%s", f)
 
-    log.info("done deleted_dirs=%d total_files_removed=%d", deleted, total_files)
-    return 0 if deleted == len(targets) else 1
+    # Prune directories the deletions emptied. Deepest first, and only when
+    # already empty, so a partition still holding a native bar keeps its path.
+    for tgt in targets:
+        for d in sorted(tgt.glob("symbol=*/date=*"), reverse=True):
+            _rmdir_if_empty(d)
+        for d in sorted(tgt.glob("symbol=*"), reverse=True):
+            _rmdir_if_empty(d)
+        _rmdir_if_empty(tgt)
+
+    log.info("done files_removed=%d native_files_kept=%d", deleted, native_kept)
+    return 0 if deleted == len(derived) else 1
 
 
-if __name__ == "__main__":
+def _rmdir_if_empty(path: Path) -> None:
+    if not path.is_dir() or any(path.iterdir()):
+        return
+    try:
+        path.rmdir()
+    except OSError:
+        log.exception("failed_to_remove_dir path=%s", path)
+
+
+if __name__ == "__main__":  # pragma: no cover
     raise SystemExit(main())

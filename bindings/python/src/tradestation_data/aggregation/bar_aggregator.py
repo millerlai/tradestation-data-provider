@@ -4,7 +4,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from tradestation_data.domain.bar import Bar
+from tradestation_data.domain.bar import Bar, derived_source
 from tradestation_data.domain.tick import Tick
 
 log = logging.getLogger(__name__)
@@ -72,9 +72,15 @@ class BarAggregator:
           (b) advance_time(now) is called with now >= bucket_end.
       - When ingest crosses multiple minute boundaries with no ticks in
         between, the gap is filled forward with EMPTY bars
-        (volume=0, OHLC = prev close, source="empty").
+        (volume=0, OHLC = prev close, source="derived:empty").
       - Out-of-order ticks (ts strictly earlier than the latest seen
         tick for that symbol) are dropped and logged.
+
+    Every bar this class produces is stamped ``derived:*``, never the tick's
+    own source. A tick chart and a 1-minute chart on the same symbol both
+    end up in bars/timeframe=1m/, and §2.3 requires the computed one to stay
+    distinguishable from the one TradeStation aggregated — otherwise the
+    native-data guard treats this approximation as un-overwritable truth.
     """
 
     def __init__(self) -> None:
@@ -141,7 +147,7 @@ class BarAggregator:
             close=tick.price,
             volume=tick.volume,
             tick_count=tick.tick_count,
-            source=tick.source,
+            source=derived_source("ticks"),
         )
 
     def _empty_bar(self, symbol: str, bucket_start: datetime) -> Bar:
@@ -155,5 +161,5 @@ class BarAggregator:
             close=last,
             volume=0,
             tick_count=0,
-            source="empty",
+            source=derived_source("empty"),
         )

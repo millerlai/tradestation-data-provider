@@ -21,11 +21,11 @@ flowchart TB
         direction TB
         TS["TradeStation Desktop"]
         EL["EL Exporter Indicator"]
-        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 7"]
+        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 8"]
         TS --> EL --> DLL
     end
     subgraph CON["Contract — 真正的產品"]
-        WIRE["wire v2<br/>2-frame ZMQ · JSON"]
+        WIRE["wire v3<br/>2-frame ZMQ · JSON"]
         SEM["semantics.md<br/>schema 表達不了的規則"]
         FIX["conformance fixtures"]
     end
@@ -71,7 +71,11 @@ flowchart TB
 
 ## 快速開始
 
-**用 Python 消費資料** → [`bindings/python/README.zh-TW.md`](bindings/python/README.zh-TW.md)
+**用 Python 消費資料** → [`bindings/python/README.zh-TW.md`](bindings/python/README.zh-TW.md)，
+或直接看 [`bindings/python/examples/`](bindings/python/examples/) 裡可直接執行的腳本。
+四支裡有兩支不需要 TradeStation 也不需要 DLL：一支把
+[`contract/fixtures/`](contract/fixtures/) 錄下來的 frame 餵給真正的 binding，
+另一支用自己產生的資料示範儲存分層。
 
 **用其他語言寫 binding** → [`contract/README.md`](contract/README.md)。
 動手寫解析程式前**務必先讀** [`contract/semantics.md`](contract/semantics.md)：
@@ -102,11 +106,11 @@ python contract/tools/record.py
 
 | 版本 | 現值 | 誰在乎 |
 | --- | ---: | --- |
-| Wire（payload 的 `"v"`） | 2 | 所有 binding |
-| DLL ABI（`EL_DllVersion()`） | 7 | 所有 binding |
-| Python 套件 | 0.1.0 | 僅 Python 消費端 |
+| Wire（payload 的 `"v"`） | 3 | 所有 binding |
+| DLL ABI（`EL_DllVersion()`） | 8 | 所有 binding |
+| Python 套件 | 0.2.0 | 僅 Python 消費端 |
 
-Wire v1 已被取代但**仍須支援**：DLL 裝在使用者的 TradeStation 裡，不會隨著
+Wire v1 與 v2 已被取代但**仍須支援**：DLL 裝在使用者的 TradeStation 裡，不會隨著
 binding 升級而更新。
 
 ## 現況

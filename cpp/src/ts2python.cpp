@@ -50,6 +50,15 @@ zmq::socket_t*   g_sock = nullptr;
 // restarted and counters reset" from "we lost 4000 messages". Stamped
 // once per successful EL_Init.
 //
+// It is microseconds, not seconds. At one-second resolution two sessions
+// starting inside the same wall-clock second — a test harness rerun, or a
+// script doing EL_Shutdown + EL_Init — share an id, so the subscriber reads
+// the restart as a sequence regression instead: its expectation stays parked
+// at the old session's high-water mark, and everything genuinely lost in the
+// new session's first messages is invisible while messages_lost still reads
+// 0. Microseconds also stay under 2^53, so a binding that parses JSON numbers
+// as double still reads the value exactly.
+//
 // Both are guarded by g_mutex, which already serialises every publish.
 std::uint64_t                                     g_sid = 0;
 std::unordered_map<std::string, std::uint64_t>    g_seq;
@@ -154,6 +163,13 @@ double recv_unix_seconds() {
     return static_cast<double>(ns) / 1e9;
 }
 
+// Session id source. See g_sid for why seconds are not enough.
+std::uint64_t recv_unix_microseconds() {
+    using namespace std::chrono;
+    return static_cast<std::uint64_t>(
+        duration_cast<microseconds>(system_clock::now().time_since_epoch()).count());
+}
+
 // Parse EL-formatted bar time "yyyy-MM/dd-HH:mm:ss" 24-hour (e.g. "2026-04/18-13:30:45")
 // into unix epoch seconds (UTC). The EL-supplied timestamp is *always*
 // America/New_York wall-clock (TradeStation chart TZ for US equities), so
@@ -235,7 +251,7 @@ TS2P_API int TS2P_CALL EL_Init(const char* zmq_endpoint) {
         // Only on a real init — the idempotent path above returned 1
         // without touching either, so a re-Verify of the indicator does
         // not look like a restart to subscribers.
-        g_sid = static_cast<std::uint64_t>(recv_unix_seconds());
+        g_sid = recv_unix_microseconds();
         g_seq.clear();
         pin_self_module_once();  // stay resident for the life of the host
         return 0;

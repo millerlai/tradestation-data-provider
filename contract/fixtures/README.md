@@ -7,9 +7,12 @@
 
 | fixture | expected | 涵蓋 |
 | --- | --- | --- |
-| `smoke.jsonl` | `expected/smoke.json` | wire v2 · tick + bar_1m · per-symbol `seq` · index symbol 的 bid/ask 無效化 |
-| `noquote.jsonl` | `expected/noquote.json` | 無報價情境 —— 歷史回放與 breadth symbol，wire 上為 `null` |
-| `v1_legacy.jsonl` | `expected/v1_legacy.json` | wire v1 向下相容 · 無 `seq` 時的降級行為 · v1 用 `0` 表示無報價 |
+| `smoke.jsonl` | `expected/smoke.json` | wire v3 · tick + bar · per-symbol `seq` · index symbol 的 bid/ask 無效化（§3.2）· bucket 向下取整到分鐘（§2.1） |
+| `noquote.jsonl` | `expected/noquote.json` | 無報價 → wire 上為 `null`（§3.1）。含 **非 index symbol**（SPY）的無報價 tick —— `$TICK` 單獨無法區分 §3.1 與 §3.2 |
+| `bars.jsonl` | `expected/bars.json` | 每一個非 1m 的 `tf`（`5m`/`15m`/`30m`/`1h`/`1d`）· `1d` 錨在 04:00 ET（§2.2）· legacy `EL_PublishTickEx` 只能是 `1m` · **無法對應的間隔回 `-5` 且不送出**（該 mode 另發了 2 筆被拒） |
+| `session.jsonl` | `expected/session.json` | session 首尾兩根 bar（09:30 / 15:59 ET），釘住左標籤（§2） |
+| `v1_legacy.jsonl` | `expected/v1_legacy.json` | wire v1 向下相容 · 無 `seq` 時降級為「無從得知」（§6.6） |
+| `v1_noquote.jsonl` | `expected/v1_noquote.json` | v1 用 `"bid":0.000000` 表示無報價（§3.1）—— binding 必須自行判 `<= 0` 無效 |
 
 `*.jsonl` 每行一個 frame：
 
@@ -35,11 +38,22 @@ cpp/build/x86-release/Release/TS2Python_TestHarness.exe --mode smoke --warmup-ms
 python contract/tools/record.py --count 6 --quiet --record contract/fixtures/smoke.jsonl
 ```
 
+各 fixture 對應的 harness mode 與 frame 數：
+
+| fixture | `--mode` | `--count` |
+| --- | --- | ---: |
+| `smoke.jsonl` | `smoke` | 6 |
+| `noquote.jsonl` | `noquote` | 3 |
+| `bars.jsonl` | `bars` | 6 |
+| `session.jsonl` | `session` | 2 |
+
 手寫的 fixture 只是把「我們以為 wire 長怎樣」寫第二遍，抓不到實作與規格的落差 ——
 而那正是 fixture 存在的理由。
 
-> `v1_legacy.jsonl` 也是照此原則：v1 的 DLL 原始碼從 git 取出（`67c5618^`）另行建置後
-> 錄製，而非依 v1 規格手寫。
+> v1 的兩份也照此原則：v1 的 DLL 原始碼從 git 取出（`67c5618^`）另行建置後錄製。
+> `v1_legacy.jsonl` 用當時的 harness `--mode smoke`；`v1_noquote.jsonl` 用
+> `cpp/build/v1-ref/record_v1_noquote.cpp`（連結同一顆 v1 DLL 的一次性錄製程式，
+> 建置與錄製指令寫在該檔頂端）。兩者都不是依 v1 規格手寫的。
 
 ### 2. `expected/` 不得由任何 binding 產生
 
@@ -52,8 +66,11 @@ python contract/tools/record.py --count 6 --quiet --record contract/fixtures/smo
 
 尚未涵蓋、但 `semantics.md` 已規範的情境：
 
-- **DST 轉換日**的 `ts_str` → UTC（§1）—— 一年只錯兩天的那種 bug
-- **session 首尾兩根 bar**，驗證左標籤（§2）
-- **缺漏**：`seq` 跳號後的偵測行為（§6）
+- **DST 轉換日**的 `ts_str` → UTC（§1）—— 一年只錯兩天的那種 bug。
+  bucket 那一側已由 `bindings/python/tests/test_timeframe_grid.py` 逐點比對兩套實作，
+  但 wire 上的 `ts_str` 解析仍無 fixture。
+- **缺漏**：`seq` 跳號後的偵測行為（§6）。harness 目前無法刻意跳號。
+- **`sid` 變更**：同一次錄製內的 publisher 重啟（§6.3）。
 
-這幾項需要 harness 支援指定 symbol 與時間戳；目前 `--mode smoke` 的參數是寫死的。
+前兩項需要 harness 支援指定時間戳與人為跳號；`--mode bars` / `--mode session` 已示範
+如何加一個參數寫死的新 mode，照著擴充即可。

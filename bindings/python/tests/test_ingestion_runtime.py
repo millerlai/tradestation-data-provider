@@ -398,7 +398,7 @@ def _make_runtime(**kwargs) -> IngestionRuntime:
     )
 
 
-def _bar(symbol: str, ts: datetime, close: float = 450.0) -> Bar:  # noqa: F821
+def _bar(symbol: str, ts: datetime, close: float = 450.0, timeframe: str = "1m") -> Bar:  # noqa: F821
     from tradestation_data.domain.bar import Bar
 
     return Bar(
@@ -411,6 +411,7 @@ def _bar(symbol: str, ts: datetime, close: float = 450.0) -> Bar:  # noqa: F821
         volume=100,
         tick_count=5,
         source="test",
+        timeframe=timeframe,
     )
 
 
@@ -503,6 +504,56 @@ async def test_advance_direct_bars_flushes_after_grace(tmp_path: Path) -> None:
     assert runtime._counters.bars_direct_in == 1
     # Buffer now empty
     assert runtime._advance_direct_bars(ts + timedelta(hours=1)) == []
+
+
+@pytest.mark.asyncio
+async def test_direct_bar_close_deadline_follows_its_own_timeframe() -> None:
+    """A 5m bucket must not be closed one minute in.
+
+    A fixed one-minute deadline would emit OHLC covering only the first of
+    the bucket's five minutes, then discard every later update as a
+    duplicate — leaving bars/timeframe=5m/ full of minute bars with no error
+    anywhere.
+    """
+    runtime = _make_runtime()
+    ts = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)
+    await runtime._handle_provider_bar(_bar("SPY", ts, timeframe="5m"))
+
+    assert runtime._advance_direct_bars(ts + timedelta(minutes=1, seconds=5)) == []
+    ready = runtime._advance_direct_bars(ts + timedelta(minutes=5, seconds=5))
+    assert len(ready) == 1
+    assert ready[0].timeframe == "5m"
+
+
+@pytest.mark.asyncio
+async def test_direct_bars_are_buffered_per_symbol_and_timeframe() -> None:
+    """One topic now carries every interval the user has a chart open on.
+
+    Keyed on symbol alone, the 1m bar below would evict the buffered 5m bar,
+    emit it a minute early, and then park _last_emitted at the 1m bucket so
+    the real 5m updates were dropped as duplicates.
+    """
+    runtime = _make_runtime()
+    open_5m = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)
+    emitted: list = []
+    runtime._on_bar = emitted.append
+
+    await runtime._handle_provider_bar(_bar("SPY", open_5m, close=1.0, timeframe="5m"))
+    # A 1-minute bar for the *next* minute on the same topic.
+    await runtime._handle_provider_bar(
+        _bar("SPY", open_5m + timedelta(minutes=1), close=2.0, timeframe="1m")
+    )
+    assert emitted == [], "the 5m bucket must not be closed by 1m traffic"
+
+    # The 5m bucket keeps taking intra-bar refreshes.
+    await runtime._handle_provider_bar(_bar("SPY", open_5m, close=9.0, timeframe="5m"))
+    assert runtime._counters.bars_duplicate_dropped == 0
+    assert runtime._counters.bars_direct_updated == 1
+
+    ready = runtime._advance_direct_bars(open_5m + timedelta(minutes=5, seconds=5))
+    by_tf = {b.timeframe: b for b in ready}
+    assert by_tf["5m"].close == 9.0, "final 5m OHLC must be the last refresh"
+    assert by_tf["1m"].close == 2.0
 
 
 def test_emit_heartbeat_updates_counters() -> None:

@@ -36,6 +36,13 @@ cpp/.vs/
 # host-specific, never checked in.
 cpp/vcpkg_installed/
 
+# Claude Code per-user permission overrides. `.local.json` is by definition a
+# personal layer; committing it hands every collaborator an inherited allow
+# list (this one carried `Bash(git push *)`), which contradicts the workflow
+# rule that pushes are always explicit. Anything genuinely shared belongs in
+# a reviewed `.claude/settings.json`.
+.claude/settings.local.json
+
 # Per-user / build-time files
 *.user
 *.suo

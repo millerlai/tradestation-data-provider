@@ -2,20 +2,40 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 
+import pyarrow.parquet as pq
+
+from tradestation_data.domain.bar import Bar
+from tradestation_data.storage.bar_writer import BarWriter
 from tradestation_data.tools import clear_bar_cache as ccm
 
 
-def _seed_cache(root: Path, timeframes: tuple[str, ...], files_per_tf: int = 2) -> None:
-    """Create fake timeframe= dirs with N parquet files each."""
-    bars = root / "bars"
+def _write_bar(root: Path, timeframe: str, source: str, *, symbol: str = "SPY") -> Path:
+    """Write one real bars.parquet under bars/timeframe=<tf>/symbol=.../date=..."""
+    with BarWriter(root / "bars") as w:
+        w.write(
+            Bar(
+                symbol=symbol,
+                bucket_start=datetime(2026, 4, 20, 13, 30, tzinfo=UTC),
+                open=1.0,
+                high=2.0,
+                low=0.5,
+                close=1.5,
+                volume=10,
+                tick_count=3,
+                source=source,
+                timeframe=timeframe,
+            )
+        )
+    (path,) = (root / "bars" / f"timeframe={timeframe}" / f"symbol={symbol}").rglob("bars.parquet")
+    return path
+
+
+def _seed_derived(root: Path, timeframes: tuple[str, ...]) -> None:
     for tf in timeframes:
-        tf_dir = bars / f"timeframe={tf}"
-        sym_dir = tf_dir / "symbol=SPY" / "date=2026-04-20"
-        sym_dir.mkdir(parents=True, exist_ok=True)
-        for i in range(files_per_tf):
-            (sym_dir / f"bars-{i}.parquet").write_bytes(b"fake")
+        _write_bar(root, tf, "derived:ticks")
 
 
 def test_parse_args_defaults_to_all_tier3_timeframes(tmp_path):
@@ -30,22 +50,8 @@ def test_parse_args_custom_timeframes(tmp_path):
     assert args.confirm is True
 
 
-def test_refuses_to_clear_protected_1m_cache(tmp_path, caplog):
-    _seed_cache(tmp_path, ("1m", "5m"))
-    rc = ccm.main(
-        [
-            "--data-root",
-            str(tmp_path),
-            "--timeframes",
-            "1m",
-            "5m",
-            "--confirm",
-        ]
-    )
-    assert rc == 2
-    # The 1m cache must still be present after refusal.
-    assert (tmp_path / "bars" / "timeframe=1m").exists()
-    assert (tmp_path / "bars" / "timeframe=5m").exists()
+def test_tier3_default_excludes_the_live_1m_tier(tmp_path):
+    assert "1m" not in ccm.TIER3_TIMEFRAMES
 
 
 def test_missing_bars_root_is_noop(tmp_path):
@@ -62,65 +68,65 @@ def test_no_matching_timeframe_dirs_is_noop(tmp_path):
 
 
 def test_dry_run_preserves_all_files(tmp_path):
-    _seed_cache(tmp_path, ("5m", "15m"))
+    _seed_derived(tmp_path, ("5m", "15m"))
     rc = ccm.main(["--data-root", str(tmp_path), "--timeframes", "5m", "15m"])
     assert rc == 0
     # Without --confirm, nothing should be deleted.
-    assert (tmp_path / "bars" / "timeframe=5m").exists()
-    assert (tmp_path / "bars" / "timeframe=15m").exists()
-    assert list((tmp_path / "bars" / "timeframe=5m").rglob("*.parquet"))
+    assert list((tmp_path / "bars" / "timeframe=5m").rglob("bars.parquet"))
+    assert list((tmp_path / "bars" / "timeframe=15m").rglob("bars.parquet"))
 
 
-def test_confirm_removes_target_dirs(tmp_path):
-    _seed_cache(tmp_path, ("5m", "15m", "1h"))
+def test_confirm_removes_derived_partitions(tmp_path):
+    _seed_derived(tmp_path, ("5m", "15m", "1h"))
     rc = ccm.main(
-        [
-            "--data-root",
-            str(tmp_path),
-            "--timeframes",
-            "5m",
-            "15m",
-            "--confirm",
-        ]
+        ["--data-root", str(tmp_path), "--timeframes", "5m", "15m", "--confirm"],
     )
     assert rc == 0
-    assert not (tmp_path / "bars" / "timeframe=5m").exists()
-    assert not (tmp_path / "bars" / "timeframe=15m").exists()
+    assert not list((tmp_path / "bars" / "timeframe=5m").rglob("bars.parquet"))
+    assert not list((tmp_path / "bars" / "timeframe=15m").rglob("bars.parquet"))
     # Untargeted timeframe (1h) is left alone.
-    assert (tmp_path / "bars" / "timeframe=1h").exists()
+    assert list((tmp_path / "bars" / "timeframe=1h").rglob("bars.parquet"))
 
 
-def test_partial_delete_failure_returns_1(tmp_path, monkeypatch):
-    """rmtree raising on one of many targets → rc=1 but others still removed."""
-    _seed_cache(tmp_path, ("5m", "15m"))
-    real_rmtree = ccm.shutil.rmtree
-    failed_on: list[Path] = []
+def test_native_daily_bars_survive_a_confirmed_clear(tmp_path):
+    """The default run covers 1d, and native daily bars now live there.
 
-    def fake_rmtree(path, *args, **kwargs):
-        p = Path(path)
-        if p.name == "timeframe=5m":
-            failed_on.append(p)
-            raise OSError("simulated")
-        return real_rmtree(path, *args, **kwargs)
+    Since the wire started carrying `tf`, a daily chart writes a *native*
+    bar into bars/timeframe=1d/. It holds the exchange's official close and
+    the split/dividend adjustment, neither of which a tick rollup can
+    reproduce — deleting it by directory name would swap real data for a
+    plausible approximation with nothing to show it happened.
+    """
+    native = _write_bar(tmp_path, "1d", "tradestation_el")
+    derived = _write_bar(tmp_path, "1d", "derived:ticks", symbol="QQQ")
 
-    monkeypatch.setattr(ccm.shutil, "rmtree", fake_rmtree)
-    rc = ccm.main(
-        [
-            "--data-root",
-            str(tmp_path),
-            "--timeframes",
-            "5m",
-            "15m",
-            "--confirm",
-        ]
-    )
+    rc = ccm.main(["--data-root", str(tmp_path), "--confirm"])
+
+    assert rc == 0
+    assert native.exists(), "native daily bar was deleted"
+    assert not derived.exists(), "derived daily bar should have been evicted"
+    assert pq.read_table(native)["source"].to_pylist() == ["tradestation_el"]
+
+
+def test_unreadable_partition_is_kept_not_deleted(tmp_path):
+    """A file we cannot interrogate is treated as native — the safe failure."""
+    junk = tmp_path / "bars" / "timeframe=5m" / "symbol=SPY" / "date=2026-04-20"
+    junk.mkdir(parents=True)
+    (junk / "bars.parquet").write_bytes(b"not parquet")
+
+    rc = ccm.main(["--data-root", str(tmp_path), "--timeframes", "5m", "--confirm"])
+
+    assert rc == 0
+    assert (junk / "bars.parquet").exists()
+
+
+def test_delete_failure_returns_1(tmp_path, monkeypatch):
+    """An unlink that fails is reported, not swallowed into a clean exit."""
+    _seed_derived(tmp_path, ("5m",))
+
+    def boom(self, *args, **kwargs):
+        raise OSError("simulated")
+
+    monkeypatch.setattr(Path, "unlink", boom)
+    rc = ccm.main(["--data-root", str(tmp_path), "--timeframes", "5m", "--confirm"])
     assert rc == 1
-    assert failed_on, "fake_rmtree was never called on 5m"
-    # 15m should have been removed cleanly.
-    assert not (tmp_path / "bars" / "timeframe=15m").exists()
-
-
-def test_protected_set_is_literally_1m_only():
-    # Guardrail: if someone adds more protected timeframes, this reminder fires.
-    assert frozenset({"1m"}) == ccm.PROTECTED_TIMEFRAMES
-    assert "1m" not in ccm.TIER3_TIMEFRAMES

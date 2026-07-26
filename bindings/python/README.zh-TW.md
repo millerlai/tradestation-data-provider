@@ -73,23 +73,29 @@ uv add tradestation-data-provider
 poetry add tradestation-data-provider
 ```
 
-直接從 GitHub 安裝（不必等 PyPI）：
+直接從 GitHub 安裝（不必等 PyPI）。Python 套件**不在 repo 根目錄** ——
+根目錄放的是 wire contract、EL indicator 與 C++ bridge —— 所以
+`subdirectory` fragment 是必要的：
 
 ```bash
-pip install "git+https://github.com/millerlai/tradestation-data-provider.git"
-uv add "git+https://github.com/millerlai/tradestation-data-provider.git"
-poetry add "git+https://github.com/millerlai/tradestation-data-provider.git"
+pip install "git+https://github.com/millerlai/tradestation-data-provider.git#subdirectory=bindings/python"
+uv add "git+https://github.com/millerlai/tradestation-data-provider.git#subdirectory=bindings/python"
+poetry add "git+https://github.com/millerlai/tradestation-data-provider.git#subdirectory=bindings/python"
 
 # 釘特定 tag、branch 或 commit
-pip install "git+https://github.com/millerlai/tradestation-data-provider.git@v0.1.0"
+pip install "git+https://github.com/millerlai/tradestation-data-provider.git@v0.2.0#subdirectory=bindings/python"
 ```
+
+> 少了 fragment，pip 會以 *"neither 'setup.py' nor 'pyproject.toml' found"* 失敗。
+> 不加 fragment 的 `...git@v0.1.0` 確實裝得起來 —— 但那只是因為該 tag 早於這次搬移，
+> 等於靜默安裝一個沒有 wire v2/v3 支援的舊套件。
 
 ### 在本專案內開發
 
 ```powershell
 uv sync                       # base deps
 uv sync --extra dev           # + pytest / ruff / mypy
-uv run pytest                 # 272 tests、約 2 秒
+uv run pytest                 # 完整測試套件，數秒
 ```
 
 ## 快速上手
@@ -126,6 +132,48 @@ asyncio.run(main())
 tradestation-data-ingest --sinks-config config/sinks.yaml
 ```
 
+## 範例
+
+[`examples/`](examples/) 有四支可直接執行的腳本，後一支建立在前一支之上。
+四支加起來涵蓋整個套件的用法：收事件、照自己的方式處理、再讀回來。
+
+| | 範例 | 需要 publisher？ | 展示什麼 |
+| --- | --- | --- | --- |
+| 01 | [`01_print_events.py`](examples/01_print_events.py) | 需要 | 整個接收迴圈，約 20 行 |
+| 02 | [`02_custom_sink.py`](examples/02_custom_sink.py) | 需要 | 自己寫一個 sink；完整 runtime |
+| 03 | [`03_read_history.py`](examples/03_read_history.py) | **不用** | 儲存分層；一份 tick，多種 timeframe |
+| 04 | [`04_replay_fixtures.py`](examples/04_replay_fixtures.py) | **不用** | 用錄下來的 frame 餵真正的 binding |
+
+從 `bindings/python/` 執行：
+
+```powershell
+uv sync --extra dev
+
+# 離線 —— 不需要 TradeStation、不需要 DLL，不用任何前置設定。
+uv run python examples/03_read_history.py
+uv run python examples/04_replay_fixtures.py --fixture bars
+```
+
+**範例 01 與 02 需要另一端有東西在發佈。** 那不一定要是 TradeStation ——
+C++ harness 可以直接驅動 DLL：
+
+```powershell
+# 終端機 A —— 在 repo root 執行。--warmup-ms 是留給你接上的時間：
+# PUB socket 在沒有 subscriber 時送出的東西會被靜默丟棄。
+cpp\build\x86-release\Release\TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
+
+# 終端機 B —— 在 bindings\python 執行
+uv run python examples\01_print_events.py --count 6
+```
+
+**要測自己寫的 sink，複製範例 04。** 它把
+[`contract/fixtures/`](../../contract/fixtures/) 裡錄下來的 DLL 輸出，透過真正的
+in-process ZeroMQ socket 重播，讓你的 sink 走的是與正式環境完全相同的解碼路徑，
+收到逐位元組一致的市場資料 —— 不需要 TradeStation、不必等開盤、不用等 bar 收盤。
+
+完整索引、harness 各 mode、以及「frame 有進來但什麼都沒印」時該查什麼，
+見 [`examples/README.md`](examples/README.md)。
+
 ## 可插拔 Sink 架構
 
 每筆 tick 與每個 closed bar 都會 broadcast 給 `config/sinks.yaml` 中宣告的每個 sink。任何 sink 拋 exception 都會被 log、隔離 — 不會影響其他 sink。新增一個輸出目的地只需要寫一個 class。
@@ -147,7 +195,6 @@ sinks:
     class: tradestation_data.sinks.parquet:ParquetBarSink
     params:
       root: data/bars
-      timeframe: 1m
       compression: zstd
 
   - name: dispatch

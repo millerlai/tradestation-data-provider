@@ -10,7 +10,8 @@
                            BarInterval, which the DLL maps to a wire timeframe
 
          Supported intervals: 1 / 5 / 15 / 30 / 60 minute, and daily.
-         Anything else is refused by the DLL with rc = -5 and logged once.
+         Anything else is refused by the DLL with rc = -5 and logged once, and
+         sub-minute charts are refused by this script (see below).
 
          Bars go out as full OHLC so the subscriber can rebuild them losslessly
          instead of collapsing to a single close price.
@@ -22,12 +23,20 @@
   vocabulary. Guessing here would file 5-minute bars under the 1-minute
   partition, which nothing downstream can detect.
 
-  KNOWN GAP — VERIFY BEFORE RELYING ON THIS: a second-based chart may also
-  report BarType = 1 with BarInterval = 1, in which case 1-second bars would be
-  published as 1-minute bars. TradeStation exposes BarType_ext to separate
-  second-based from minute-based intraday, but the exact values differ across
-  TS versions and have not been checked against a live install here. Use minute
-  or daily charts only until that is confirmed.
+  SUB-MINUTE CHARTS ARE DETECTED AND REFUSED: a second-based chart also reports
+  BarType = 1, and can report BarInterval = 1 exactly like a 1-minute chart, so
+  the two numbers cannot tell them apart. Published as 1m, those bars would fill
+  the 1-minute partition with sub-minute data wearing minute-shaped timestamps —
+  and nothing downstream could notice, because TsStr is built from Time, which
+  has minute resolution, so the seconds are gone before the bar leaves this
+  script.
+
+  What survives is the repetition: on a minute chart Date and Time advance every
+  bar; on a sub-minute chart consecutive bars share both. This script latches on
+  that and stops publishing. The test needs no version-specific constant, unlike
+  BarType_ext — whose values differ across TS releases and have never been
+  checked against a live install here. To pin those down, Print(BarType_ext) on
+  a known 1-minute chart and on a known 1-second one.
 
   Zero state. All symbol/value plumbing comes from TS built-ins at runtime,
   so one compiled indicator covers every chart.
@@ -45,6 +54,7 @@ Variables:
     PubRC(0),
     InitDone(False),
     UnsupportedLogged(False),
+    SubMinuteChart(False),
     Sym(""),
     TsStr("");
 
@@ -81,9 +91,33 @@ If Enabled and InitDone = False Then Begin
     End;
 End;
 
+{ -- Sub-minute chart guard. Runs before the publish block, so the bar that
+     reveals the chart is itself never sent.
+
+     BarType and BarInterval cannot separate a 1-second chart from a 1-minute
+     one — both can read 1 and 1. The bar times can: Date and Time advance on
+     every bar of a minute chart, and repeat within a minute on a sub-minute
+     one. Tick charts (BarType = 0) legitimately produce many prints per minute
+     and are excluded.
+
+     Latching is deliberate. Once a chart has shown itself to be sub-minute it
+     does not become minute-based later, and a chart that goes quiet must not
+     silently resume publishing. }
+If Enabled and InitDone and SubMinuteChart = False
+   and BarType = 1 and CurrentBar > 1
+   and Date = Date[1] and Time = Time[1] Then Begin
+    SubMinuteChart = True;
+    If LogErrors Then
+        Print("[TS2Python] sub-minute chart detected on symbol=", GetSymbolName,
+              " — two consecutive bars share date=", Date, " time=", Time, ".",
+              " Publishing stopped: these bars carry minute-resolution",
+              " timestamps and would be filed as 1-minute data with nothing",
+              " downstream able to tell. Use minute or daily charts.");
+End;
+
 { -- Per-bar publish. Dispatch on BarType *and* BarInterval: BarType alone
      cannot tell a 1-minute chart from a 5-minute one. }
-If Enabled and InitDone Then Begin
+If Enabled and InitDone and SubMinuteChart = False Then Begin
     Sym = GetSymbolName;
     { Bar-time string "yyyy-MM/dd-HH:mm:ss" 24-hour (e.g. "2026-04/18-13:30:45").
       DLL parses this as the EL-side event time (ts_utc on the wire). The
@@ -146,7 +180,13 @@ If Enabled and InitDone Then Begin
         End;
     End;
 
-    If PubRC < 0 and LogErrors Then
+    { -5 is excluded: the block above already printed it once, with the
+      actionable message. Repeating this generic line would put a second entry
+      in the Print Log for every bar — for every tick in "update every tick"
+      mode — on a chart the DLL has already refused, drowning the errors an
+      operator actually needs to see. That also restores what the header
+      promises: unsupported intervals are "logged once". }
+    If PubRC < 0 and PubRC <> -5 and LogErrors Then
         Print("[TS2Python] publish rc=", PubRC,
               " symbol=", Sym,
               " bar_type=", BarType,

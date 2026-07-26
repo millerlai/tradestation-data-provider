@@ -36,81 +36,55 @@ Every publish call sends a two-frame ZMQ message:
 - **Compiler**: Visual Studio 2022 / 2026 (Community edition or later) with the "Desktop development with C++" workload.
 - **Dependencies**: `libzmq` + `cppzmq` — declared in `cpp/vcpkg.json`, fetched in vcpkg manifest mode.
 
-## One-time setup — install vcpkg
+## One-time setup
 
-vcpkg is Microsoft's C/C++ package manager. This project uses **manifest mode** (`vcpkg.json`): at build time MSBuild calls vcpkg, which downloads and compiles `zeromq` + `cppzmq` into `cpp/vcpkg_installed/`. **If vcpkg is not bootstrapped you will see `LNK1104: cannot open file 'libzmq.lib'`.**
-
-vcpkg is pinned as a **git submodule** under `cpp/build-tools/vcpkg/` so every clone gets the same vcpkg revision and the same port versions — reproducible without picking a global install location.
-
-### Step 1. Clone (with submodules)
-
-First clone of the repo:
+Two scripts. Run them from `cpp\`:
 
 ```powershell
-git clone --recurse-submodules https://github.com/millerlai/tradestation-data-provider.git
+cd cpp
+.\setup-build-env.bat        # check out vcpkg, bootstrap it, install deps
+.\verify-build-env.bat       # confirm every prerequisite; exit 0 = ready
 ```
 
-Already cloned without submodules:
+`setup-build-env.bat` is idempotent — re-run it after changing `vcpkg.json`, or any time you are not sure. `verify-build-env.bat` changes nothing and prints, for each prerequisite, either `[ OK ]` or the exact command that fixes it.
+
+Then build:
 
 ```powershell
-cd <your-repo-root>          # e.g. D:\project\tradestation-data-provider
-git submodule update --init --recursive
+.\build.bat                  # Release, x86 and x64
+.\build.bat Debug            # Debug, x86 and x64
+.\build.bat all              # all four configurations
+.\build.bat --x86            # x86 only — what TradeStation loads
+.\build.bat --rebuild        # full rebuild rather than incremental
 ```
 
-> All commands below assume the repo root as `<your-repo-root>`. Substitute your actual path.
-
-After this, `ls cpp\build-tools\vcpkg` should show `bootstrap-vcpkg.bat`, `ports\`, `scripts\`, etc.
-
-### Step 2. Bootstrap (produce `vcpkg.exe` inside the submodule)
-
-Run from a **regular user-level PowerShell** (no admin needed):
+`build.bat` finds MSBuild itself, so no Developer Command Prompt is needed. Or drive the solution directly:
 
 ```powershell
-cd <your-repo-root>\cpp\build-tools\vcpkg
-.\bootstrap-vcpkg.bat
+# Visual Studio: open cpp\TS2Python.sln, select Release | x86, Build
+msbuild TS2Python.sln /p:Configuration=Release /p:Platform=x86
+
+# CMake (x86 only — CMakeLists.txt refuses anything else):
+cmake --preset x86-release
+cmake --build --preset x86-release
 ```
 
-When it finishes, `ls vcpkg.exe` should exist (≈10 MB). This executable is **not committed** to git (it's `.gitignore`'d); each checkout bootstraps it once.
+> **`vcpkg integrate install` is deliberately not part of this.** See [Why no `vcpkg integrate install`](#why-no-vcpkg-integrate-install) — running it is not merely unnecessary here, it is the thing that used to break the build.
 
-### Step 3. Set `VCPKG_ROOT` to the submodule
+### What setup-build-env.bat does
 
-```powershell
-setx VCPKG_ROOT <your-repo-root>\cpp\build-tools\vcpkg
-```
+| Step | Action | Fails when |
+| --- | --- | --- |
+| 1 | Locate Visual Studio with the C++ toolset (via `vswhere`) | The "Desktop development with C++" workload is not installed |
+| 2 | `git submodule update --init --recursive` if `cpp/build-tools/vcpkg/` is empty | The repo was downloaded as a `.zip` (no submodules) rather than cloned |
+| 3 | `bootstrap-vcpkg.bat` if `vcpkg.exe` is missing | Network or antivirus blocks the download |
+| 4 | `vcpkg install --triplet x86-windows` into `cpp/vcpkg_installed/` | A port fails to build; vcpkg prints the log path |
 
-> `setx` persists a **user-level** environment variable but **does not affect the current PowerShell window**. Close PowerShell and open a fresh window, then `echo $env:VCPKG_ROOT` to confirm the value points at the submodule.
+Pass `--with-x64` to also install the x64 triplet, which only the developer-only x64 configurations need. TradeStation loads the 32-bit DLL, so x86 is what matters.
 
-### Step 4. Integrate vcpkg with Visual Studio
-
-In the **new** PowerShell window (with `VCPKG_ROOT` set):
-
-```powershell
-& "$env:VCPKG_ROOT\vcpkg.exe" integrate install
-```
-
-This is **machine-wide and one-shot**. It writes a `.targets` file to `%LOCALAPPDATA%\vcpkg\` pointing at the `vcpkg.exe` inside this submodule, so MSBuild auto-injects vcpkg's include / lib paths whenever a `.vcxproj` builds.
-
-- No administrator privileges needed (writes to `%LOCALAPPDATA%`, user-level).
-- Success message: `Applied user-wide integration for this vcpkg root.`
-- Any `.vcxproj` with `VcpkgEnabled=true` and a `vcpkg.json` will now trigger manifest install automatically.
-
-> Only one `integrate install` is active per machine at a time. If you have another project with its own vcpkg submodule, switching projects means re-running Steps 3 + 4 against that submodule.
->
-> Undo with `& "$env:VCPKG_ROOT\vcpkg.exe" integrate remove`.
-
-### Step 5. Verify the install
-
-```powershell
-cd <your-repo-root>\cpp
-& "$env:VCPKG_ROOT\vcpkg.exe" install --triplet x86-windows
-ls vcpkg_installed\x86-windows\lib\
-```
-
-You should see versioned lib names (e.g. `libzmq-mt-4_3_5.lib`). The vcxproj relies on `VcpkgAutoLink=true` plus the `#pragma comment(lib, ...)` inside `zmq.h` to link automatically — no manual `<AdditionalDependencies>` entry is needed.
+vcpkg is pinned as a **git submodule** at `cpp/build-tools/vcpkg/`, so every clone resolves the same vcpkg revision and the same port versions.
 
 ### Upgrading / pinning vcpkg
-
-vcpkg is a submodule; upgrade it the way you upgrade any submodule:
 
 ```powershell
 cd cpp\build-tools\vcpkg
@@ -119,16 +93,81 @@ git checkout <new-commit-or-tag>      # e.g. tag 2026.04.15
 cd ..\..\..
 git add cpp/build-tools/vcpkg         # update the superproject pointer
 git commit -m "bump vcpkg to 2026.04.15"
-# Re-bootstrap because vcpkg.exe may have changed
-cd cpp\build-tools\vcpkg && .\bootstrap-vcpkg.bat
+cd cpp && .\setup-build-env.bat       # re-bootstrap and re-install
 ```
 
-### Common setup errors
+## Troubleshooting
 
-- **`cpp/build-tools/vcpkg/` is empty** → forgot `git submodule update --init --recursive`.
-- **`'vcpkg.exe' is not recognized`** → Step 2 not done, or bootstrap failed (network / antivirus). Re-run `bootstrap-vcpkg.bat` and read the error.
-- **`LNK1104: 'libzmq.lib'`** → usually (a) Step 4 `integrate install` was skipped; (b) `VCPKG_ROOT` was not set when Visual Studio launched (close *all* VS windows and reopen); or (c) someone hand-wrote `libzmq.lib` into `<AdditionalDependencies>` but vcpkg actually ships the versioned filename — remove the manual entry and let auto-link handle it.
-- **First build is slow** → expected. vcpkg is downloading and compiling `zeromq` source for the x86-windows triplet (~3–5 min). Subsequent builds hit the binary cache and finish in seconds.
+Run `verify-build-env.bat` first — it diagnoses everything below and names the fix. What follows is why each one happens.
+
+### `error C1083: Cannot open include file: 'zmq.hpp'`
+
+The compiler was never told where vcpkg's headers are. Either the dependencies are not installed, or vcpkg's MSBuild integration is not being applied.
+
+```powershell
+cd cpp
+.\setup-build-env.bat
+```
+
+If it persists, check that `cpp\vcpkg_installed\x86-windows\x86-windows\include\zmq.hpp` exists.
+
+**The triplet appears twice on purpose.** The outer directory is a *per-triplet install root*; the inner one is the ordinary triplet folder inside it. It looks like a mistake and is not. Collapsing the two into a single shared `vcpkg_installed\` makes the x86 and x64 builds delete each other's packages: manifest mode treats an install root as a managed tree and reconciles it against the current plan, so building x64 removes the x86 packages and the *next* x86 build fails with C1083 on a machine where it had just succeeded. Keep the roots separate.
+
+If the header is missing, delete `cpp\vcpkg_installed\` and re-run `setup-build-env.bat`.
+
+<a id="why-no-vcpkg-integrate-install"></a>
+#### Why no `vcpkg integrate install`
+
+The usual advice is to run it once per machine. It writes `%LOCALAPPDATA%\vcpkg\vcpkg.user.props` containing an **absolute path** to one vcpkg checkout — whichever one you happened to run it from. Every C++ project you build on that machine then uses that one.
+
+Two ways it produces exactly this error:
+
+1. **Never run.** Nothing imports vcpkg, no include directory is added, `zmq.hpp` is not found.
+2. **Run from a different project, which then moved or was deleted.** The generated file guards its import with `Exists(...)`, so a stale path silently evaluates to false and nothing is imported — while `%LOCALAPPDATA%\vcpkg\vcpkg.user.props` still sits there looking correctly configured. This is not hypothetical; it is what happened in this repo, pointing at a `TradeStation-TradingAgent` checkout that no longer existed.
+
+So the projects here import vcpkg **from the submodule instead**, via `cpp/vcpkg-local.props` and `cpp/vcpkg-local.targets`, and set vcpkg's own `VCPkgLocalAppDataDisabled` so the machine-global file is ignored even when present. A clone plus `setup-build-env.bat` is sufficient, and a stale global integration cannot affect this build.
+
+`verify-build-env.bat` check `[6]` reports a stale global integration anyway — harmless here, but it will break every *other* vcpkg project on the machine until you re-run `vcpkg integrate install` from a checkout that exists, or `vcpkg integrate remove`.
+
+### `LNK1104: cannot open file 'libzmq.lib'`
+
+Same root cause as C1083, one stage later: headers resolved but the library directory did not. Run `setup-build-env.bat`.
+
+If someone has hand-written `libzmq.lib` into `<AdditionalDependencies>`, remove it — vcpkg ships a *versioned* filename (`libzmq-mt-4_3_5.lib`) and the project links via `VcpkgAutoLink` plus the `#pragma comment(lib, ...)` inside `zmq.h`.
+
+### `MSB4126: invalid solution configuration "Release|Win32"`
+
+The solution's platform is named **`x86`**; `Win32` is the *project*-level name it maps to. Visual Studio's dropdown shows `x86`. From the command line:
+
+```powershell
+msbuild TS2Python.sln /p:Configuration=Release /p:Platform=x86
+```
+
+### `The build tools for v145 cannot be found`
+
+`v145` ships with Visual Studio 2026. On VS 2022, build with its toolset instead:
+
+```powershell
+msbuild TS2Python.sln /p:TS2PythonToolset=v143 /p:Configuration=Release /p:Platform=x86
+```
+
+`verify-build-env.bat` check `[2]` lists the toolsets actually installed.
+
+### `cpp/build-tools/vcpkg/` is empty
+
+The repo was downloaded as a `.zip`, which does not carry submodules. Clone it instead:
+
+```powershell
+git clone --recurse-submodules https://github.com/millerlai/tradestation-data-provider.git
+```
+
+### First build takes minutes
+
+Expected — vcpkg is compiling `zeromq` from source for the x86-windows triplet. Later builds hit the binary cache and finish in seconds.
+
+### `warning MSB4011: GetGlobalProperties.task ... already imported`
+
+Harmless, and upstream: vcpkg's own `vcpkg.targets` and `Bootstrap.targets` both import that task file. MSBuild skips the duplicate and the build succeeds.
 
 ## Build — option A: Visual Studio solution (recommended for daily work)
 
@@ -142,7 +181,7 @@ Open `cpp/TS2Python.sln`, select **`Release | x86`** (the deploy configuration) 
   - Win32 Debug: `cpp/Debug/`
   - Win32 Release: `cpp/Release/`
   - x64 variants: `cpp/x64/<Debug|Release>/`
-- vcpkg copies `libzmq.dll` to the output folder (applocal deployment) so the harness runs without further setup.
+- vcpkg copies the ZeroMQ runtime DLL to the output folder (applocal deployment) so the harness runs without further setup. Note the filename is **versioned** — currently `libzmq-mt-4_3_5.dll`, not `libzmq.dll` — and changes when the pinned vcpkg revision moves.
 
 ## Build — option B: CMake + command line
 
@@ -153,7 +192,7 @@ cmake --build --preset x86-release
 cmake --install build/x86-release --prefix build/x86-release/stage
 ```
 
-Output lands in `cpp/build/x86-release/stage/bin/`: `TS2Python.dll`, `TS2Python_TestHarness.exe`, `libzmq.dll`.
+Output lands in `cpp/build/x86-release/stage/bin/`: `TS2Python.dll`, `TS2Python_TestHarness.exe`, and the versioned ZeroMQ runtime (`libzmq-mt-4_3_5.dll` at the current pin).
 
 > Both build paths can coexist, but don't mix them: the VS solution writes to `cpp/Debug` / `cpp/Release`; CMake writes to `cpp/build/`. When you switch toolchains, delete the other side's output folder first to avoid a stale DLL being picked up by the linker.
 
@@ -162,12 +201,17 @@ Output lands in `cpp/build/x86-release/stage/bin/`: `TS2Python.dll`, `TS2Python_
 1. Build **Release | x86** (TradeStation is strictly 32-bit; x64 will not load).
 2. Copy both DLLs into `C:\Program Files (x86)\TradeStation <version>\Program\`:
    - `TS2Python.dll`
-   - `libzmq.dll` (from `cpp/vcpkg_installed/x86-windows/bin/` or the CMake `stage/bin/`).
+   - the ZeroMQ runtime beside it — **`libzmq-mt-4_3_5.dll`**, not `libzmq.dll`. vcpkg emits a versioned filename, so copy whatever `.dll` sits next to `TS2Python.dll` in `cpp\Release\` rather than typing the name from memory; it changes when the pinned vcpkg revision moves.
+
+   ```powershell
+   # From cpp\, after a Release|x86 build:
+   Copy-Item Release\*.dll "C:\Program Files (x86)\TradeStation <version>\Program\"
+   ```
 3. In the EasyLanguage editor, Verify the indicator that imports the DLL.
 
 ## C ABI
 
-DLL version `EL_DllVersion() == 6`. See [`../contract/error_codes.md`](../contract/error_codes.md) for return codes and [`../contract/compat.md`](../contract/compat.md) for the ABI × wire version matrix.
+DLL version `EL_DllVersion() == 8`. See [`../contract/error_codes.md`](../contract/error_codes.md) for return codes and [`../contract/compat.md`](../contract/compat.md) for the ABI × wire version matrix.
 
 ```c
 int __stdcall EL_DllVersion(void);
@@ -201,7 +245,7 @@ Run the harness against the Python smoke subscriber to verify end-to-end without
 
 ```powershell
 # Terminal A — start the subscriber first
-python scripts/simple_sub.py --latency
+python contract/tools/record.py --latency
 
 # Terminal B — fire the harness
 cpp\Release\TS2Python_TestHarness.exe --mode stress --rate 10000 --seconds 10

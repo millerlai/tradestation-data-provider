@@ -12,6 +12,11 @@ import zmq.asyncio
 
 from tradestation_data.domain.bar import Bar
 from tradestation_data.domain.tick import Tick
+from tradestation_data.domain.timeframe import (
+    SUPPORTED_TIMEFRAMES,
+    Timeframe,
+    align_bucket_start,
+)
 from tradestation_data.wire.base import MarketEvent
 
 log = logging.getLogger(__name__)
@@ -38,11 +43,11 @@ DEFAULT_INDEX_SYMBOLS: frozenset[str] = frozenset(
 # unknown high version may have changed field semantics we would silently
 # misread. See ../../../../contract/compat.md.
 
-# Timeframes this binding will accept on the wire. Deliberately the same
-# vocabulary the storage layer partitions on: a `tf` we cannot place is a
-# frame we must not file, because filing it under a default would put bars of
-# one interval into another interval's partition.
-SUPPORTED_TIMEFRAMES: frozenset[str] = frozenset({"1m", "5m", "15m", "30m", "1h", "1d"})
+# Timeframes this binding will accept on the wire live in
+# domain.timeframe.SUPPORTED_TIMEFRAMES — deliberately the same vocabulary the
+# storage layer partitions on. A `tf` we cannot place is a frame we must not
+# file, because filing it under a default would put bars of one interval into
+# another interval's partition.
 SUPPORTED_WIRE_VERSIONS: frozenset[int] = frozenset({1, 2, 3})
 
 
@@ -56,26 +61,35 @@ class _SequenceTracker:
 
     Sequences are per symbol because a subscriber may filter on one topic —
     a global counter's gaps would be indistinguishable from traffic it never
-    asked for. ``tick`` and ``bar_1m`` share a symbol's counter since they
+    asked for. ``tick`` and ``bar`` share a symbol's counter since they
     interleave on the same topic.
+
+    ``sid`` stays None until a sequenced frame arrives, which is what lets
+    the provider tell "nothing was lost" from "loss cannot be detected here".
     """
 
     def __init__(self) -> None:
-        self._sid: int | None = None
+        self.sid: int | None = None
         self._expected: dict[str, int] = {}
         self.messages_lost = 0
 
-    def observe(self, symbol: str, seq: int, sid: int) -> int:
-        """Record one message; return how many were lost immediately before it."""
-        if sid != self._sid:
+    def observe(self, symbol: str, seq: int, sid: int) -> None:
+        """Record one message, accumulating any gap into ``messages_lost``.
+
+        Deliberately returns nothing: every gap is logged and counted here,
+        and ``messages_lost`` is the accumulator callers read. A per-call
+        return value would look like a hook something downstream acts on,
+        and nothing does.
+        """
+        if sid != self.sid:
             # New publisher session: counters restarted at the source, so a
             # low seq here is a restart rather than 4 billion lost messages.
-            if self._sid is not None:
+            if self.sid is not None:
                 log.info(
                     "publisher_session_changed",
-                    extra={"old_sid": self._sid, "new_sid": sid, "symbol": symbol},
+                    extra={"old_sid": self.sid, "new_sid": sid, "symbol": symbol},
                 )
-            self._sid = sid
+            self.sid = sid
             self._expected = {}
 
         expected = self._expected.get(symbol)
@@ -86,10 +100,10 @@ class _SequenceTracker:
             # at seq=21 did not lose 20 messages — it was not listening for
             # them. Establish the baseline silently.
             log.debug("sequence_baseline", extra={"symbol": symbol, "seq": seq})
-            return 0
+            return
 
         if seq == expected:
-            return 0
+            return
 
         if seq < expected:
             # TCP preserves per-publisher order, so this is a duplicate or a
@@ -99,7 +113,7 @@ class _SequenceTracker:
                 extra={"symbol": symbol, "seq": seq, "expected": expected},
             )
             self._expected[symbol] = expected
-            return 0
+            return
 
         lost = seq - expected
         self.messages_lost += lost
@@ -113,29 +127,25 @@ class _SequenceTracker:
                 "lost_total": self.messages_lost,
             },
         )
-        return lost
 
 
 class TradeStationELProvider:
     """
     Subscribes to events published by the TS2Python C++ DLL over ZeroMQ.
 
-    Wire format (see docs/design.md §5):
+    Wire format (see ../../../../docs/architecture.md §5):
       Frame 1: topic = symbol (UTF-8 bytes, e.g. b"SPY", b"VXX")
       Frame 2: JSON payload. Two shapes, discriminated by ``kind``:
 
-        Tick (EL_PublishTick, default kind):
+        Tick (EL_PublishTick):
           {
-            "v":      1,
-            "kind":   "tick",     # optional — omitted in pre-v3 DLL builds
+            "v":      3,          # wire version
+            "seq":    <int>,      # monotonic sequence per symbol
+            "sid":    <int>,      # publisher session id
+            "kind":   "tick",
             "ts":     <float>,    # DLL receive time, unix epoch UTC
-            "ts_utc": <float>,    # ET→UTC conversion done in the DLL via
-                                  # std::chrono::zoned_time. 0.0 on parse fail.
-                                  # v5+ DLL only; earlier builds shipped
-                                  # ``ts_el`` here (host-local mktime, wrong
-                                  # on non-ET hosts) and are no longer trusted.
-            "ts_str": "<str>",    # Raw EL timestamp "yyyy-MM/dd-HH:mm:ss" 24h
-                                  # in America/New_York wall-clock.
+            "ts_utc": <float>,    # ET→UTC conversion done in the DLL
+            "ts_str": "<str>",    # Raw EL timestamp "yyyy-MM/dd-HH:mm:ss"
             "px":     <float>,    # last trade price
             "vol":    <int>,
             "bid":    <float>,    # null/ignored for index symbols
@@ -143,10 +153,13 @@ class TradeStationELProvider:
             "tc":     <int>
           }
 
-        Bar (EL_PublishTickEx, 1-min OHLC):
+        Bar (EL_PublishBar, non-tick OHLC):
           {
-            "v":      1,
-            "kind":   "bar_1m",
+            "v":      3,
+            "seq":    <int>,
+            "sid":    <int>,
+            "kind":   "bar",
+            "tf":     "<str>",    # timeframe, e.g. "1m", "5m", "1d"
             "ts":     <float>,
             "ts_utc": <float>,
             "ts_str": "<str>",
@@ -187,12 +200,27 @@ class TradeStationELProvider:
         self._warned_no_gap_detection = False
 
     @property
-    def messages_lost(self) -> int:
+    def gap_detection_available(self) -> bool:
+        """True once a frame carrying ``seq``/``sid`` (wire v2+) has arrived.
+
+        False means loss cannot be detected on this link at all — either the
+        publisher is a v1 DLL, or nothing has been received yet.
+        """
+        return self._seq.sid is not None
+
+    @property
+    def messages_lost(self) -> int | None:
         """Messages the publisher sent but this subscriber never received.
 
-        Always 0 against a wire v1 publisher, which carries no sequence —
-        that means "cannot tell", not "none lost".
+        ``None`` means *cannot tell*, and is not the same answer as ``0``.
+        semantics.md §6.6 requires a caller to be able to separate the two:
+        against a still-deployed v1 DLL there is no ``seq`` on the wire, so a
+        plain 0 would let a whole trading day be filed as "verified complete"
+        when gap detection was never running. Pair with
+        ``gap_detection_available`` when the distinction needs a name.
         """
+        if not self.gap_detection_available:
+            return None
         return self._seq.messages_lost
 
     async def connect(self) -> None:
@@ -242,6 +270,14 @@ class TradeStationELProvider:
                 continue
 
             symbol = topic_bytes.decode("utf-8", errors="replace")
+            # semantics.md §5: ZMQ SUBSCRIBE is a prefix match, so a
+            # subscription to "SPY" also delivers every SPYG frame from the
+            # same publisher. Without an exact-equality pass the binding would
+            # decode those, hand them to the runtime, and start writing
+            # data/ticks/symbol=SPYG/ for a symbol nobody asked for.
+            if symbol not in self._subscribed:
+                log.debug("topic_prefix_mismatch_dropped", extra={"topic": symbol})
+                continue
             try:
                 event = self._parse_payload(symbol, payload_bytes)
             except (ValueError, KeyError, json.JSONDecodeError) as exc:
@@ -263,9 +299,13 @@ class TradeStationELProvider:
     def _parse_payload(self, symbol: str, payload: bytes) -> MarketEvent:
         data = json.loads(payload)
         version = data.get("v", 1)
-        if version not in SUPPORTED_WIRE_VERSIONS:
-            raise ValueError(f"Unsupported payload version: {version}")
 
+        # Sequence accounting happens before the version gate on purpose. A
+        # frame we refuse still occupied a slot in the publisher's per-symbol
+        # counter; skipping observe() would leave `_expected` parked at the
+        # last accepted seq, and the next accepted frame would then report a
+        # fabricated gap. An operator upgrading the DLL past this binding
+        # would watch a link that lost nothing report steady message loss.
         seq = data.get("seq")
         if seq is not None:
             self._seq.observe(symbol, int(seq), int(data.get("sid", 0)))
@@ -279,15 +319,29 @@ class TradeStationELProvider:
                 extra={"wire_version": version, "reason": "payload carries no seq"},
             )
 
+        if version not in SUPPORTED_WIRE_VERSIONS:
+            raise ValueError(f"Unsupported payload version: {version}")
+
         kind = data.get("kind", "tick")
         if kind == "tick":
             return self._parse_tick(symbol, data)
         if kind in ("bar", "bar_1m"):
-            # v1/v2 said bar_1m and had no other option; v3 says bar and names
-            # the interval. Absent tf on a v3 frame is a publisher bug, but
-            # defaulting to 1m is the one guess that cannot invent data the
-            # older wire could not express.
-            tf = str(data.get("tf", "1m"))
+            if version < 3:
+                # v1/v2 said bar_1m and had no other option, so 1m is the one
+                # reading that cannot invent data the older wire could not
+                # express.
+                tf = str(Timeframe.M1)
+            else:
+                # v3 lists `tf` as required, and compat.md is explicit: an
+                # unknown interval must be refused, never defaulted. A bar
+                # filed under the wrong timeframe= partition is indetectable
+                # downstream — it looks exactly like real data at that
+                # interval.
+                tf_val = data.get("tf")
+                if not tf_val:
+                    raise ValueError(f"v3 bar payload carries no 'tf': {payload!r}")
+                tf = str(tf_val)
+
             if tf not in SUPPORTED_TIMEFRAMES:
                 raise ValueError(f"Unsupported timeframe: {tf!r}")
             return self._parse_bar(symbol, data, tf)
@@ -357,6 +411,14 @@ class TradeStationELProvider:
 
         if bucket_start is None:
             bucket_start = _floor_to_minute_utc(float(data["ts"]))
+
+        # §2.2 — the grid is the contract's, not the publisher's. EL stamps a
+        # bar with its chart's own Date/Time, which for a daily bar is nowhere
+        # near the 04:00 ET session anchor a derived 1d bar uses. Left alone,
+        # the same trading day would end up as two rows in
+        # bars/timeframe=1d/ with different bucket_starts, and every join
+        # downstream would double-count it.
+        bucket_start = align_bucket_start(bucket_start, timeframe)
 
         return Bar(
             symbol=symbol,

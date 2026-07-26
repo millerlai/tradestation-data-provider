@@ -1,12 +1,35 @@
-# Repo-root guard only. The real Python project config lives in
-# bindings/python/pyproject.toml and wins for anything under that tree.
+# Config for the Python that lives *outside* bindings/python — in practice
+# `contract/tools/`. The binding's own config (bindings/python/pyproject.toml)
+# still wins for anything under that tree.
 #
-# This file exists because `ruff check .` from the repo root would otherwise
-# find no configuration, fall back to defaults, and walk into the vendored
-# vcpkg checkout — which it has already done once, rewriting third-party
-# sources (import sorting, F401, UP015) that must stay byte-identical to
-# upstream.
+# This file also exists because `ruff check .` from the repo root would
+# otherwise find no configuration, fall back to defaults, and walk into the
+# vendored vcpkg checkout — which it has already done once, rewriting
+# third-party sources (import sorting, F401, UP015) that must stay
+# byte-identical to upstream.
+#
+# The rule set below mirrors bindings/python/pyproject.toml on purpose.
+# `contract/tools/record.py` is the neutral fixture recorder every binding is
+# checked against; it earns that role by depending on no binding, not by
+# being held to a lower standard than one.
 extend-exclude = [
     "cpp",
     "contract/fixtures",
+]
+
+line-length = 100
+target-version = "py311"
+
+[lint]
+select = [
+    "E", "F", "W",       # pycodestyle + pyflakes
+    "I",                 # isort
+    "N",                 # pep8-naming
+    "UP",                # pyupgrade
+    "B",                 # bugbear
+    "SIM",               # simplify
+    "RUF",               # ruff-specific
+]
+ignore = [
+    "E501",              # line length (handled by formatter)
 ]

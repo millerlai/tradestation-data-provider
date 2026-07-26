@@ -130,8 +130,15 @@ def test_compare_float_noise_within_tolerance_is_clean():
 class _StubStore:
     def __init__(self, per_day: dict[str, pl.DataFrame]):
         self._per_day = per_day
+        self.load_bars_calls = 0
 
-    def load_bars(self, symbol: str, start, end, tf: str) -> pl.DataFrame:
+    def load_cached_bars(self, symbol: str, start, end, tf: str) -> pl.DataFrame | None:
+        return self._per_day.get(start.date().isoformat())
+
+    def load_bars(self, symbol: str, start, end, tf: str) -> pl.DataFrame:  # pragma: no cover
+        # The audit must never take the self-healing path — see
+        # test_audit_reads_the_cache_and_never_self_heals.
+        self.load_bars_calls += 1
         return self._per_day.get(start.date().isoformat(), _frame([]))
 
 
@@ -143,9 +150,17 @@ class _StubResampler:
         return self._per_day.get(start.date().isoformat(), _frame([]))
 
 
-def _install_stubs(monkeypatch, *, live_by_day, rebuilt_by_day):
-    monkeypatch.setattr(abm, "HistoryStore", lambda root: _StubStore(live_by_day))
+def _install_stubs(monkeypatch, *, live_by_day, rebuilt_by_day) -> list[_StubStore]:
+    made: list[_StubStore] = []
+
+    def _make_store(root):
+        store = _StubStore(live_by_day)
+        made.append(store)
+        return store
+
+    monkeypatch.setattr(abm, "HistoryStore", _make_store)
     monkeypatch.setattr(abm, "Resampler", lambda tick_root: _StubResampler(rebuilt_by_day))
+    return made
 
 
 def test_main_missing_data_root_returns_2(tmp_path):
@@ -224,3 +239,35 @@ def test_main_drift_run_returns_1(tmp_path, monkeypatch):
         ]
     )
     assert rc == 1
+
+
+def test_audit_reads_the_cache_and_never_self_heals(tmp_path, monkeypatch):
+    """A day with no stored bars must be reported, not quietly rebuilt.
+
+    `load_bars` resamples on a miss and writes the result back, so auditing
+    through it would compare the resampler's output against itself: the day
+    the bars actually went missing — the one case this tool exists for —
+    would come back clean, with the native 1m tier silently backfilled from
+    derived numbers.
+    """
+    t = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)
+    day_key = "2026-04-20"
+    stores = _install_stubs(
+        monkeypatch,
+        live_by_day={},  # nothing cached at all
+        rebuilt_by_day={day_key: _frame([_row(t + timedelta(minutes=i)) for i in range(3)])},
+    )
+    rc = abm.main(
+        [
+            "--data-root",
+            str(tmp_path),
+            "--symbols",
+            "SPY",
+            "--days",
+            "1",
+            "--end-date",
+            "2026-04-20",
+        ]
+    )
+    assert rc == 1, "missing cached bars must be reported as drift"
+    assert stores and stores[0].load_bars_calls == 0

@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -23,9 +23,16 @@
     <ProjectGuid>{F8AD0D46-556D-DA3E-D926-68F55BBCAABC}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>TS2Python</RootNamespace>
-    <!-- vcpkg manifest mode: VS will run `vcpkg install` against cpp/vcpkg.json
-         at the start of every build and drop artefacts under vcpkg_installed/.
-         Requires `vcpkg integrate install` once per user. -->
+    <!-- Platform toolset, named once instead of repeated in four
+         configurations. v145 ships with Visual Studio 2026 (v18); pass
+         /p:TS2PythonToolset=v143 to build with the VS 2022 toolset instead.
+         Must be set here, before the configuration groups that read it.
+         verify-build-env.bat reports which toolsets are actually installed. -->
+    <TS2PythonToolset Condition="'$(TS2PythonToolset)' == ''">v145</TS2PythonToolset>
+    <!-- vcpkg manifest mode: MSBuild runs `vcpkg install` against
+         cpp/vcpkg.json at the start of every build and drops artefacts under
+         vcpkg_installed/. vcpkg itself is resolved from the submodule by
+         vcpkg-local.props — `vcpkg integrate install` is NOT required. -->
     <VcpkgEnabled>true</VcpkgEnabled>
     <VcpkgEnableManifest>true</VcpkgEnableManifest>
     <VcpkgManifestInstall>true</VcpkgManifestInstall>
@@ -49,26 +56,26 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v145</PlatformToolset>
+    <PlatformToolset>$(TS2PythonToolset)</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v145</PlatformToolset>
+    <PlatformToolset>$(TS2PythonToolset)</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
-    <PlatformToolset>v145</PlatformToolset>
+    <PlatformToolset>$(TS2PythonToolset)</PlatformToolset>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
-    <PlatformToolset>v145</PlatformToolset>
+    <PlatformToolset>$(TS2PythonToolset)</PlatformToolset>
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
@@ -90,6 +97,12 @@
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
+
+  <!-- Repo-local vcpkg. Imported here, after the user property sheets, which
+       is where `vcpkg integrate install` would otherwise inject a global,
+       machine-specific one. See vcpkg-local.props. -->
+  <Import Project="$(MSBuildThisFileDirectory)vcpkg-local.props" />
+
   <PropertyGroup Label="UserMacros" />
 
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -214,5 +227,8 @@
 
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
+    <!-- The half of vcpkg's integration that actually adds the include and
+         lib directories. Must come after Microsoft.Cpp.targets. -->
+    <Import Project="$(MSBuildThisFileDirectory)vcpkg-local.targets" />
   </ImportGroup>
 </Project>

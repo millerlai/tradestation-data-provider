@@ -32,11 +32,10 @@ class ParquetBarSink(BaseSink):
         *,
         name: str,
         root: Path | str,
-        timeframe: str = "1m",
         compression: str = "zstd",
     ) -> None:
         self.name = name
-        self._writer = BarWriter(root, timeframe=timeframe, compression=compression)
+        self._writer = BarWriter(root, compression=compression)
 
     def on_bar(self, bar: Bar) -> None:
         self._writer.write(bar)

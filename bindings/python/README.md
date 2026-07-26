@@ -74,23 +74,29 @@ uv add tradestation-data-provider
 poetry add tradestation-data-provider
 ```
 
-Directly from GitHub (works today, no PyPI account needed):
+Directly from GitHub. The Python package is **not at the repo root** — the
+repo root holds the wire contract, the EL indicator and the C++ bridge — so
+the `subdirectory` fragment is required:
 
 ```bash
-pip install "git+https://github.com/millerlai/tradestation-data-provider.git"
-uv add "git+https://github.com/millerlai/tradestation-data-provider.git"
-poetry add "git+https://github.com/millerlai/tradestation-data-provider.git"
+pip install "git+https://github.com/millerlai/tradestation-data-provider.git#subdirectory=bindings/python"
+uv add "git+https://github.com/millerlai/tradestation-data-provider.git#subdirectory=bindings/python"
+poetry add "git+https://github.com/millerlai/tradestation-data-provider.git#subdirectory=bindings/python"
 
 # Pin to a tag, branch, or commit
-pip install "git+https://github.com/millerlai/tradestation-data-provider.git@v0.1.0"
+pip install "git+https://github.com/millerlai/tradestation-data-provider.git@v0.2.0#subdirectory=bindings/python"
 ```
+
+> Without the fragment pip fails with *"neither 'setup.py' nor 'pyproject.toml'
+> found"*. A bare `...git@v0.1.0` does install — but only because that tag
+> predates the move, so it silently gives you a pre-wire-v2 package.
 
 ### For development on this repo
 
 ```powershell
 uv sync                       # base deps
 uv sync --extra dev           # + pytest / ruff / mypy
-uv run pytest                 # 272 tests, ~2s
+uv run pytest                 # full suite, a few seconds
 ```
 
 ## Quick start
@@ -127,6 +133,50 @@ Or use the console entry point with a YAML config:
 tradestation-data-ingest --sinks-config config/sinks.yaml
 ```
 
+## Examples
+
+Four runnable scripts in [`examples/`](examples/), each building on the last.
+Between them they cover the whole package: receive events, handle them your
+way, read them back.
+
+| | Example | Needs a publisher? | What it shows |
+| --- | --- | --- | --- |
+| 01 | [`01_print_events.py`](examples/01_print_events.py) | yes | The whole receive loop in ~20 lines |
+| 02 | [`02_custom_sink.py`](examples/02_custom_sink.py) | yes | Writing your own sink; the full runtime |
+| 03 | [`03_read_history.py`](examples/03_read_history.py) | **no** | Storage tiers; one tick store, many timeframes |
+| 04 | [`04_replay_fixtures.py`](examples/04_replay_fixtures.py) | **no** | Replaying recorded frames through the real binding |
+
+Run them from `bindings/python/`:
+
+```powershell
+uv sync --extra dev
+
+# Offline — no TradeStation, no DLL, nothing to set up.
+uv run python examples/03_read_history.py
+uv run python examples/04_replay_fixtures.py --fixture bars
+```
+
+**Examples 01 and 02 need something publishing on the other end.** That does
+not have to be TradeStation — the C++ harness drives the DLL directly:
+
+```powershell
+# Terminal A — from the repo root. --warmup-ms buys time to attach: a PUB
+# socket silently drops whatever it sends while no subscriber is listening.
+cpp\build\x86-release\Release\TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
+
+# Terminal B — from bindings\python
+uv run python examples\01_print_events.py --count 6
+```
+
+**To test your own sink, copy example 04.** It replays the DLL output
+recorded in [`contract/fixtures/`](../../contract/fixtures/) over a real
+in-process ZeroMQ socket, so your sink sees byte-exact market data through
+the same decode path production uses — with no TradeStation, no market
+hours, and no waiting for a bar to close.
+
+[`examples/README.md`](examples/README.md) has the full index, the harness
+modes, and what to check when frames arrive but nothing prints.
+
 ## Pluggable sinks
 
 Every tick and every closed bar is broadcast to every sink registered in `config/sinks.yaml`. One sink raising an exception is logged and isolated — it never blocks the others. Adding a new output destination means writing one class.
@@ -148,7 +198,6 @@ sinks:
     class: tradestation_data.sinks.parquet:ParquetBarSink
     params:
       root: data/bars
-      timeframe: 1m
       compression: zstd
 
   - name: dispatch

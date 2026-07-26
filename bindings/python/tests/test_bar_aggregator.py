@@ -56,7 +56,10 @@ def test_cross_bucket_emits_previous_bar() -> None:
     assert bar.close == pytest.approx(449.5)
     assert bar.volume == 400
     assert bar.tick_count == 3
-    assert bar.source == "tradestation_el"
+    # §2.3 — a bar this binding computed must not be mistakable for one the
+    # wire delivered, or the two end up indistinguishable in the same
+    # timeframe=1m partition.
+    assert bar.source == "derived:ticks"
 
 
 def test_gap_fills_with_empty_bars() -> None:
@@ -70,10 +73,10 @@ def test_gap_fills_with_empty_bars() -> None:
         T0 + timedelta(minutes=2),
     ]
     closed, e1, e2 = emitted
-    assert closed.source == "tradestation_el"
+    assert closed.source == "derived:ticks"
     assert closed.volume == 100
     for empty in (e1, e2):
-        assert empty.source == "empty"
+        assert empty.source == "derived:empty"
         assert empty.volume == 0
         assert empty.tick_count == 0
         # Empty bars carry forward the previous close
