@@ -12,7 +12,11 @@
     "America/New_York (EDT, UTC-4 on that date) gives 2026-04-18T17:30:45Z. The",
     "DLL's own ts_utc field carries 1776533445.0, which is the same instant — an",
     "agreement between std::chrono::zoned_time and the IANA tzdb, not an",
-    "assumption."
+    "assumption.",
+    "",
+    "That instant is then §2.1-floored to 17:30:00Z and, because the wire is",
+    "right-labelled while §2 labels a bar by its left edge, stepped back one",
+    "interval to 17:29:00Z — the bucket [17:29, 17:30) the bar actually covers."
   ],
   "notes": [
     "VXX is an index/breadth symbol per semantics.md §3, so its bid/ask MUST be",
@@ -27,7 +31,8 @@
     "fixture exercises semantics.md §2.1: bucket_start is floored to the minute,",
     "giving 17:30:00Z rather than 17:30:45Z. Real EL supplies an already aligned",
     "time, which makes the flooring a no-op and easy to leave unwritten — it",
-    "was, until this fixture caught it.",
+    "was, until this fixture caught it. The left-label step of §2 then applies on",
+    "top, landing on 17:29:00Z.",
     "",
     "sid is the publisher session id in epoch MICROseconds (semantics.md §6.3).",
     "Compare it for equality only; it is not a timestamp field.",
@@ -107,7 +112,7 @@
       "kind": "bar",
       "seq": 3,
       "sid": 1785025962015307,
-      "bucket_start": "2026-04-18T17:30:00Z",
+      "bucket_start": "2026-04-18T17:29:00Z",
       "open": 450.1,
       "high": 450.75,
       "low": 449.8,

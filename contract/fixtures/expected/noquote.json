@@ -9,7 +9,8 @@
     "",
     "bucket_start: ts_str '2026-04/18-13:31:00' read as America/New_York (EDT)",
     "gives 2026-04-18T17:31:00Z, already minute-aligned so §2.1's flooring is a",
-    "no-op here."
+    "no-op here. EL stamps the close and §2 labels the left edge, so one",
+    "interval comes off: bucket_start is 17:30:00Z, covering [17:30, 17:31)."
   ],
   "notes": [
     "Covers semantics.md §3.1 — the case TradeStation produces whenever it is",
@@ -65,7 +66,7 @@
       "kind": "bar",
       "seq": 2,
       "sid": 1785025968082004,
-      "bucket_start": "2026-04-18T17:31:00Z",
+      "bucket_start": "2026-04-18T17:30:00Z",
       "open": 450.1,
       "high": 450.75,
       "low": 449.8,

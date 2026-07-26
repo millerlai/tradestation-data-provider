@@ -76,7 +76,7 @@ v1/v2 用 `kind: "bar_1m"` 把兩件事綁在同一個字串裡。v3 拆開：
 | `sid` | uint64 | publisher session id（`EL_Init` 當下的 UTC epoch **微秒**）。只需比較是否相等，不得解讀為時間戳 |
 | `ts` | float | DLL 收訊端 wall clock。**僅用於延遲量測** |
 | `ts_utc` | float | `ts_str` 經 `zoned_time` 轉出。解析失敗為 `0.0`。**僅作交叉稽核** |
-| `ts_str` | string | EL 原始字串 `yyyy-MM/dd-HH:mm:ss`，逐字透傳。**bar bucket 的權威來源** |
+| `ts_str` | string | EL 原始字串 `yyyy-MM/dd-HH:mm:ss`，逐字透傳。**bar bucket 的權威來源**，但它是 bar 的**收盤**時間（EL 的 `Time`）—— binding 必須依 `semantics.md` §2 減一個 `tf` 才得到左標籤的 `bucket_start` |
 | `px` | float | 成交價（僅 `tick`） |
 | `o` `h` `l` `c` | float | OHLC（僅 `bar`） |
 | `vol` | float | 成交量。**是 float 不是 int** |

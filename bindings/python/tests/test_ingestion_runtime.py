@@ -161,7 +161,9 @@ async def test_runtime_direct_bar_bypasses_aggregator(
     assert bar.low == pytest.approx(449.80)
     assert bar.close == pytest.approx(450.40)
     assert bar.volume == 12000
-    assert bar.bucket_start == datetime(2026, 4, 20, 13, 30, 0, tzinfo=UTC)
+    # ts 13:30:30 floors to 13:30, then steps back one interval: §2 labels a
+    # bar by its left edge, while the wire stamps it at the close.
+    assert bar.bucket_start == datetime(2026, 4, 20, 13, 29, 0, tzinfo=UTC)
 
     # Snapshot accepted the bar.
     state = snap.state_of("SPY")
@@ -269,7 +271,8 @@ async def test_runtime_replaces_intra_bar_updates_and_drops_stale_bars(
             "tc": 140,
         },
     )
-    # New bucket 13:31 closes 13:30 and buffers itself.
+    # Wire stamps the close, so these land on the 13:29 / 13:30 left edges.
+    # New bucket 13:30 closes 13:29 and buffers itself.
     ts_el_2 = datetime(2026, 4, 20, 13, 31, 0, tzinfo=UTC).timestamp()
     await _publish(
         pub,
@@ -298,14 +301,14 @@ async def test_runtime_replaces_intra_bar_updates_and_drops_stale_bars(
     # First bucket emitted carries the last refresh's OHLC (replace-last).
     assert len(observed) == 1, f"intra-bar updates not collapsed: observed={len(observed)}"
     first = observed[0]
-    assert first.bucket_start == datetime(2026, 4, 20, 13, 30, 0, tzinfo=UTC)
+    assert first.bucket_start == datetime(2026, 4, 20, 13, 29, 0, tzinfo=UTC)
     assert first.high == pytest.approx(450.75)
     assert first.close == pytest.approx(450.40)
     assert first.volume == 12000
     assert runtime._counters.bars_direct_in == 1
     assert runtime._counters.bars_direct_updated == 2
 
-    # Now replay bucket 13:30 — it is stale (<= last_emitted) and must be dropped.
+    # Now replay bucket 13:29 — it is stale (<= last_emitted) and must be dropped.
     await _publish(
         pub,
         "SPY",
@@ -334,10 +337,10 @@ async def test_runtime_replaces_intra_bar_updates_and_drops_stale_bars(
     runtime.stop()
     await asyncio.wait_for(task, timeout=2.0)
 
-    # stop() drains the still-buffered 13:31 bar via _drain_direct_bars().
+    # stop() drains the still-buffered 13:30 bar via _drain_direct_bars().
     assert len(observed) == 2
     second = observed[1]
-    assert second.bucket_start == datetime(2026, 4, 20, 13, 31, 0, tzinfo=UTC)
+    assert second.bucket_start == datetime(2026, 4, 20, 13, 30, 0, tzinfo=UTC)
     assert second.close == pytest.approx(450.55)
     assert runtime._counters.bars_direct_in == 2
 

@@ -221,11 +221,17 @@ int run_bars(const Options& o) {
 int run_session_edges(const Options& o) {
     (void)o;
     std::printf("[harness] session_edges: RTH first and last 1m bar\n");
-    // Left-labelled, so an RTH 1m session runs 09:30..15:59, never 16:00.
+    // EasyLanguage stamps a bar with its CLOSE time, so the wire carries
+    // 09:31..16:00 for the session §2 labels 09:30..15:59. Publish what
+    // TradeStation actually publishes: this fixture used to emit the
+    // contract's own labels, which made it agree with the spec by
+    // construction and test nothing — and that is precisely how a
+    // right-labelled bar reached storage unnoticed. The binding is what
+    // must step back onto the left edge, and this is what proves it does.
     struct Edge { const char* ts_el; double open; double close; };
     const Edge edges[] = {
-        {"2026-04/20-09:30:00", 450.10, 450.40},   // first bar, covers [09:30, 09:31)
-        {"2026-04/20-15:59:00", 452.80, 453.05},   // last  bar, covers [15:59, 16:00)
+        {"2026-04/20-09:31:00", 450.10, 450.40},   // first bar, covers [09:30, 09:31)
+        {"2026-04/20-16:00:00", 452.80, 453.05},   // last  bar, covers [15:59, 16:00)
     };
     for (const auto& e : edges) {
         const int rc = EL_PublishBar("SPY", e.ts_el, /*bar_type*/ 1, /*bar_interval*/ 1,

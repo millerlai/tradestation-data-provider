@@ -53,6 +53,14 @@ NATIVE_ONLY_TIMEFRAMES: frozenset[str] = frozenset({Timeframe.D1})
 # These live in a single file per symbol, rewritten whole on each flush.
 SINGLE_FILE_TIMEFRAMES: frozenset[str] = frozenset({Timeframe.D1})
 
+# Intervals whose bucket is decided by the session anchor rather than by the
+# publisher's timestamp: `align_bucket_start` discards the time-of-day and
+# returns that session's 04:00 ET edge. A publisher's right-hand bar label
+# therefore needs no shift onto its left edge for these — and must not get
+# one, since subtracting a whole interval would land the bar in the previous
+# session. See contract/semantics.md §2.2.
+SESSION_ANCHORED_TIMEFRAMES: frozenset[str] = frozenset({Timeframe.D1})
+
 # Everything the live 1-minute writer does not produce itself *and* that may
 # legitimately be computed, i.e. the frames a Tier 3 cache can hold. Derived
 # from the enum so a new member is never silently left out of the cache

@@ -13,9 +13,11 @@ import zmq.asyncio
 from tradestation_data.domain.bar import Bar
 from tradestation_data.domain.tick import Tick
 from tradestation_data.domain.timeframe import (
+    SESSION_ANCHORED_TIMEFRAMES,
     SUPPORTED_TIMEFRAMES,
     Timeframe,
     align_bucket_start,
+    timeframe_to_minutes,
 )
 from tradestation_data.wire.base import MarketEvent
 
@@ -411,6 +413,19 @@ class TradeStationELProvider:
 
         if bucket_start is None:
             bucket_start = _floor_to_minute_utc(float(data["ts"]))
+
+        # §2 — the wire is right-labelled, the contract is left-labelled.
+        # EasyLanguage's `Time` is the bar's *close*, and TsStr is built from
+        # it verbatim (EL/TS2Python_Exporter.el), so an RTH 1m session arrives
+        # as 09:31…16:00 where §2 requires 09:30…15:59. Both are 390 bars and
+        # both look correct in isolation — the whole series is simply shifted
+        # one slot. Step back onto the left edge before the grid snap.
+        #
+        # Session-anchored frames are exempt: align_bucket_start replaces a 1d
+        # timestamp with that session's 04:00 ET anchor outright, so a shift
+        # here would only move the bar into the previous session.
+        if timeframe not in SESSION_ANCHORED_TIMEFRAMES:
+            bucket_start -= timedelta(minutes=timeframe_to_minutes(timeframe))
 
         # §2.2 — the grid is the contract's, not the publisher's. EL stamps a
         # bar with its chart's own Date/Time, which for a daily bar is nowhere

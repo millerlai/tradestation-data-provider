@@ -283,6 +283,28 @@ python scripts/dump_parquet.py                                   # 看 parquet �
 python ../../contract/tools/record.py                            # 原始 ZMQ wire 檢視
 ```
 
+## 範例資料
+
+`data/` 在 `.gitignore` 內，但仍以 `git add -f` 收錄了 8 個小 Parquet 檔（合計約 89 KB），讓離線工具與 `HistoryStore` 不需要 TradeStation、DLL 或即時資料流就能試跑。你自己採集的資料仍會落在被忽略的路徑，只有這 8 個被追蹤。
+
+| 路徑 | 筆數 | 涵蓋範圍 |
+|---|---|---|
+| `data/bars/timeframe=1d/symbol=SPY/bars.parquet` | 499 | 2024-07-29 … 2026-07-24，單一扁平檔（`SINGLE_FILE_TIMEFRAMES`，沒有 `date=` 層）|
+| `data/bars/timeframe=1m/symbol=SPY/date=2026-07-23/` | 389 | 僅 RTH |
+| `data/bars/timeframe=1m/symbol=SPY/date=2026-07-24/` | 390 | 僅 RTH，09:30…15:59 |
+| `data/bars/timeframe=5m/symbol=SPY/date=2026-07-20…24/` | 各 166–168 | 含盤前盤後，06:00…19:55 ET |
+
+```powershell
+python scripts/dump_parquet.py data/bars/timeframe=1m/symbol=SPY/date=2026-07-24/bars.parquet --head 3
+python scripts/dump_parquet.py data/bars/timeframe=1d/symbol=SPY/bars.parquet --tail 5 --tz native
+```
+
+把它們當成參考輸出之前，有三件事要先知道：
+
+- **`1m/date=2026-07-23` 是修復前的資料。** 它從 09:31 起、到 15:59 止 —— 右標籤，採集於 `_parse_bar` 學會往回退一格（`contract/semantics.md` §2）之前。其餘檔案都是正確的左標籤。留著它當回歸樣本，別照抄它的形狀。
+- **1m 與 5m 不可直接比較。** 1m 那兩天只有 RTH，5m 那五天含盤前盤後，互相加總等於混用兩種 session template。另外 `5m/date=2026-07-20` 缺第一根（從 06:05 開始），`date=2026-07-24` 少兩根。
+- **不要拿 intraday 加總去核對 `1d` 的 volume。** 兩者是不同口徑，本來就不會相等 —— 見 `contract/semantics.md` §3.4。在這批資料上，即使把盤前盤後全部加進來，日線總量仍約為 intraday 加總的 3 倍，該節已將這個落差標記為尚未解釋。
+
 ## 專案結構
 
 ```
