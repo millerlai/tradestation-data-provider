@@ -24,7 +24,10 @@ have to guess belongs in `contract/semantics.md`, with a fixture.
 
 - Wire v3 / DLL ABI 8 is current; v1 and v2 are superseded but **still supported** — the DLL sits
   in the user's TradeStation install and does not update when a binding does.
-- Python 3.11–3.14, managed with **uv**; all four are in the CI matrix. There is
+- Python 3.12–3.14, managed with **uv**; all three are in the CI matrix. 3.11 was
+  dropped so the Windows event loop can be selected with
+  `asyncio.run(loop_factory=...)` (3.12+) instead of the policy API, which 3.14
+  deprecates and 3.16 removes. There is
   deliberately no `.python-version` — one would override `uv sync --python <v>`, leaving
   `uv run` on a different interpreter than the one just synced.
 - Package `tradestation_data` under `bindings/python/src/`. Console script
@@ -87,7 +90,8 @@ msbuild TS2Python.sln /p:Configuration=Release /p:Platform=x86
 
 # Drive the DLL without TradeStation, then watch or record the wire.
 # Leave enough warmup for the subscriber to attach — PUB drops with no subscriber.
-cpp/build/x86-release/Release/TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
+# build.bat / VS write to cpp\Release\; cmake to cpp\build\x86-release\Release\.
+cpp/Release/TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
 python contract/tools/record.py
 python contract/tools/record.py --count 6 --quiet --record contract/fixtures/smoke.jsonl
 ```
@@ -181,7 +185,11 @@ and every binding must agree. Change them there first.**
 
 ### Windows-specific event loop
 
-pyzmq's asyncio integration uses `loop.add_reader()`, which the default Windows ProactorEventLoop does **not** support — SUB sockets connect but `recv_multipart()` never wakes. Both `runtime/main.py` and `tests/conftest.py` force `WindowsSelectorEventLoopPolicy` on `win32`. Preserve this when adding new entrypoints.
+pyzmq's asyncio integration uses `loop.add_reader()`, which the default Windows ProactorEventLoop does **not** support — SUB sockets connect but `recv_multipart()` never wakes, with no error to explain it. Every entry point must force a selector loop on `win32`. Preserve this when adding new ones.
+
+The supported spelling is `asyncio.run(coro, loop_factory=asyncio.SelectorEventLoop)` — `runtime/main.py` and `examples/_compat.py` both use it; copy `_compat.run()`. Do **not** reach for `asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())`: 3.14 deprecates the whole policy API and 3.16 removes it, which would stop the CLI from starting on the only platform TradeStation runs on.
+
+`tests/conftest.py` is the one remaining policy caller and cannot move yet — pytest-asyncio owns loop creation there and 1.3.0 exposes no `loop_factory` hook. `pyproject.toml`'s `filterwarnings` carries three **narrow** ignores for exactly those messages; the blanket `ignore::DeprecationWarning` that used to sit there is what let this rot unnoticed, so do not widen them back.
 
 ### Shutdown ordering
 

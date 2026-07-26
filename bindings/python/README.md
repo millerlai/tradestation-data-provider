@@ -1,7 +1,7 @@
 # tradestation-data-provider
 
 [![CI](https://github.com/millerlai/tradestation-data-provider/actions/workflows/ci.yml/badge.svg)](https://github.com/millerlai/tradestation-data-provider/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/millerlai/tradestation-data-provider/blob/main/bindings/python/pyproject.toml)
+[![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue)](https://github.com/millerlai/tradestation-data-provider/blob/main/bindings/python/pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![Checked with mypy](https://img.shields.io/badge/mypy-strict-blue)](https://mypy-lang.org/)
@@ -162,11 +162,15 @@ not have to be TradeStation — the C++ harness drives the DLL directly:
 ```powershell
 # Terminal A — from the repo root. --warmup-ms buys time to attach: a PUB
 # socket silently drops whatever it sends while no subscriber is listening.
-cpp\build\x86-release\Release\TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
+# The path is where cpp\build.bat (and Visual Studio) put it; a CMake preset
+# build leaves it in cpp\build\x86-release\Release\ instead.
+cpp\Release\TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
 
 # Terminal B — from bindings\python
 uv run python examples\01_print_events.py --count 6
 ```
+
+No harness yet? Build it with `cd cpp && .\setup-build-env.bat && .\build.bat` — see [`cpp/README.md`](../../cpp/README.md).
 
 **To test your own sink, copy example 04.** It replays the DLL output
 recorded in [`contract/fixtures/`](../../contract/fixtures/) over a real

@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "tradestation-data-provider"
 version = "0.2.0"
 description = "TradeStation EasyLanguage → Python data ingestion pipeline with pluggable output sinks (Parquet, CSV, in-process callbacks, ...)"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -29,7 +29,6 @@ classifiers = [
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
@@ -99,7 +98,18 @@ testpaths = ["tests"]
 pythonpath = ["src"]
 filterwarnings = [
     "error",
-    "ignore::DeprecationWarning",
+    # Narrow on purpose. A blanket "ignore::DeprecationWarning" used to sit
+    # here and it hid a real one for months: src/ and examples/ were calling
+    # the asyncio policy API that 3.14 deprecates and 3.16 removes, and the
+    # suite stayed green the whole time. Those two are fixed; this exemption
+    # covers only what is still blocked upstream — pytest-asyncio 1.3.0 owns
+    # loop creation in tests and offers no loop_factory hook, so
+    # tests/conftest.py has to keep the old spelling. Delete these lines when
+    # pytest-asyncio grows one, and never widen them back to the whole
+    # category.
+    "ignore:'asyncio.WindowsSelectorEventLoopPolicy' is deprecated:DeprecationWarning",
+    "ignore:'asyncio.set_event_loop_policy' is deprecated:DeprecationWarning",
+    "ignore:'asyncio.get_event_loop_policy' is deprecated:DeprecationWarning",
 ]
 
 [tool.coverage.run]
@@ -126,7 +136,7 @@ directory = "htmlcov"
 
 [tool.ruff]
 line-length = 100
-target-version = "py311"
+target-version = "py312"
 src = ["src", "tests"]
 # The vendored vcpkg tree lives at ../../cpp/ and is unreachable from this
 # project root, so it needs no exclude here. The repo-root .ruff.toml guards
@@ -150,7 +160,7 @@ ignore = [
 "tests/*" = ["N802", "N803"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 strict = true
 warn_unreachable = true
 files = ["src"]

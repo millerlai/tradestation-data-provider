@@ -89,15 +89,27 @@ bindings actually diverge.
 
 ```powershell
 cd cpp
+.\setup-build-env.bat     # once per clone: vcpkg submodule, bootstrap, deps
+.\verify-build-env.bat    # exit 0 = ready; names the fix for anything missing
+.\build.bat               # Release, x86 + x64  ->  cpp\Release\
+```
+
+`build.bat` locates MSBuild itself, so no Developer Command Prompt is needed.
+CMake works too and writes somewhere else — mind the path when you go looking
+for the harness:
+
+```powershell
 cmake --preset x86-release          # or x86-release-vs2022
-cmake --build --preset x86-release
+cmake --build --preset x86-release  #  ->  cpp\build\x86-release\Release\
 ```
 
 **Inspecting the wire without TradeStation:**
 
 ```powershell
-# terminal A — drives the DLL directly
-cpp/build/x86-release/Release/TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
+# terminal A — drives the DLL directly. Path depends on which toolchain built it:
+#   build.bat / Visual Studio  ->  cpp\Release\
+#   cmake --preset             ->  cpp\build\x86-release\Release\
+cpp\Release\TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
 
 # terminal B
 python contract/tools/record.py

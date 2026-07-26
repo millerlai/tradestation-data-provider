@@ -1,7 +1,7 @@
 # tradestation-data-provider
 
 [![CI](https://github.com/millerlai/tradestation-data-provider/actions/workflows/ci.yml/badge.svg)](https://github.com/millerlai/tradestation-data-provider/actions/workflows/ci.yml)
-[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13-blue)](https://github.com/millerlai/tradestation-data-provider/blob/main/pyproject.toml)
+[![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue)](https://github.com/millerlai/tradestation-data-provider/blob/main/pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 [![Checked with mypy](https://img.shields.io/badge/mypy-strict-blue)](https://mypy-lang.org/)
@@ -160,11 +160,15 @@ C++ harness 可以直接驅動 DLL：
 ```powershell
 # 終端機 A —— 在 repo root 執行。--warmup-ms 是留給你接上的時間：
 # PUB socket 在沒有 subscriber 時送出的東西會被靜默丟棄。
-cpp\build\x86-release\Release\TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
+# 這個路徑是 cpp\build.bat（與 Visual Studio）的輸出位置；
+# 若用 CMake preset 建置，則在 cpp\build\x86-release\Release\。
+cpp\Release\TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
 
 # 終端機 B —— 在 bindings\python 執行
 uv run python examples\01_print_events.py --count 6
 ```
+
+還沒有 harness？用 `cd cpp && .\setup-build-env.bat && .\build.bat` 建 —— 見 [`cpp/README.zh-TW.md`](../../cpp/README.zh-TW.md)。
 
 **要測自己寫的 sink，複製範例 04。** 它把
 [`contract/fixtures/`](../../contract/fixtures/) 裡錄下來的 DLL 輸出，透過真正的

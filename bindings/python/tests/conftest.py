@@ -15,6 +15,15 @@ import zmq.asyncio
 # pyzmq's asyncio integration needs add_reader/add_writer, which the
 # Windows ProactorEventLoop does not support natively. Switch to the
 # selector-based loop so socket cleanup is reliable under pytest.
+#
+# This is the one place still using the deprecated policy API — src/ and
+# examples/ both moved to asyncio.run(loop_factory=...). It cannot follow:
+# pytest-asyncio owns loop creation here, and 1.3.0 exposes only the
+# policy-based `event_loop_policy` fixture, with no loop_factory hook (it
+# calls asyncio.set_event_loop_policy internally and silences the warning
+# with warnings.simplefilter). So this has to wait for pytest-asyncio, and
+# when 3.16 removes the API pytest-asyncio breaks with or without this line.
+# Recheck on the next pytest-asyncio major.
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
