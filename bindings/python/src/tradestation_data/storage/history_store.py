@@ -150,6 +150,13 @@ class HistoryStore:
                 )
         if df.height == 0:
             return df
+        # Add the ET view before returning, not just before writing. A cache
+        # hit reads BAR_SCHEMA back off disk and always carries
+        # ``bucket_start_et``; without this the very first call — the one that
+        # builds the cache — would hand back a frame one column short, and the
+        # same code would work or KeyError depending on whether someone had
+        # asked for that range before.
+        df = _with_bucket_start_et(df)
         self._persist_cache(symbol, timeframe, df)
         return df
 

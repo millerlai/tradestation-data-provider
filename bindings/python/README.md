@@ -133,6 +133,50 @@ Or use the console entry point with a YAML config:
 tradestation-data-ingest --sinks-config config/sinks.yaml
 ```
 
+## Examples
+
+Four runnable scripts in [`examples/`](examples/), each building on the last.
+Between them they cover the whole package: receive events, handle them your
+way, read them back.
+
+| | Example | Needs a publisher? | What it shows |
+| --- | --- | --- | --- |
+| 01 | [`01_print_events.py`](examples/01_print_events.py) | yes | The whole receive loop in ~20 lines |
+| 02 | [`02_custom_sink.py`](examples/02_custom_sink.py) | yes | Writing your own sink; the full runtime |
+| 03 | [`03_read_history.py`](examples/03_read_history.py) | **no** | Storage tiers; one tick store, many timeframes |
+| 04 | [`04_replay_fixtures.py`](examples/04_replay_fixtures.py) | **no** | Replaying recorded frames through the real binding |
+
+Run them from `bindings/python/`:
+
+```powershell
+uv sync --extra dev
+
+# Offline — no TradeStation, no DLL, nothing to set up.
+uv run python examples/03_read_history.py
+uv run python examples/04_replay_fixtures.py --fixture bars
+```
+
+**Examples 01 and 02 need something publishing on the other end.** That does
+not have to be TradeStation — the C++ harness drives the DLL directly:
+
+```powershell
+# Terminal A — from the repo root. --warmup-ms buys time to attach: a PUB
+# socket silently drops whatever it sends while no subscriber is listening.
+cpp\build\x86-release\Release\TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
+
+# Terminal B — from bindings\python
+uv run python examples\01_print_events.py --count 6
+```
+
+**To test your own sink, copy example 04.** It replays the DLL output
+recorded in [`contract/fixtures/`](../../contract/fixtures/) over a real
+in-process ZeroMQ socket, so your sink sees byte-exact market data through
+the same decode path production uses — with no TradeStation, no market
+hours, and no waiting for a bar to close.
+
+[`examples/README.md`](examples/README.md) has the full index, the harness
+modes, and what to check when frames arrive but nothing prints.
+
 ## Pluggable sinks
 
 Every tick and every closed bar is broadcast to every sink registered in `config/sinks.yaml`. One sink raising an exception is logged and isolated — it never blocks the others. Adding a new output destination means writing one class.

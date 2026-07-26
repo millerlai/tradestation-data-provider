@@ -46,6 +46,27 @@ def test_load_ticks_returns_rows_in_window(tmp_path: Path) -> None:
     assert df.select("price").to_series().to_list() == pytest.approx([450.0, 450.5])
 
 
+def test_cache_miss_and_hit_agree_on_the_et_column(tmp_path: Path) -> None:
+    """The first call must not hand back a frame one column short.
+
+    A hit reads BAR_SCHEMA off disk, which always carries ``bucket_start_et``.
+    When the miss path returned the raw resampler frame instead, identical
+    caller code raised KeyError or worked depending on whether anyone had
+    asked for that range before — the worst kind of intermittent.
+    """
+    _populate_ticks(tmp_path, [_tick("SPY", T0 + timedelta(seconds=5), 450.0)])
+    store = HistoryStore(tmp_path)
+    window = (T0, T0 + timedelta(minutes=5))
+
+    miss = store.load_bars("SPY", *window, "5m")  # builds the cache
+    hit = store.load_bars("SPY", *window, "5m")  # reads it back
+
+    assert "bucket_start_et" in miss.columns
+    assert "bucket_start_et" in hit.columns
+    assert miss["bucket_start_et"].to_list() == hit["bucket_start_et"].to_list()
+    assert miss["bucket_start"].to_list() == hit["bucket_start"].to_list()
+
+
 def test_load_bars_cache_miss_builds_and_persists(tmp_path: Path) -> None:
     _populate_ticks(
         tmp_path,

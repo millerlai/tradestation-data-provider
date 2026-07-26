@@ -13,6 +13,7 @@ contract/            wire spec, semantics, conformance fixtures   <- source of t
 EL/                  EasyLanguage exporter indicator
 cpp/                 bridge DLL (Win32 x86) + standalone test harness
 bindings/python/     reference binding: ingestion runtime, sinks, Parquet store
+  └ examples/        four runnable scripts; two need no DLL (see its README)
 docs/                architecture.md, migration/
 ```
 

@@ -73,7 +73,12 @@ noticed, because nothing checked.
 
 ## Quick start
 
-**Consuming the feed in Python** → [`bindings/python/README.md`](bindings/python/README.md)
+**Consuming the feed in Python** → [`bindings/python/README.md`](bindings/python/README.md),
+or go straight to the runnable scripts in
+[`bindings/python/examples/`](bindings/python/examples/). Two of the four need
+neither TradeStation nor the DLL: one replays the recorded fixtures in
+[`contract/fixtures/`](contract/fixtures/) through the real binding, the other
+demonstrates the storage tiers on data it generates itself.
 
 **Writing a binding in another language** → [`contract/README.md`](contract/README.md).
 Read [`contract/semantics.md`](contract/semantics.md) before writing any parsing
