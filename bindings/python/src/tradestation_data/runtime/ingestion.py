@@ -11,13 +11,13 @@ from tradestation_data.aggregation.bar_aggregator import BarAggregator
 from tradestation_data.aggregation.snapshot import MarketSnapshot
 from tradestation_data.domain.bar import Bar
 from tradestation_data.domain.tick import Tick
+from tradestation_data.domain.timeframe import timeframe_to_minutes
 from tradestation_data.sinks.pipeline import SinkPipeline
 from tradestation_data.wire.base import MarketDataProvider
 
 log = logging.getLogger(__name__)
 
 
-_ONE_MINUTE = timedelta(minutes=1)
 # Wall-clock grace past bucket_end before we flush a buffered direct bar
 # whose next-bucket signal has not arrived (e.g. a quiet index symbol).
 # Small enough to feel live, large enough to swallow ordinary publish jitter.
@@ -83,15 +83,22 @@ class IngestionRuntime:
 
         self._stop = asyncio.Event()
         self._counters = _Counters()
-        # In-progress direct bar per symbol. EL's "Update every tick" mode
-        # resends the same (symbol, bucket_start) many times per minute
-        # with a refined OHLC each time — we replace-last so only the
-        # final bar reaches the sinks. A new bucket_start closes the
-        # previous buffered bar and emits it. Latest bucket_start already
-        # emitted is tracked separately so a TS chart reload that replays
-        # historical bars can't re-fire on already-closed minutes.
-        self._current_direct_bars: dict[str, Bar] = {}
-        self._last_emitted_direct_bucket: dict[str, datetime] = {}
+        # In-progress direct bar per (symbol, timeframe). EL's "Update every
+        # tick" mode resends the same bucket many times per interval with a
+        # refined OHLC each time — we replace-last so only the final bar
+        # reaches the sinks. A new bucket_start closes the previous buffered
+        # bar and emits it. Latest bucket_start already emitted is tracked
+        # separately so a TS chart reload that replays historical bars can't
+        # re-fire on already-closed buckets.
+        #
+        # The key includes the timeframe because one DLL, one PUB socket and
+        # one topic now carry every interval the user has a chart open on.
+        # Keyed on symbol alone, a 1m bar arriving mid-5m-bucket would evict
+        # the 5m bar and emit it early, then park _last_emitted at the 1m
+        # bucket so the real 5m updates were dropped as duplicates — with the
+        # 1m partition looking perfectly healthy the whole time.
+        self._current_direct_bars: dict[tuple[str, str], Bar] = {}
+        self._last_emitted_direct_bucket: dict[tuple[str, str], datetime] = {}
 
     # ---- lifecycle --------------------------------------------------
 
@@ -166,26 +173,33 @@ class IngestionRuntime:
         self._current_direct_bars.clear()
         for bar in drained:
             self._counters.bars_direct_in += 1
-            self._last_emitted_direct_bucket[bar.symbol] = bar.bucket_start
+            self._last_emitted_direct_bucket[(bar.symbol, bar.timeframe)] = bar.bucket_start
         return drained
 
     def _advance_direct_bars(self, now: datetime) -> list[Bar]:
-        """Close buffered direct bars whose minute has fully elapsed.
+        """Close buffered direct bars whose own interval has fully elapsed.
 
         Handles the case where a symbol publishes once and then goes
         quiet (no next-bucket signal arrives to trigger emission). Bars
         are released ``_DIRECT_BAR_CLOSE_GRACE`` after bucket_end so
         ordinary publish jitter doesn't prematurely finalize a bar that
         is still receiving intra-bar updates.
+
+        The deadline follows ``bar.timeframe``. Assuming one minute would
+        close a 5m bucket at 09:31, publishing OHLC that covers only the
+        first of its five minutes and then discarding every later update as
+        a duplicate — a `timeframe=5m` partition full of one-minute bars,
+        with no error anywhere.
         """
         ready: list[Bar] = []
-        for symbol in list(self._current_direct_bars):
-            bar = self._current_direct_bars[symbol]
-            if bar.bucket_start + _ONE_MINUTE + _DIRECT_BAR_CLOSE_GRACE <= now:
+        for key in list(self._current_direct_bars):
+            bar = self._current_direct_bars[key]
+            tf_delta = timedelta(minutes=timeframe_to_minutes(bar.timeframe))
+            if bar.bucket_start + tf_delta + _DIRECT_BAR_CLOSE_GRACE <= now:
                 ready.append(bar)
-                del self._current_direct_bars[symbol]
+                del self._current_direct_bars[key]
                 self._counters.bars_direct_in += 1
-                self._last_emitted_direct_bucket[symbol] = bar.bucket_start
+                self._last_emitted_direct_bucket[key] = bar.bucket_start
         return ready
 
     # ---- loops ------------------------------------------------------
@@ -248,28 +262,28 @@ class IngestionRuntime:
         reload replaying history — are dropped so the sinks never
         see the same minute twice.
         """
-        symbol = bar.symbol
-        last_emitted = self._last_emitted_direct_bucket.get(symbol)
+        key = (bar.symbol, bar.timeframe)
+        last_emitted = self._last_emitted_direct_bucket.get(key)
         if last_emitted is not None and bar.bucket_start <= last_emitted:
             self._counters.bars_duplicate_dropped += 1
             return
 
-        current = self._current_direct_bars.get(symbol)
+        current = self._current_direct_bars.get(key)
         if current is None:
-            self._current_direct_bars[symbol] = bar
+            self._current_direct_bars[key] = bar
             return
 
         if bar.bucket_start == current.bucket_start:
             # Intra-bar refresh — replace so the final emit carries the
             # complete OHLC / volume / tick_count for the minute.
-            self._current_direct_bars[symbol] = bar
+            self._current_direct_bars[key] = bar
             self._counters.bars_direct_updated += 1
             return
 
         if bar.bucket_start > current.bucket_start:
-            self._current_direct_bars[symbol] = bar
+            self._current_direct_bars[key] = bar
             self._counters.bars_direct_in += 1
-            self._last_emitted_direct_bucket[symbol] = current.bucket_start
+            self._last_emitted_direct_bucket[key] = current.bucket_start
             await self._on_closed_bar(current)
             return
 

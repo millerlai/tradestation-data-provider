@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Aggregate 1-minute bar Parquet into a coarser timeframe (5m, 15m, 30m, 1h).
+"""Aggregate 1-minute bar Parquet into a coarser timeframe (5m … 1d).
 
 Reads a Hive-partitioned 1-min bar cache laid out as:
 
@@ -9,27 +9,28 @@ and writes the aggregated cache to:
 
   {output}/timeframe={TF}/symbol={SYM}/date={YYYY-MM-DD}/bars.parquet
 
-Aggregation is done per trading date in non-overlapping chunks aligned to
-wall-clock N-minute boundaries. Each 1-min bar is mapped to the chunk
-whose label equals `ceil(bucket_start -> next multiple of N minutes)`,
-so for N=5:
+Bars are **left-labelled and session-anchored**, exactly as
+`contract/semantics.md` §2.2 defines and `storage.resampler` implements —
+both write into the same `timeframe=` directories, so a second grid here
+would not conflict loudly, it would just make every `bucket_start` join
+match nothing. For N=5:
 
-    09:31, 09:32, 09:33, 09:34, 09:35  ->  09:35
-    09:36, 09:37, 09:38, 09:39, 09:40  ->  09:40
+    09:30, 09:31, 09:32, 09:33, 09:34  ->  09:30
+    09:35, 09:36, 09:37, 09:38, 09:39  ->  09:35
 
-A 1-min bar that already sits on a boundary (e.g. 09:35) is the last
-member of its chunk and never rolls into the next one. Missing minutes
-simply produce a chunk with fewer than N members; nothing is fabricated.
+Missing minutes simply produce a chunk with fewer than N members; nothing
+is fabricated.
 
-Rules (as specified by the user):
-  bucket_start = last bar's bucket_start in the chunk   (09:31..09:35 -> 09:35)
+Rules:
+  bucket_start = the chunk's grid label (09:30..09:34 -> 09:30)
   open         = first bar's open
   close        = last bar's close
   high         = max(high)
   low          = min(low)
   volume       = sum(volume)
   tick_count   = sum(tick_count)
-  source       = first bar's source
+  source       = `derived:<input timeframe>` — these bars are computed, and
+                 §2.3 forbids letting them pass for native ones
 
 Usage:
   python scripts/aggregate_parquet.py --symbol SPY --timeframe 5m \\
@@ -49,11 +50,14 @@ from __future__ import annotations
 import argparse
 import re
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+
+from tradestation_data.domain.bar import derived_source
+from tradestation_data.domain.timeframe import TIMEFRAME_MINUTES, align_bucket_start
 
 BAR_SCHEMA: pa.Schema = pa.schema(
     [
@@ -69,19 +73,10 @@ BAR_SCHEMA: pa.Schema = pa.schema(
 )
 
 
-_TF_MINUTES: dict[str, int] = {
-    "1m": 1,
-    "5m": 5,
-    "15m": 15,
-    "30m": 30,
-    "1h": 60,
-}
-
-
 def _tf_minutes(tf: str) -> int:
-    if tf not in _TF_MINUTES:
-        raise ValueError(f"Unsupported timeframe: {tf!r}. Valid: {list(_TF_MINUTES)}")
-    return _TF_MINUTES[tf]
+    if tf not in TIMEFRAME_MINUTES:
+        raise ValueError(f"Unsupported timeframe: {tf!r}. Valid: {list(TIMEFRAME_MINUTES)}")
+    return TIMEFRAME_MINUTES[tf]
 
 
 def _detect_input_timeframe(input_root: Path) -> str:
@@ -90,18 +85,8 @@ def _detect_input_timeframe(input_root: Path) -> str:
     return m.group(1) if m else "1m"
 
 
-def _chunk_label(ts: datetime, n_min: int) -> datetime:
-    """Map a 1-min bar timestamp to its N-min chunk label (== last minute)."""
-    step = n_min * 60
-    shifted = ts - timedelta(minutes=1)
-    total = int(shifted.timestamp())
-    floored = (total // step) * step
-    return datetime.fromtimestamp(floored + step, tz=UTC)
-
-
-def _aggregate_day(src_path: Path, n_out_min: int) -> pa.Table:
-    """Aggregate one symbol-date file of 1-min bars into N-min bars aligned
-    to wall-clock boundaries."""
+def _aggregate_day(src_path: Path, out_tf: str) -> pa.Table:
+    """Aggregate one symbol-date file of 1-min bars onto the `out_tf` grid."""
     table = pq.read_table(src_path)
     if table.num_rows == 0:
         return BAR_SCHEMA.empty_table()
@@ -114,7 +99,6 @@ def _aggregate_day(src_path: Path, n_out_min: int) -> pa.Table:
     close = table.column("close").to_pylist()
     volume = table.column("volume").to_pylist()
     tick_count = table.column("tick_count").to_pylist()
-    source = table.column("source").to_pylist()
 
     out_bucket: list = []
     out_open: list = []
@@ -125,6 +109,10 @@ def _aggregate_day(src_path: Path, n_out_min: int) -> pa.Table:
     out_tick: list = []
     out_source: list = []
 
+    # `{input}/symbol=SYM/date=YYYY-MM-DD/bars.parquet` -> the input root.
+    in_tf = _detect_input_timeframe(src_path.parents[2])
+    derived_src = derived_source(in_tf)
+
     def flush(label: datetime, start: int, end: int) -> None:
         out_bucket.append(label)
         out_open.append(open_[start])
@@ -133,12 +121,12 @@ def _aggregate_day(src_path: Path, n_out_min: int) -> pa.Table:
         out_close.append(close[end - 1])
         out_volume.append(sum(volume[start:end]))
         out_tick.append(sum(tick_count[start:end]))
-        out_source.append(source[start])
+        out_source.append(derived_src)
 
     current_label: datetime | None = None
     chunk_start = 0
     for i, ts in enumerate(bucket):
-        label = _chunk_label(ts, n_out_min)
+        label = align_bucket_start(ts, out_tf)
         if current_label is None:
             current_label = label
             chunk_start = i
@@ -198,7 +186,7 @@ def main() -> int:
     ap.add_argument(
         "--timeframe",
         required=True,
-        help=f"Output timeframe. One of: {', '.join(_TF_MINUTES)}.",
+        help=f"Output timeframe. One of: {', '.join(TIMEFRAME_MINUTES)}.",
     )
     ap.add_argument("--input", type=Path, required=True, help="Input 1-min bars root.")
     ap.add_argument("--output", type=Path, required=True, help="Output bars root.")
@@ -265,7 +253,7 @@ def main() -> int:
             if args.skip_existing and dst.is_file():
                 skipped += 1
                 continue
-            agg = _aggregate_day(src, out_min)
+            agg = _aggregate_day(src, args.timeframe)
             _write(agg, dst)
             in_rows = pq.read_metadata(src).num_rows
             out_rows = agg.num_rows

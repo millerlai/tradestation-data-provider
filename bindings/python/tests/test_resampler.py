@@ -167,7 +167,7 @@ def _bar_1m(
 
 
 def _write_bars(bars_root: Path, bars: list[Bar]) -> None:
-    with BarWriter(bars_root, timeframe="1m") as w:
+    with BarWriter(bars_root) as w:
         for b in bars:
             w.write(b)
 

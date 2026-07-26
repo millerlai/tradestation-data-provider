@@ -34,9 +34,15 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+          # Resolved against the checkout root, *not* the job-level
+          # working-directory (same reason upload-artifact spells out the full
+          # path below). A bare `pyproject.toml` matches nothing since the
+          # Python package moved, which silently drops the dependency hash from
+          # the cache key — so a Dependabot bump to uv.lock would keep restoring
+          # the pre-bump environment forever.
           cache-dependency-glob: |
-            pyproject.toml
-            uv.lock
+            bindings/python/pyproject.toml
+            bindings/python/uv.lock
 
       - name: Set up Python ${{ matrix.python }}
         run: uv python install ${{ matrix.python }}
@@ -49,6 +55,18 @@ jobs:
 
       - name: Format check (ruff format)
         run: uv run ruff format --check .
+
+      - name: Lint the contract tools (ruff, repo-root config)
+        # The two steps above never reach contract/ — their working-directory
+        # is bindings/python. contract/tools/record.py is the neutral fixture
+        # recorder every binding is checked against; it earns that role by
+        # depending on no binding, not by escaping lint. --project keeps the
+        # binding's environment while leaving the working directory at the
+        # repo root, so ruff resolves the root .ruff.toml.
+        working-directory: .
+        run: |
+          uv run --project bindings/python ruff check contract
+          uv run --project bindings/python ruff format --check contract
 
       - name: Type check (mypy)
         # mypy is configured strict on src/ in pyproject.toml; a regression
@@ -74,9 +92,15 @@ jobs:
         uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
+          # Resolved against the checkout root, *not* the job-level
+          # working-directory (same reason upload-artifact spells out the full
+          # path below). A bare `pyproject.toml` matches nothing since the
+          # Python package moved, which silently drops the dependency hash from
+          # the cache key — so a Dependabot bump to uv.lock would keep restoring
+          # the pre-bump environment forever.
           cache-dependency-glob: |
-            pyproject.toml
-            uv.lock
+            bindings/python/pyproject.toml
+            bindings/python/uv.lock
 
       - name: Set up Python 3.12
         run: uv python install 3.12

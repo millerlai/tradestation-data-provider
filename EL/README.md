@@ -28,20 +28,24 @@ TradeStation Chart → TS2Python_Exporter.el → TS2Python.dll → ZMQ PUB → s
 | chart | 行為 |
 | --- | --- |
 | Tick series（`BarType = 0`） | 逐筆送出 |
-| **1 分鐘**（`BarType = 1` 且 `BarInterval = 1`） | 送出完整 OHLC |
-| 其他 intraday 間隔（5 分、15 分、60 分 …） | **閒置**，Print 一次原因 |
-| 日 / 週 / 月 / P&F | 閒置，Print 一次原因 |
+| 1 / 5 / 15 / 30 / 60 分鐘圖 | 依照對應的 timeframe (`1m`, `5m`, 等) 送出完整 OHLC |
+| 日線圖（`BarType = 2`, `BarInterval = 1`） | 以 `1d` timeframe 送出完整 OHLC |
+| 週 / 月 / P&F / 其他不支援的間隔 | **閒置**，並由 DLL 回傳 `-5` 拒收，Print 一次原因 |
+| 秒級圖表 | **閒置**，由 indicator 自行偵測後停止送出，Print 一次原因 |
 
-其他間隔之所以閒置而非送出：`BarType = 1` 涵蓋所有 intraday 分鐘圖，而 wire 目前
-寫死 `bar_1m`。從 5 分鐘圖送出會把 5 分鐘 bar 存進 `timeframe=1m` 分區，下游再從
-這批資料「推導」5m —— 全程沒有任何錯誤訊息。讓圖表安靜下來才是誠實的失敗方式。
+### 秒級圖表為何要另外擋
 
-多 timeframe 將透過 wire 的 `tf` 欄位支援。
+`BarType` 與 `BarInterval` **分不出** 1 秒圖與 1 分鐘圖 —— 兩者都可能回報 `1` / `1`。
+若照 1 分鐘送出，那些 bar 會填進 `bars/timeframe=1m/` 分區，而且下游查不出來：
+`TsStr` 由 `Time` 組出，而 `Time` 只有分鐘解析度，**秒在離開 indicator 之前就沒了**。
 
-> ⚠️ **待驗證**：秒級 chart 可能同樣回報 `BarType = 1`、`BarInterval = 1`，
-> 那樣 1 秒 bar 會通過檢查並被當成 1 分鐘 bar 送出。TradeStation 有
-> `BarType_ext` 可區分秒級與分鐘級 intraday，但各版本取值不同，尚未對照實機確認。
-> 在確認前請只使用分鐘圖。
+擋法不依賴任何版本相關常數：分鐘圖的 `Date` / `Time` 每根 bar 都前進，秒級圖表則會在
+同一分鐘內重複。Indicator 偵測到連續兩根 bar 的 `Date` 與 `Time` 相同（且 `BarType = 1`，
+排除本來就一分鐘多筆的 tick series）就閂住並停止送出。
+
+> TradeStation 另有 `BarType_ext` 可區分秒級與分鐘級 intraday，但各版本取值不同、
+> 未對實機確認，因此**不用**它當判斷依據。若要釘出那些數值：在已知的 1 分鐘圖與
+> 1 秒圖上各 `Print(BarType_ext)` 一次。
 
 ## 設計約束
 

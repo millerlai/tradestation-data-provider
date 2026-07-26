@@ -24,14 +24,26 @@ def test_detect_input_timeframe(tmp_path):
     assert agg._detect_input_timeframe(tmp_path / "bars") == "1m"
 
 
-def test_chunk_label_5m_boundary():
-    # 09:31..09:35 -> 09:35; 09:36..09:40 -> 09:40
-    t = datetime(2026, 4, 18, 13, 31, tzinfo=UTC)  # = 09:31 ET DST
-    assert agg._chunk_label(t, 5) == datetime(2026, 4, 18, 13, 35, tzinfo=UTC)
-    t = datetime(2026, 4, 18, 13, 35, tzinfo=UTC)
-    assert agg._chunk_label(t, 5) == datetime(2026, 4, 18, 13, 35, tzinfo=UTC)
-    t = datetime(2026, 4, 18, 13, 36, tzinfo=UTC)
-    assert agg._chunk_label(t, 5) == datetime(2026, 4, 18, 13, 40, tzinfo=UTC)
+def test_labels_are_left_and_session_anchored_like_the_resampler():
+    """Both writers land in the same timeframe= dirs, so both must use §2.2.
+
+    A right-labelled grid here and a left-labelled one in storage.resampler
+    would not collide loudly — the rows would simply never join.
+    """
+    # 13:30 UTC == 09:30 ET (EDT), the session anchor.
+    assert agg.align_bucket_start(datetime(2026, 4, 18, 13, 31, tzinfo=UTC), "5m") == datetime(
+        2026, 4, 18, 13, 30, tzinfo=UTC
+    )
+    assert agg.align_bucket_start(datetime(2026, 4, 18, 13, 35, tzinfo=UTC), "5m") == datetime(
+        2026, 4, 18, 13, 35, tzinfo=UTC
+    )
+    assert agg.align_bucket_start(datetime(2026, 4, 18, 13, 36, tzinfo=UTC), "5m") == datetime(
+        2026, 4, 18, 13, 35, tzinfo=UTC
+    )
+    # 1h anchors on :30, not on the hour — the RTH open is 09:30.
+    assert agg.align_bucket_start(datetime(2026, 4, 18, 14, 15, tzinfo=UTC), "1h") == datetime(
+        2026, 4, 18, 13, 30, tzinfo=UTC
+    )
 
 
 def test_iter_symbol_dirs_all_skips_dollar(tmp_path):
@@ -66,8 +78,8 @@ def test_iter_date_files(tmp_path):
 
 
 def _make_1m_day(path: Path, n_minutes: int = 5):
-    """Write n_minutes 1-min bars starting at 09:31 ET (= 13:31 UTC DST)."""
-    start = datetime(2026, 4, 18, 13, 31, tzinfo=UTC)
+    """Write n_minutes 1-min bars starting at 09:30 ET (= 13:30 UTC DST)."""
+    start = datetime(2026, 4, 18, 13, 30, tzinfo=UTC)
     rows = []
     for i in range(n_minutes):
         ts = start + timedelta(minutes=i)
@@ -92,11 +104,11 @@ def test_aggregate_day_5m_from_5_1m_bars(tmp_path):
     src = tmp_path / "bars.parquet"
     _make_1m_day(src, n_minutes=5)
 
-    out = agg._aggregate_day(src, 5)
+    out = agg._aggregate_day(src, "5m")
     assert out.num_rows == 1
 
     row = out.to_pylist()[0]
-    assert row["bucket_start"] == datetime(2026, 4, 18, 13, 35, tzinfo=UTC)
+    assert row["bucket_start"] == datetime(2026, 4, 18, 13, 30, tzinfo=UTC)
     assert row["open"] == 100.0
     assert row["close"] == 104.5
     assert row["high"] == 105.0
@@ -104,7 +116,9 @@ def test_aggregate_day_5m_from_5_1m_bars(tmp_path):
     # volumes 1000,2000,3000,4000,5000 -> 15000
     assert row["volume"] == 15000
     assert row["tick_count"] == sum(10 + i for i in range(5))
-    assert row["source"] == "live"
+    # §2.3 — this is a computed bar and has to say so, whatever the input's
+    # source column happened to hold.
+    assert row["source"] == "derived:1m"
 
 
 def test_aggregate_day_empty(tmp_path):
@@ -112,17 +126,17 @@ def test_aggregate_day_empty(tmp_path):
     src.parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(agg.BAR_SCHEMA.empty_table(), src, compression="zstd")
 
-    out = agg._aggregate_day(src, 5)
+    out = agg._aggregate_day(src, "5m")
     assert out.num_rows == 0
 
 
 def test_aggregate_day_two_5m_chunks(tmp_path):
     src = tmp_path / "bars.parquet"
-    _make_1m_day(src, n_minutes=6)  # 09:31..09:36
-    out = agg._aggregate_day(src, 5)
+    _make_1m_day(src, n_minutes=6)  # 09:30..09:35
+    out = agg._aggregate_day(src, "5m")
 
-    # 09:31..09:35 -> first chunk, 09:36 -> second chunk
+    # 09:30..09:34 -> first chunk, 09:35 -> second chunk
     assert out.num_rows == 2
     ts_list = out.column("bucket_start").to_pylist()
-    assert ts_list[0] == datetime(2026, 4, 18, 13, 35, tzinfo=UTC)
-    assert ts_list[1] == datetime(2026, 4, 18, 13, 40, tzinfo=UTC)
+    assert ts_list[0] == datetime(2026, 4, 18, 13, 30, tzinfo=UTC)
+    assert ts_list[1] == datetime(2026, 4, 18, 13, 35, tzinfo=UTC)

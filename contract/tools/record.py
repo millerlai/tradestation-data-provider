@@ -25,7 +25,7 @@ without TradeStation):
 
 Each output line is {"topic": ..., "payload": ...} where `payload` is the
 frame verbatim, before any parsing. Payloads are UTF-8 JSON per
-contract/v2/envelope.md; a frame that fails to decode is recorded with
+contract/v3/envelope.md; a frame that fails to decode is recorded with
 `payload_invalid_utf8` instead so the failure survives into the fixture
 rather than being silently normalised away.
 """
@@ -47,7 +47,7 @@ import zmq
 def fixture_entry(symbol: str, payload: bytes) -> dict[str, str]:
     """Turn one received frame into a fixture line, without interpreting it.
 
-    Payloads are UTF-8 JSON per contract/v2/envelope.md. A frame that does
+    Payloads are UTF-8 JSON per contract/v3/envelope.md. A frame that does
     not decode is preserved under a different key rather than dropped or
     coerced — a fixture that silently omits what the wire actually produced
     is worse than no fixture, because every binding would then be checked
@@ -100,7 +100,11 @@ def main() -> int:
     by_symbol: Counter[str] = Counter()
     latencies_ms: list[float] = []
     n = 0
-    rec = open(args.record, "w", encoding="utf-8", newline="\n") if args.record else None
+    # SIM115 is suppressed below on purpose: the handle is optional and its
+    # lifetime is the loop's, so a `with` would mean either duplicating the
+    # loop body or reaching for an ExitStack. The finally clause already
+    # closes it on every exit path, Ctrl+C included.
+    rec = open(args.record, "w", encoding="utf-8", newline="\n") if args.record else None  # noqa: SIM115
     if rec is not None:
         print(f"[sub] recording to {args.record}", file=sys.stderr)
     try:

@@ -167,7 +167,7 @@ Output lands in `cpp/build/x86-release/stage/bin/`: `TS2Python.dll`, `TS2Python_
 
 ## C ABI
 
-DLL version `EL_DllVersion() == 6`. See [`../contract/error_codes.md`](../contract/error_codes.md) for return codes and [`../contract/compat.md`](../contract/compat.md) for the ABI × wire version matrix.
+DLL version `EL_DllVersion() == 8`. See [`../contract/error_codes.md`](../contract/error_codes.md) for return codes and [`../contract/compat.md`](../contract/compat.md) for the ABI × wire version matrix.
 
 ```c
 int __stdcall EL_DllVersion(void);
@@ -201,7 +201,7 @@ Run the harness against the Python smoke subscriber to verify end-to-end without
 
 ```powershell
 # Terminal A — start the subscriber first
-python scripts/simple_sub.py --latency
+python contract/tools/record.py --latency
 
 # Terminal B — fire the harness
 cpp\Release\TS2Python_TestHarness.exe --mode stress --rate 10000 --seconds 10

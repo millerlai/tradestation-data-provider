@@ -50,7 +50,7 @@
     "sid": {
       "type": "integer",
       "minimum": 0,
-      "description": "Publisher session id — the UTC epoch second stamped at EL_Init."
+      "description": "Publisher session id — the UTC epoch MICROsecond stamped at EL_Init."
     },
     "ts": {
       "type": "number",

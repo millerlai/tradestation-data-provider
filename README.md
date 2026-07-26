@@ -22,11 +22,11 @@ flowchart TB
         direction TB
         TS["TradeStation Desktop"]
         EL["EL Exporter Indicator"]
-        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 7"]
+        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 8"]
         TS --> EL --> DLL
     end
     subgraph CON["Contract — the product"]
-        WIRE["wire v2<br/>2-frame ZMQ · JSON"]
+        WIRE["wire v3<br/>2-frame ZMQ · JSON"]
         SEM["semantics.md<br/>the rules a schema cannot express"]
         FIX["conformance fixtures"]
     end
@@ -105,11 +105,11 @@ Three version numbers move independently; the pairing that matters is in
 
 | Version | Current | Who cares |
 | --- | ---: | --- |
-| Wire (`"v"` in the payload) | 2 | Every binding |
-| DLL ABI (`EL_DllVersion()`) | 7 | Every binding |
-| Python package | 0.1.0 | Python consumers only |
+| Wire (`"v"` in the payload) | 3 | Every binding |
+| DLL ABI (`EL_DllVersion()`) | 8 | Every binding |
+| Python package | 0.2.0 | Python consumers only |
 
-Wire v1 is superseded but **still supported**: the DLL lives inside a user's
+Wire v1 and v2 are superseded but **still supported**: the DLL lives inside a user's
 TradeStation install and does not update when a binding does.
 
 ## Status

@@ -73,23 +73,29 @@ uv add tradestation-data-provider
 poetry add tradestation-data-provider
 ```
 
-直接從 GitHub 安裝（不必等 PyPI）：
+直接從 GitHub 安裝（不必等 PyPI）。Python 套件**不在 repo 根目錄** ——
+根目錄放的是 wire contract、EL indicator 與 C++ bridge —— 所以
+`subdirectory` fragment 是必要的：
 
 ```bash
-pip install "git+https://github.com/millerlai/tradestation-data-provider.git"
-uv add "git+https://github.com/millerlai/tradestation-data-provider.git"
-poetry add "git+https://github.com/millerlai/tradestation-data-provider.git"
+pip install "git+https://github.com/millerlai/tradestation-data-provider.git#subdirectory=bindings/python"
+uv add "git+https://github.com/millerlai/tradestation-data-provider.git#subdirectory=bindings/python"
+poetry add "git+https://github.com/millerlai/tradestation-data-provider.git#subdirectory=bindings/python"
 
 # 釘特定 tag、branch 或 commit
-pip install "git+https://github.com/millerlai/tradestation-data-provider.git@v0.1.0"
+pip install "git+https://github.com/millerlai/tradestation-data-provider.git@v0.2.0#subdirectory=bindings/python"
 ```
+
+> 少了 fragment，pip 會以 *"neither 'setup.py' nor 'pyproject.toml' found"* 失敗。
+> 不加 fragment 的 `...git@v0.1.0` 確實裝得起來 —— 但那只是因為該 tag 早於這次搬移，
+> 等於靜默安裝一個沒有 wire v2/v3 支援的舊套件。
 
 ### 在本專案內開發
 
 ```powershell
 uv sync                       # base deps
 uv sync --extra dev           # + pytest / ruff / mypy
-uv run pytest                 # 272 tests、約 2 秒
+uv run pytest                 # 完整測試套件，數秒
 ```
 
 ## 快速上手
@@ -147,7 +153,6 @@ sinks:
     class: tradestation_data.sinks.parquet:ParquetBarSink
     params:
       root: data/bars
-      timeframe: 1m
       compression: zstd
 
   - name: dispatch

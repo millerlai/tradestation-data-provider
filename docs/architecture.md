@@ -50,7 +50,7 @@ flowchart TB
         direction TB
         TS["TradeStation Desktop"]
         EL["EL Exporter Indicator<br/>TS2Python_Exporter.el"]
-        DLL["TS2Python.dll<br/>C++ / Win32 x86 / ABI 7"]
+        DLL["TS2Python.dll<br/>C++ / Win32 x86 / ABI 8"]
         TS --> EL
         EL -->|"DefineDLLFunc __stdcall"| DLL
     end
@@ -293,9 +293,7 @@ Bar 以 **`bucket_start` 左標籤**表示，區間為半開的 `[t, t+step)`。
 > 對」，但差一根 bar。正因如此它必須是 contract 級規範，且 conformance fixtures 要涵蓋
 > session 首尾兩根 bar。
 
-### 4.3 ⚠️ 缺口：無法偵測資料遺漏
-
-**這是與專業市場資料 API 之間最大的落差。**
+### 4.3 資料遺漏偵測 (Wire v2 導入)
 
 ZeroMQ PUB/SUB 是 fire-and-forget。兩側程式碼都明文承認會靜默丟訊息：
 
@@ -305,15 +303,13 @@ ZeroMQ PUB/SUB 是 fire-and-forget。兩側程式碼都明文承認會靜默丟�
 sock->set(zmq::sockopt::sndhwm, 100000);
 ```
 ```python
-# providers/tradestation_el.py:107
+# tradestation_data/wire/el_subscriber.py
 # Default RCVHWM is 1000 — PUB/SUB silently drops past that when the ...
 self._socket.setsockopt(zmq.RCVHWM, 1_000_000)
 ```
 
-調高 HWM 只降低丟包機率，**subscriber 沒有任何方式知道自己漏了資料**。對於要拿來
-做交易決策與模型訓練的資料流，「靜默缺漏」比「明確報錯」危險得多。
-
-**建議（需 wire 版本升級 + 動 publisher）：**
+調高 HWM 只降低丟包機率，對於要拿來做交易決策與模型訓練的資料流，「靜默缺漏」比「明確報錯」危險得多。
+因此，自 **wire v2** 起，publisher 會提供以下欄位供 subscriber 偵測缺漏：
 
 | 新增欄位 | 型別 | 語意 |
 | --- | --- | --- |
@@ -327,27 +323,23 @@ self._socket.setsockopt(zmq.RCVHWM, 1_000_000)
 - subscriber 端據此可產出 gap 事件與 `messages_lost` 指標，並在 conformance fixtures
   中加入 gap 情境。
 
-> **決策（已採納）** — 實作為 **wire v2**，`EL_DllVersion()` 同步升至 **7**。
-> 「producer 語言固定」指的是實作語言仍為 C++，不代表 publisher 不能演進；缺漏偵測
-> 無法在 subscriber 單側補上，必須由 publisher 提供序號。
->
 > 相容性：subscriber 讀到 `"v": 1`（無 `seq`）時降級為不偵測並記錄一次警告，
 > 不得直接拒收 —— 舊 DLL 仍可能部署在使用者機器上。降級行為列入 `contract/compat.md`。
 
 ### 4.4 版本矩陣
 
 三個版本號各自獨立演進，`ts2python.h` 已明說 DLL 版本「bumps independently of wire
-protocol」，但目前沒有任何地方記錄它們的對應關係：
+protocol」。對應關係記在 [`../contract/compat.md`](../contract/compat.md)：
 
-| 版本 | 現值 | 目標 | 誰在乎 |
-| --- | --- | --- | --- |
-| wire version（payload `"v"`） | 1 | **2**（加 `seq` / `sid`） | 所有 binding |
-| DLL ABI（`EL_DllVersion()`） | 6 | **7** | 所有 binding |
-| Python package version | 0.1.0 | — | 僅 Python 消費端 |
+| 版本 | 現值 | 誰在乎 |
+| --- | --- | --- |
+| wire version（payload `"v"`） | **3**（`kind` 表形狀、`tf` 表區間） | 所有 binding |
+| DLL ABI（`EL_DllVersion()`） | **8** | 所有 binding |
+| Python package version | 0.2.0 | 僅 Python 消費端 |
 
 消費端 pin 的是 package version，但真正決定「能不能通」的是前兩者。
-`contract/compat.md` 就是那張表。`design.md §2` 規劃的 JSON v1 → MessagePack v2
-遷移一旦啟動，這張表就是硬需求。
+v1 與 v2 已被取代但**仍須支援** —— DLL 裝在使用者的 TradeStation 裡，不會隨著
+binding 升級而更新。
 
 ---
 
@@ -442,7 +434,7 @@ config:
 ---
 flowchart LR
     TH["test_harness.exe<br/>--mode smoke/stress/multithread"]
-    REC["simple_sub.py --record<br/>（不依賴 tradestation_data）"]
+    REC["contract/tools/record.py<br/>（不依賴 tradestation_data）"]
     FIX[("contract/fixtures/<br/>*.jsonl + expected/")]
     PY["Python binding tests"]
     GO["Go binding tests"]
@@ -455,21 +447,27 @@ flowchart LR
 ### 6.1 fixtures 必須錄製，不可手寫
 
 手寫的 fixture 只是把假設寫第二遍，抓不到 DLL 真實行為與文件的落差。
-零件已存在，只差串接：
+兩個零件已經串起來了：
 
 - `cpp/src/test_harness.cpp` — *"exercises TS2Python.dll **without TradeStation**"*
-- `scripts/simple_sub.py` — *"intentionally does **not** depend on the
-  `tradestation_data` package"*，正因如此才有資格當中立錄製器（只需加 `--record`）
+- `contract/tools/record.py --record <path>` — *"intentionally does **not** depend
+  on the `tradestation_data` package"*，正因如此才有資格當中立錄製器
+
+唯一的例外是 `v1_legacy.jsonl`：現行 DLL 已不再發 wire v1，
+那份 fixture 因此是照 `contract/v1/envelope.md` 手寫的向下相容樣本。
 
 ### 6.2 必須涵蓋的情境
 
-| 情境 | 為何重要 |
-| --- | --- |
-| breadth symbol（`$TICK` / `$ADD`） | `volume=0`、`bid`/`ask` 為 `null`，易被 binding 誤判 |
-| DST 轉換日 | `ts_str` → UTC 的正確性，跨 binding 最容易不一致 |
-| 盤前 / 半日市 | session 邊界 |
-| multithread 模式 | frame 交錯順序 |
-| gap（若採行 §4.3） | 缺漏偵測本身 |
+| 情境 | 為何重要 | 現況 |
+| --- | --- | --- |
+| breadth symbol（`$TICK` / `$ADD`） | `volume=0`、`bid`/`ask` 為 `null`，易被 binding 誤判 | `noquote` |
+| 非 index symbol 的 null 報價 | 只測 index symbol 分不出 §3.1（publisher 送 null）與 §3.2（binding 判無效） | `noquote` |
+| 非 1m 的 native bar | `tf` → `timeframe=` 分區的對應，出錯下游偵測不到 | `bars` |
+| session 首尾 bar | 左／右標籤是市場資料最典型的靜默錯誤 | `session_edges` |
+| v1 的 `bid:0.000000` | v1 沒有 null，binding 必須自行判 `<= 0` 無效 | `v1_legacy` |
+| DST 轉換日 | `ts_str` → UTC 的正確性，跨 binding 最容易不一致 | 尚無 |
+| multithread 模式 | frame 交錯順序 | 尚無 |
+| gap | 缺漏偵測本身 | 尚無 |
 
 ---
 

@@ -61,6 +61,11 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.10",
     "types-PyYAML>=6",
+    # Runs contract/v*/**.schema.json against the recorded fixtures. Without an
+    # executor those ~570 lines are prose: they declare additionalProperties
+    # false and a required list, so the day the DLL renames a field the schema
+    # becomes wrong and nothing says so.
+    "jsonschema>=4.20",
 ]
 
 [project.scripts]

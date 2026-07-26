@@ -124,7 +124,7 @@ def test_load_bars_falls_back_to_1m_cache_for_index_symbol(tmp_path: Path) -> No
     from tradestation_data.storage.bar_writer import BarWriter
 
     # Populate 1m cache directly for '$TICK' (no tick files for this symbol).
-    with BarWriter(tmp_path / "bars", timeframe="1m") as w:
+    with BarWriter(tmp_path / "bars") as w:
         for i in range(5):
             w.write(
                 Bar(
@@ -176,7 +176,8 @@ def test_different_timeframes_are_independent_caches(tmp_path: Path) -> None:
 
 def test_resampled_bars_are_stamped_as_derived(tmp_path: Path) -> None:
     """Provenance has to be visible on disk, or the guard below cannot work."""
-    from tradestation_data.storage.resampler import Resampler, is_derived
+    from tradestation_data.domain.bar import is_derived
+    from tradestation_data.storage.resampler import Resampler
 
     root = tmp_path / "ticks"
     t0 = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)
@@ -250,40 +251,15 @@ def test_derived_bars_never_overwrite_native_ones(tmp_path: Path) -> None:
             )
 
     store = HistoryStore(root)
+    # rebuild_bar_cache deletes before it rebuilds. Unlink-then-write is an
+    # overwrite spelled differently, so the eviction has to respect the guard
+    # too — otherwise it hands the write side an empty directory to wave
+    # through.
     store.rebuild_bar_cache(
         "SPY",
         datetime(2026, 4, 19, tzinfo=UTC),
         datetime(2026, 4, 22, tzinfo=UTC),
         "1d",
-    )
-
-    # rebuild_bar_cache deletes first, so the native bar is gone from disk and
-    # the derived one lands. What must hold is the guard itself: write it back
-    # and confirm a second rebuild leaves it alone.
-    with BarWriter(bars_root) as w:
-        w.write(
-            Bar(
-                symbol="SPY",
-                bucket_start=day,
-                open=1.0,
-                high=2.0,
-                low=0.5,
-                close=native_close,
-                volume=10,
-                tick_count=3,
-                source="tradestation_el",
-                timeframe="1d",
-            )
-        )
-    store._persist_cache(
-        "SPY",
-        "1d",
-        store._resampler.resample(
-            "SPY",
-            datetime(2026, 4, 19, tzinfo=UTC),
-            datetime(2026, 4, 22, tzinfo=UTC),
-            "1d",
-        ),
     )
 
     out = store.load_bars(
@@ -294,3 +270,41 @@ def test_derived_bars_never_overwrite_native_ones(tmp_path: Path) -> None:
     )
     assert out["close"].to_list() == [native_close]
     assert out["source"].to_list() == ["tradestation_el"]
+    assert list((bars_root / "timeframe=1d").rglob("bars.parquet")), (
+        "the native partition file must survive rebuild_bar_cache"
+    )
+
+
+def test_cache_partitions_on_the_et_date_like_the_writer(tmp_path: Path) -> None:
+    """An EST evening bar must land in the date= dir BarWriter would use.
+
+    BarWriter partitions on ``bucket_start_et.date()``; the cache used to
+    split on the UTC date. From 19:00 ET onwards in EST those differ, and the
+    two failure modes are both silent: the native-data guard inspects a file
+    that isn't there, and ``_load_cached_bars`` globs ``date=*``, so a second
+    derived copy comes back as duplicate rows.
+    """
+    root = tmp_path / "store"
+    # 19:30 ET on 2026-01-05 (EST, UTC-5) == 2026-01-06 00:30 UTC.
+    ts = datetime(2026, 1, 6, 0, 30, tzinfo=UTC)
+    with TickWriter(root / "ticks") as w:
+        for i in range(3):
+            w.write(
+                Tick(
+                    symbol="SPY",
+                    timestamp=ts + timedelta(seconds=10 * i),
+                    price=100.0 + i,
+                    volume=5,
+                    bid=None,
+                    ask=None,
+                    tick_count=1,
+                    source="tradestation_el",
+                )
+            )
+
+    store = HistoryStore(root)
+    df = store.load_bars("SPY", ts - timedelta(hours=2), ts + timedelta(hours=2), "1m")
+    assert df.height == 1
+
+    cache_dir = root / "bars" / "timeframe=1m" / "symbol=SPY"
+    assert [p.name for p in sorted(cache_dir.glob("date=*"))] == ["date=2026-01-05"]

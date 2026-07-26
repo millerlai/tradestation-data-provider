@@ -74,23 +74,29 @@ uv add tradestation-data-provider
 poetry add tradestation-data-provider
 ```
 
-Directly from GitHub (works today, no PyPI account needed):
+Directly from GitHub. The Python package is **not at the repo root** — the
+repo root holds the wire contract, the EL indicator and the C++ bridge — so
+the `subdirectory` fragment is required:
 
 ```bash
-pip install "git+https://github.com/millerlai/tradestation-data-provider.git"
-uv add "git+https://github.com/millerlai/tradestation-data-provider.git"
-poetry add "git+https://github.com/millerlai/tradestation-data-provider.git"
+pip install "git+https://github.com/millerlai/tradestation-data-provider.git#subdirectory=bindings/python"
+uv add "git+https://github.com/millerlai/tradestation-data-provider.git#subdirectory=bindings/python"
+poetry add "git+https://github.com/millerlai/tradestation-data-provider.git#subdirectory=bindings/python"
 
 # Pin to a tag, branch, or commit
-pip install "git+https://github.com/millerlai/tradestation-data-provider.git@v0.1.0"
+pip install "git+https://github.com/millerlai/tradestation-data-provider.git@v0.2.0#subdirectory=bindings/python"
 ```
+
+> Without the fragment pip fails with *"neither 'setup.py' nor 'pyproject.toml'
+> found"*. A bare `...git@v0.1.0` does install — but only because that tag
+> predates the move, so it silently gives you a pre-wire-v2 package.
 
 ### For development on this repo
 
 ```powershell
 uv sync                       # base deps
 uv sync --extra dev           # + pytest / ruff / mypy
-uv run pytest                 # 272 tests, ~2s
+uv run pytest                 # full suite, a few seconds
 ```
 
 ## Quick start
@@ -148,7 +154,6 @@ sinks:
     class: tradestation_data.sinks.parquet:ParquetBarSink
     params:
       root: data/bars
-      timeframe: 1m
       compression: zstd
 
   - name: dispatch

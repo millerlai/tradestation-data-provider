@@ -99,7 +99,7 @@ TS2P_API int TS2P_CALL EL_Shutdown(void);
 
 // Version identifier for this DLL build (bumps independently of the wire
 // protocol version carried in the payload's "v" field). Current pairing is
-// ABI 7 <-> wire 2; see ../contract/compat.md for the full matrix.
+// ABI 8 <-> wire 3; see ../contract/compat.md for the full matrix.
 TS2P_API int TS2P_CALL EL_DllVersion(void);
 
 #ifdef __cplusplus

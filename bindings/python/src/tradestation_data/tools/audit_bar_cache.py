@@ -128,9 +128,17 @@ def _audit_one(
     end: datetime,
 ) -> AuditResult:
     day_str = start.date().isoformat()
-    live = store.load_bars(symbol, start, end, "1m")
     # Rebuild straight from ticks (bypassing cache).
     rebuilt = resampler.resample(symbol, start, end, "1m")
+    # Read the stored side with the *read-only* accessor. load_bars() would
+    # self-heal on a miss by calling this same resampler and writing the
+    # result into timeframe=1m/ — so a day whose bars.parquet is missing, the
+    # exact failure this audit exists to catch, would compare a frame against
+    # itself, report clean, and backfill the native tier with derived numbers.
+    cached = store.load_cached_bars(symbol, start, end, "1m")
+    # An absent cache is "nothing stored", not "nothing to compare": borrow
+    # the rebuilt frame's schema so the join below still lines up.
+    live = rebuilt.clear() if cached is None else cached
     diffs = _compare_dataframes(live, rebuilt)
     return AuditResult(
         symbol=symbol,

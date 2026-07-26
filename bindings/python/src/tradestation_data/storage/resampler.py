@@ -2,47 +2,31 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from enum import StrEnum
 from pathlib import Path
 
 import duckdb
 import polars as pl
 
+from tradestation_data.domain.bar import derived_source
+from tradestation_data.domain.timeframe import TIMEFRAME_MINUTES, Timeframe
+
 log = logging.getLogger(__name__)
 
-
-class Timeframe(StrEnum):
-    M1 = "1m"
-    M5 = "5m"
-    M15 = "15m"
-    M30 = "30m"
-    H1 = "1h"
-    D1 = "1d"
-
-
+# DuckDB INTERVAL literals, derived from the one minutes table so a new
+# Timeframe member cannot be half-added. `1d` is spelled as a calendar day
+# because it is bucketed on the ET clock, where a day is 23 or 25 hours twice
+# a year.
 _INTERVALS: dict[str, str] = {
-    "1m": "1 minute",
-    "5m": "5 minutes",
-    "15m": "15 minutes",
-    "30m": "30 minutes",
-    "1h": "1 hour",
-    "1d": "1 day",
-}
-
-_MINUTES: dict[str, int] = {
-    "1m": 1,
-    "5m": 5,
-    "15m": 15,
-    "30m": 30,
-    "1h": 60,
-    "1d": 60 * 24,
+    tf: ("1 day" if tf == Timeframe.D1 else f"{minutes} minutes")
+    for tf, minutes in TIMEFRAME_MINUTES.items()
 }
 
 # ---- bucket alignment ----------------------------------------------------
 #
-# Buckets are anchored to the trading session, not to the Unix epoch, and the
-# grid is laid out in America/New_York wall-clock time. See
-# contract/semantics.md §2.2.
+# Buckets are anchored to the trading session, not to the Unix epoch. See
+# contract/semantics.md §2.2, and keep this in step with
+# domain.timeframe.align_bucket_start — that function is the Python twin of
+# the SQL below.
 #
 # Anchoring to the epoch (what a bare time_bucket does) happens to be right for
 # 5m/15m/30m — the ET offset is a whole number of hours and 09:30 is a multiple
@@ -53,75 +37,36 @@ _MINUTES: dict[str, int] = {
 #   1d  epoch-aligned splits on UTC midnight, which falls at 20:00 ET — exactly
 #       the end of the extended session. Post-market activity lands on the
 #       following day.
-#
-# Both anchors sit outside the DST fold (the transition is at 02:00 ET), so
-# converting a bucket edge back to UTC is never ambiguous.
-_SESSION_OPEN_LOCAL = "09:30:00"
-
-# 04:00 ET, matching aggregation.session.PRE_SESSION_CUTOFF_LOCAL: the
-# extended session runs 04:00 -> 20:00 ET, and anything before 04:00 belongs to
-# the previous session date. A daily bar must use the same boundary, or the
-# session logic and the daily rollup disagree about which day a bar is in.
+_ANCHOR_DATE = "2000-01-03"
 _SESSION_DATE_CUTOFF_LOCAL = "04:00:00"
 
-_ANCHOR_LOCAL: dict[str, str] = {
-    "1m": _SESSION_OPEN_LOCAL,
-    "5m": _SESSION_OPEN_LOCAL,
-    "15m": _SESSION_OPEN_LOCAL,
-    "30m": _SESSION_OPEN_LOCAL,
-    "1h": _SESSION_OPEN_LOCAL,
-    "1d": _SESSION_DATE_CUTOFF_LOCAL,
-}
-
-# Any date works as an origin; the time-of-day is what sets the grid. Fixed so
-# the SQL is deterministic.
-_ANCHOR_DATE = "2000-01-03"
+# 09:30 ET on the anchor date, as UTC. See domain.timeframe for why the
+# intraday grid is laid out from a UTC origin instead of an ET one.
+_INTRADAY_ORIGIN_UTC_SQL = f"TIMESTAMPTZ '{_ANCHOR_DATE} 14:30:00+00'"
 
 _ET_ZONE = "America/New_York"
-
-# ---- provenance ----------------------------------------------------------
-#
-# A bar that arrived over the wire and a bar we computed are not
-# interchangeable, and until now both carried source="tradestation_el" —
-# resampling copied it through with first(source). That made them
-# indistinguishable on disk, so a derived rollup could overwrite a native bar
-# with nothing to show it had happened.
-#
-# Daily is where this matters most: TradeStation's daily bar carries the
-# exchange's official OHLC and is split/dividend adjusted, neither of which
-# can be reconstructed by summing ticks. A derived 1d bar is an approximation
-# wearing the same shape.
-SOURCE_DERIVED_PREFIX = "derived:"
-
-
-def derived_source(origin: str) -> str:
-    """Provenance marker for a computed bar, e.g. ``derived:1m``."""
-    return f"{SOURCE_DERIVED_PREFIX}{origin}"
-
-
-def is_derived(source: str) -> bool:
-    return source.startswith(SOURCE_DERIVED_PREFIX)
 
 
 def _bucket_expr(column: str, timeframe: str) -> str:
     """SQL that buckets a TIMESTAMPTZ column, session-anchored, back to UTC.
 
-    The round trip through local time is deliberate: bucketing in UTC with a
-    fixed origin would drift by an hour against the session twice a year, when
-    the ET offset changes but the origin does not.
+    Intraday frames (1m..1h) bucket in UTC from a fixed origin. All of them
+    divide the one-hour DST shift evenly, so a UTC grid still lands on 09:30 ET
+    on both sides of a transition — and, unlike an ET wall-clock grid, it stays
+    unambiguous inside the 01:00-02:00 fold, where two instants an hour apart
+    share one wall-clock reading.
+
+    `1d` has to bucket on the ET clock instead, because a calendar day is 23 or
+    25 hours twice a year. That is safe: the 04:00 ET anchor sits outside the
+    fold, so the bucket edge converts back to UTC unambiguously.
     """
     interval = _INTERVALS[timeframe]
-    origin = f"TIMESTAMP '{_ANCHOR_DATE} {_ANCHOR_LOCAL[timeframe]}'"
-    local = f"timezone('{_ET_ZONE}', {column})"
-    bucketed = f"time_bucket(INTERVAL '{interval}', {local}, {origin})"
-    return f"timezone('{_ET_ZONE}', {bucketed})"
-
-
-def timeframe_to_minutes(timeframe: str | Timeframe) -> int:
-    tf = str(timeframe)
-    if tf not in _MINUTES:
-        raise ValueError(f"Unsupported timeframe: {tf!r}. Valid: {list(_MINUTES)}")
-    return _MINUTES[tf]
+    if timeframe == Timeframe.D1:
+        origin = f"TIMESTAMP '{_ANCHOR_DATE} {_SESSION_DATE_CUTOFF_LOCAL}'"
+        local = f"timezone('{_ET_ZONE}', {column})"
+        bucketed = f"time_bucket(INTERVAL '{interval}', {local}, {origin})"
+        return f"timezone('{_ET_ZONE}', {bucketed})"
+    return f"time_bucket(INTERVAL '{interval}', {column}, {_INTRADAY_ORIGIN_UTC_SQL})"
 
 
 _EMPTY_SCHEMA: dict[str, type[pl.DataType]] = {

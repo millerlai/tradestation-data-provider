@@ -12,6 +12,24 @@ CONTRACT_DIR = Path(__file__).resolve().parents[4] / "contract"
 FIXTURES_DIR = CONTRACT_DIR / "fixtures"
 
 
+def pytest_collection_modifyitems(config, items):
+    """Skip this package when contract/ is not on disk.
+
+    The sdist ships tests/ but not contract/ — the fixtures live above the
+    binding root and hatchling's include list cannot reach out of it. So
+    `pip download --no-binary :all:` + `pytest` would otherwise fail with ten
+    FileNotFoundErrors that say nothing about the package. Inside the work
+    tree the directory is always there, which is where these tests matter.
+    """
+    if FIXTURES_DIR.is_dir():
+        return
+    skip = pytest.mark.skip(reason=f"contract fixtures not present at {FIXTURES_DIR} (sdist)")
+    here = Path(__file__).parent
+    for item in items:
+        if here in Path(item.fspath).parents:
+            item.add_marker(skip)
+
+
 def load_case(name: str) -> tuple[list[tuple[str, bytes]], dict]:
     """Return (frames, expected) for one fixture.
 

@@ -777,6 +777,9 @@ async def test_events_logs_and_continues_on_transient_zmq_error(caplog) -> None:
 
     provider = TradeStationELProvider(endpoint="inproc://zmq-warn")
     provider._socket = _StubSocket()  # type: ignore[assignment]
+    # events() drops topics that are not an exact subscription match
+    # (semantics.md §5), and the stub bypasses subscribe().
+    provider._subscribed = {"SPY"}
     gen = provider.events()
     with caplog.at_level("WARNING", logger="tradestation_data.wire.el_subscriber"):
         event = await anext(gen)
@@ -820,25 +823,25 @@ def _tracker():
 def test_sequence_first_message_sets_baseline_without_reporting_loss() -> None:
     """A late subscriber joining mid-stream did not lose what it never asked for."""
     t = _tracker()
-    assert t.observe("SPY", 21, 7001) == 0
+    t.observe("SPY", 21, 7001)
     assert t.messages_lost == 0
 
 
 def test_sequence_contiguous_reports_no_loss() -> None:
     t = _tracker()
     t.observe("SPY", 1, 7001)
-    assert t.observe("SPY", 2, 7001) == 0
-    assert t.observe("SPY", 3, 7001) == 0
+    t.observe("SPY", 2, 7001)
+    t.observe("SPY", 3, 7001)
     assert t.messages_lost == 0
 
 
 def test_sequence_gap_is_counted() -> None:
     t = _tracker()
     t.observe("SPY", 1, 7001)
-    assert t.observe("SPY", 5, 7001) == 3  # 2, 3, 4 never arrived
+    t.observe("SPY", 5, 7001)  # 2, 3, 4 never arrived
     assert t.messages_lost == 3
     # Tracking resumes from the message that did arrive.
-    assert t.observe("SPY", 6, 7001) == 0
+    t.observe("SPY", 6, 7001)
     assert t.messages_lost == 3
 
 
@@ -847,8 +850,8 @@ def test_sequence_is_tracked_per_symbol() -> None:
     t = _tracker()
     t.observe("SPY", 1, 7001)
     t.observe("QQQ", 1, 7001)
-    assert t.observe("SPY", 2, 7001) == 0
-    assert t.observe("QQQ", 2, 7001) == 0
+    t.observe("SPY", 2, 7001)
+    t.observe("QQQ", 2, 7001)
     assert t.messages_lost == 0
 
 
@@ -857,9 +860,10 @@ def test_publisher_restart_resets_instead_of_reporting_huge_loss() -> None:
     t = _tracker()
     t.observe("SPY", 900, 7001)
     t.observe("SPY", 901, 7001)
-    assert t.observe("SPY", 1, 7002) == 0
+    t.observe("SPY", 1, 7002)
     assert t.messages_lost == 0
-    assert t.observe("SPY", 2, 7002) == 0
+    t.observe("SPY", 2, 7002)
+    assert t.messages_lost == 0
 
 
 def test_sequence_regression_does_not_rewind_expectation() -> None:
@@ -867,9 +871,10 @@ def test_sequence_regression_does_not_rewind_expectation() -> None:
     t = _tracker()
     t.observe("SPY", 1, 7001)
     t.observe("SPY", 2, 7001)
-    assert t.observe("SPY", 2, 7001) == 0  # duplicate
+    t.observe("SPY", 2, 7001)  # duplicate
     assert t.messages_lost == 0
-    assert t.observe("SPY", 3, 7001) == 0  # still expected 3
+    t.observe("SPY", 3, 7001)  # still expected 3
+    assert t.messages_lost == 0
 
 
 @pytest.mark.asyncio
@@ -880,9 +885,12 @@ async def test_provider_parses_v2_and_exposes_messages_lost(zmq_inproc_bus) -> N
     await provider.subscribe(["SPY"])
     await asyncio.sleep(0)
 
+    assert provider.messages_lost is None  # nothing seen yet — cannot tell
+
     await _publish(pub, "SPY", _v2(1))
     tick, gen = await _next_tick(provider)
     assert tick.price == pytest.approx(450.0)
+    assert provider.gap_detection_available is True
     assert provider.messages_lost == 0
 
     await _publish(pub, "SPY", _v2(4, px=451.0))
@@ -912,7 +920,10 @@ async def test_v1_payload_still_accepted_after_v2_support(zmq_inproc_bus) -> Non
 
     tick, gen = await _next_tick(provider)
     assert tick.price == pytest.approx(450.23)
-    assert provider.messages_lost == 0  # "cannot tell", not "none lost"
+    # semantics.md §6.6 — v1 carries no seq, so the honest answer is "cannot
+    # tell". Reporting 0 would let a caller record the day as verified-clean.
+    assert provider.messages_lost is None
+    assert provider.gap_detection_available is False
 
     await gen.aclose()
     await provider.close()
@@ -1052,6 +1063,82 @@ async def test_v3_bar_with_unknown_timeframe_is_refused(zmq_inproc_bus) -> None:
     gen = provider.events()
     bar = await asyncio.wait_for(anext(gen), timeout=1.0)
     assert bar.timeframe == "5m"  # the 4h frame was dropped, stream continued
+
+    await gen.aclose()
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_v3_bar_without_tf_is_refused_not_defaulted(zmq_inproc_bus) -> None:
+    """compat.md — on v3 `tf` is required, and a missing one must not default.
+
+    Filing an unknown interval as 1m puts it in the native 1-minute partition,
+    where nothing downstream can tell it apart from real minute data.
+    """
+    ctx, pub, endpoint = zmq_inproc_bus
+    provider = TradeStationELProvider(endpoint=endpoint, context=ctx)
+    await provider.connect()
+    await provider.subscribe(["SPY"])
+    await asyncio.sleep(0)
+
+    headless = _v3_bar("5m")
+    del headless["tf"]
+    await _publish(pub, "SPY", headless)
+    await _publish(pub, "SPY", _v3_bar("5m", seq=2))
+
+    gen = provider.events()
+    bar = await asyncio.wait_for(anext(gen), timeout=1.0)
+    assert bar.timeframe == "5m"  # the tf-less frame was dropped, not filed as 1m
+
+    await gen.aclose()
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_native_daily_bar_is_aligned_to_the_session_anchor(zmq_inproc_bus) -> None:
+    """§2.2 — EL stamps a daily bar with its chart's own time, not 04:00 ET.
+
+    Left as sent, the same trading day would exist twice in
+    bars/timeframe=1d/: once at whatever EL said, once at the 04:00 ET anchor
+    a derived daily uses.
+    """
+    ctx, pub, endpoint = zmq_inproc_bus
+    provider = TradeStationELProvider(endpoint=endpoint, context=ctx)
+    await provider.connect()
+    await provider.subscribe(["SPY"])
+    await asyncio.sleep(0)
+
+    await _publish(pub, "SPY", _v3_bar("1d"))  # ts_str is 09:30 ET
+    gen = provider.events()
+    bar = await asyncio.wait_for(anext(gen), timeout=1.0)
+    # 04:00 EDT on the same session date.
+    assert bar.bucket_start == datetime(2026, 4, 20, 8, 0, tzinfo=UTC)
+
+    await gen.aclose()
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_prefix_matched_topic_is_dropped(zmq_inproc_bus) -> None:
+    """semantics.md §5 — SUBSCRIBE is a prefix match; SPY also receives SPYG.
+
+    Without an exact-equality pass the runtime would build a MarketSnapshot
+    and start writing symbol=SPYG/ partitions for a symbol never subscribed.
+    """
+    ctx, pub, endpoint = zmq_inproc_bus
+    provider = TradeStationELProvider(endpoint=endpoint, context=ctx)
+    await provider.connect()
+    await provider.subscribe(["SPY"])
+    await asyncio.sleep(0)
+
+    ts_epoch = datetime(2026, 4, 20, 13, 30, tzinfo=UTC).timestamp()
+    spyg = {"v": 3, "kind": "tick", "seq": 1, "sid": 7001, "ts": ts_epoch, "px": 1.0, "tc": 1}
+    await _publish(pub, "SPYG", spyg)
+    await _publish(pub, "SPY", _v2(1, px=450.0))
+
+    gen = provider.events()
+    event = await asyncio.wait_for(anext(gen), timeout=1.0)
+    assert event.symbol == "SPY", "SPYG frame must not surface on a SPY subscription"
 
     await gen.aclose()
     await provider.close()

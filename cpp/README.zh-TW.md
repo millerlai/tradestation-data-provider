@@ -168,7 +168,7 @@ cmake --install build/x86-release --prefix build/x86-release/stage
 
 ## C ABI
 
-DLL 版本 `EL_DllVersion() == 6`。return codes 見 [`../contract/error_codes.md`](../contract/error_codes.md)，ABI × wire 版本對應見 [`../contract/compat.md`](../contract/compat.md)。
+DLL 版本 `EL_DllVersion() == 8`。return codes 見 [`../contract/error_codes.md`](../contract/error_codes.md)，ABI × wire 版本對應見 [`../contract/compat.md`](../contract/compat.md)。
 
 ```c
 int __stdcall EL_DllVersion(void);
@@ -202,7 +202,7 @@ DLL 在第一次成功 `EL_Init` 時，**把自己 pin 在 host process 的位�
 
 ```powershell
 # Terminal A — 先跑 subscriber
-python scripts/simple_sub.py --latency
+python contract/tools/record.py --latency
 
 # Terminal B — 跑 harness
 cpp\Release\TS2Python_TestHarness.exe --mode stress --rate 10000 --seconds 10

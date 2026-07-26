@@ -161,7 +161,7 @@ def test_writer_partitions_on_the_bar_timeframe_not_its_own(tmp_path) -> None:
             timeframe=tf,
         )
 
-    with BarWriter(root, timeframe="1m") as w:
+    with BarWriter(root) as w:
         w.write(_bar("1m"))
         w.write(_bar("5m"))
         w.write(_bar("1d"))

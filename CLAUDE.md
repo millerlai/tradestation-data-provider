@@ -21,7 +21,7 @@ implementation — this repo has already had a spec drift into describing fields
 no longer emitted, unnoticed, because nothing checked. Anything a second binding would
 have to guess belongs in `contract/semantics.md`, with a fixture.
 
-- Wire v2 / DLL ABI 7 is current; v1 is superseded but **still supported** — the DLL sits
+- Wire v3 / DLL ABI 8 is current; v1 and v2 are superseded but **still supported** — the DLL sits
   in the user's TradeStation install and does not update when a binding does.
 - Python 3.11–3.14, managed with **uv**; all four are in the CI matrix. There is
   deliberately no `.python-version` — one would override `uv sync --python <v>`, leaving
@@ -32,9 +32,14 @@ have to guess belongs in `contract/semantics.md`, with a fixture.
 - Wrapper scripts in `bindings/python/scripts/` shell out to `uv run` via `_common.py`.
 - `contract/tools/record.py` deliberately imports **no binding** — that independence is
   what qualifies it to record the fixtures every binding is checked against.
-- **No strategy / broker / risk wiring lives here.** `domain/` is exactly `Tick` and
-  `Bar`: the value range of the wire. A new domain type with no counterpart on the wire
-  means scope is leaking back in.
+- **No strategy / broker / risk wiring lives here.** `domain/` is `Tick`, `Bar`, and
+  `Timeframe` — the value range of the wire, `tf` included. A new domain type with no
+  counterpart on the wire means scope is leaking back in.
+- `domain/timeframe.py` is the single source for the timeframe vocabulary: the enum,
+  the minutes table, the wire allow-list, the Tier-3 default, and `align_bucket_start`
+  (the Python twin of `resampler._bucket_expr`). Adding an interval should be one edit
+  there, not six scattered ones — and any new interval must divide one hour, or the
+  intraday grid stops surviving DST (`contract/semantics.md` §2.2).
 
 ## Commands
 
@@ -80,7 +85,10 @@ python contract/tools/record.py --count 6 --quiet --record contract/fixtures/smo
 ```
 
 Harness modes: `smoke` (3 topics + one bar), `noquote` (bid/ask absent, the
-history-replay shape), `stress`, `multithread`.
+history-replay shape, on both an index and a non-index symbol), `bars` (every
+non-1m `tf` plus the `-5` refusal path), `session` (RTH first/last bar),
+`stress`, `multithread`. Each fixture's mode and frame count is tabulated in
+`contract/fixtures/README.md`.
 
 Pytest is configured with `pythonpath = ["src"]`, `asyncio_mode = "auto"`, and
 `filterwarnings = ["error", ...]` — **a new warning fails the build**; fix the cause

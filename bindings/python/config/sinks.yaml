@@ -18,7 +18,6 @@ sinks:
       # at the CLI with --data-root if you want to keep this YAML
       # generic across machines.
       root: data/bars
-      timeframe: 1m
       compression: zstd
 
   - name: ticks_parquet
