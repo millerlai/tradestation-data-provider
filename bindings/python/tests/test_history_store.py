@@ -66,6 +66,15 @@ def test_cache_miss_and_hit_agree_on_the_et_column(tmp_path: Path) -> None:
     assert miss["bucket_start_et"].to_list() == hit["bucket_start_et"].to_list()
     assert miss["bucket_start"].to_list() == hit["bucket_start"].to_list()
 
+    # Comparing instants alone is not enough, and this test used to do only
+    # that. DuckDB re-labels every TIMESTAMPTZ with the session zone, so the
+    # hit path handed back an ET column declared UTC: identical instants,
+    # and `.dt.hour()` answering 13 instead of 9 — which of the two you got
+    # depended on whether anyone had warmed that range before.
+    assert miss.schema["bucket_start_et"] == hit.schema["bucket_start_et"]
+    assert hit.schema["bucket_start_et"].time_zone == "America/New_York"
+    assert miss["bucket_start_et"].dt.hour().to_list() == hit["bucket_start_et"].dt.hour().to_list()
+
 
 def test_load_bars_cache_miss_builds_and_persists(tmp_path: Path) -> None:
     _populate_ticks(
@@ -413,3 +422,51 @@ def test_daily_reads_the_single_file_layout(tmp_path: Path) -> None:
         "1d",
     )
     assert out["close"].to_list() == [450.0, 451.0, 452.0]
+
+
+def test_et_columns_keep_their_zone_through_every_read_path(tmp_path: Path) -> None:
+    """`*_et` exists so downstream never converts at query time.
+
+    A column labelled UTC defeats that silently: the instant is right, so
+    nothing raises, but every wall-clock question asked of it — which
+    session, is this RTH — is answered in the wrong zone.
+    """
+    from tradestation_data.domain.bar import Bar
+    from tradestation_data.storage.bar_writer import BarWriter
+
+    _populate_ticks(tmp_path, [_tick("SPY", T0 + timedelta(seconds=5), 450.0)])
+    with BarWriter(tmp_path / "bars") as w:
+        w.write(
+            Bar(
+                symbol="SPY",
+                bucket_start=datetime(2026, 4, 20, 8, 0, tzinfo=UTC),
+                open=1.0,
+                high=2.0,
+                low=0.5,
+                close=450.0,
+                volume=10,
+                tick_count=3,
+                source="tradestation_el",
+                timeframe="1d",
+            )
+        )
+    store = HistoryStore(tmp_path)
+
+    ticks = store.load_ticks("SPY", T0, T0 + timedelta(minutes=5))
+    assert ticks.schema["timestamp_et"].time_zone == "America/New_York"
+    # T0 is 13:30 UTC = 09:30 EDT.
+    assert ticks["timestamp_et"].dt.hour().to_list() == [9]
+
+    bars = store.load_bars("SPY", T0, T0 + timedelta(minutes=5), "5m")
+    assert bars.schema["bucket_start_et"].time_zone == "America/New_York"
+    assert bars["bucket_start_et"].dt.hour().to_list() == [9]
+
+    # The single-file layout reads through the same path.
+    daily = store.load_bars(
+        "SPY",
+        datetime(2026, 4, 19, tzinfo=UTC),
+        datetime(2026, 4, 22, tzinfo=UTC),
+        "1d",
+    )
+    assert daily.schema["bucket_start_et"].time_zone == "America/New_York"
+    assert daily["bucket_start_et"].dt.hour().to_list() == [4]  # the 04:00 ET anchor
