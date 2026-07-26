@@ -41,7 +41,7 @@ cd cpp
 | --- | --- |
 | Tick series（`BarType = 0`） | 逐筆送出 |
 | 1 / 5 / 15 / 30 / 60 分鐘圖 | 依照對應的 timeframe (`1m`, `5m`, 等) 送出完整 OHLC |
-| 日線圖（`BarType = 2`, `BarInterval = 1`） | 以 `1d` timeframe 送出完整 OHLC |
+| 日線圖（`BarType = 2`, `BarInterval = 0` 或 `1`） | 以 `1d` timeframe 送出完整 OHLC。TradeStation 10 實測回報 `0`；`1` 也收，那是實機量測前 ABI 寫定的值 |
 | 週 / 月 / P&F / 其他不支援的間隔 | **閒置**，並由 DLL 回傳 `-5` 拒收，Print 一次原因 |
 | 秒級圖表 | **閒置**，由 indicator 自行偵測後停止送出，Print 一次原因 |
 

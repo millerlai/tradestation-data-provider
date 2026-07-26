@@ -171,7 +171,8 @@ int run_bars(const Options& o) {
         {1, 15,  "15m"},
         {1, 30,  "30m"},
         {1, 60,  "1h"},
-        {2,  1,  "1d"},
+        {2,  0,  "1d (BarInterval 0 — what TradeStation 10 reports)"},
+        {2,  1,  "1d (BarInterval 1 — what the ABI documented first)"},
     };
     for (const auto& c : mappable) {
         const int rc = EL_PublishBar("SPY", ts_el, c.bar_type, c.bar_interval,
@@ -198,6 +199,7 @@ int run_bars(const Options& o) {
     const Case refused[] = {
         {1,  2, "2 minute"},
         {3,  1, "weekly"},
+        {2,  2, "2 day"},   // BarType 2 accepts 0/1 only; 2 is a day multiplier
     };
     for (const auto& c : refused) {
         const int rc = EL_PublishBar("SPY", ts_el, c.bar_type, c.bar_interval,
@@ -208,7 +210,7 @@ int run_bars(const Options& o) {
             return 3;
         }
     }
-    std::printf("[harness] bars: 6 published, 2 refused with rc=-5\n");
+    std::printf("[harness] bars: 7 published, 3 refused with rc=-5\n");
     return 0;
 }
 

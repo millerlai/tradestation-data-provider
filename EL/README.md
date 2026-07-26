@@ -45,7 +45,7 @@ ready-made binaries. See [`../cpp/README.md`](../cpp/README.md) for the details.
 | --- | --- |
 | Tick series (`BarType = 0`) | sent print by print |
 | 1 / 5 / 15 / 30 / 60 minute | full OHLC sent under the matching timeframe (`1m`, `5m`, …) |
-| Daily (`BarType = 2`, `BarInterval = 1`) | full OHLC sent under the `1d` timeframe |
+| Daily (`BarType = 2`, `BarInterval = 0` or `1`) | full OHLC sent under the `1d` timeframe. TradeStation 10 reports `0` here — `1` is accepted too, because that is what the ABI documented before a live install was measured |
 | Weekly / monthly / P&F / any other unsupported interval | **idle**; the DLL rejects it with `-5` and the reason is printed once |
 | Second-based charts | **idle**; the indicator detects it itself, stops sending, and prints the reason once |
 

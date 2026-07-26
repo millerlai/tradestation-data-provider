@@ -124,7 +124,16 @@ const char* wire_timeframe(int bar_type, int bar_interval) {
             default: return nullptr;
         }
     }
-    if (bar_type == 2 && bar_interval == 1) return "1d";   // daily
+    // Daily. TradeStation 10 reports BarInterval = 0 on a daily chart, not 1
+    // — measured on a live install, where an SPY daily chart logged
+    // "bar_type=2.00 bar_interval=0.00" and this function refused it with -5.
+    // 1 is accepted alongside it because that is what the ABI has documented
+    // since it shipped, and the DLL sits in installs this repo cannot see.
+    //
+    // Values above 1 are still refused rather than folded into "1d": on
+    // BarType 2 the interval is a day multiplier, so a 2-day chart would
+    // otherwise land in the 1d partition looking exactly like real daily data.
+    if (bar_type == 2 && (bar_interval == 0 || bar_interval == 1)) return "1d";
     return nullptr;                                        // weekly/monthly/P&F/...
 }
 
