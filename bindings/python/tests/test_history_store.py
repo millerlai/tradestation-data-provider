@@ -31,6 +31,118 @@ def _populate_ticks(root: Path, ticks: list[Tick]) -> None:
             w.write(t)
 
 
+# ---- day-unit cache coverage ----------------------------------------------
+#
+# The cache unit is one ET calendar day, so "the partition file exists" has to
+# mean "that day is fully built". These pin the three ways that can go wrong.
+
+
+def _day_ticks(symbol: str, day: datetime, n: int = 10) -> list[Tick]:
+    """`n` one-minute ticks starting 09:30 ET on `day`."""
+    return [_tick(symbol, day + timedelta(minutes=i), 450.0 + i) for i in range(n)]
+
+
+def _cache_days(root: Path, symbol: str, tf: str) -> list[str]:
+    cache_dir = root / "bars" / f"timeframe={tf}" / f"symbol={symbol}"
+    return sorted(p.parent.name for p in cache_dir.rglob("bars.parquet"))
+
+
+def test_partially_cached_range_builds_the_missing_days(tmp_path: Path) -> None:
+    """A range with one day cached used to count as a full hit.
+
+    `_load_cached_bars` returned rows as soon as *any* matched, so a multi-day
+    query served whatever happened to be warm and silently dropped the rest —
+    no error, no log line, just a short series.
+    """
+    d1 = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)  # Mon 09:30 ET
+    d2 = d1 + timedelta(days=1)
+    d3 = d1 + timedelta(days=2)
+    _populate_ticks(tmp_path, _day_ticks("SPY", d1) + _day_ticks("SPY", d2) + _day_ticks("SPY", d3))
+    store = HistoryStore(tmp_path)
+
+    store.load_bars("SPY", d1, d1 + timedelta(minutes=10), "5m")
+    assert _cache_days(tmp_path, "SPY", "5m") == ["date=2026-04-20"]
+
+    spanning = store.load_bars("SPY", d1, d3 + timedelta(minutes=10), "5m")
+    assert _cache_days(tmp_path, "SPY", "5m") == [
+        "date=2026-04-20",
+        "date=2026-04-21",
+        "date=2026-04-22",
+    ]
+    assert spanning["bucket_start_et"].dt.date().n_unique() == 3
+
+
+def test_a_day_with_no_session_is_cached_once_ingestion_brackets_it(tmp_path: Path) -> None:
+    """A holiday between two ingested days is a real "nothing traded" answer.
+
+    Without recording it, every repeat query re-scans the whole tick tree to
+    rediscover the same emptiness. It is only safe to record because ticks
+    exist on both sides: ingestion was running across the gap.
+    """
+    fri = datetime(2026, 4, 17, 13, 30, tzinfo=UTC)
+    mon = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)  # Sat/Sun in between
+    _populate_ticks(tmp_path, _day_ticks("SPY", fri) + _day_ticks("SPY", mon))
+    store = HistoryStore(tmp_path)
+
+    store.load_bars("SPY", fri, mon + timedelta(minutes=10), "5m")
+    days = _cache_days(tmp_path, "SPY", "5m")
+    assert "date=2026-04-18" in days, "the bracketed Saturday must be recorded as empty"
+    assert "date=2026-04-19" in days
+
+    sat = tmp_path / "bars/timeframe=5m/symbol=SPY/date=2026-04-18/bars.parquet"
+    assert pl.read_parquet(sat).height == 0
+
+    # And it is a hit now: the answer survives the ticks going away.
+    for p in (tmp_path / "ticks").rglob("*.parquet"):
+        p.unlink()
+    again = store.load_bars(
+        "SPY", datetime(2026, 4, 18, tzinfo=UTC), datetime(2026, 4, 19, tzinfo=UTC), "5m"
+    )
+    assert again.height == 0
+
+
+def test_a_day_past_the_last_ingested_one_is_never_cached_empty(tmp_path: Path) -> None:
+    """Beyond the ingested span, "no ticks" means "not ingested yet".
+
+    Recording that as an empty day is how a cache poisons itself: the bars
+    would never be built once the ticks finally arrive.
+    """
+    d1 = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)
+    _populate_ticks(tmp_path, _day_ticks("SPY", d1))
+    store = HistoryStore(tmp_path)
+
+    store.load_bars("SPY", d1, d1 + timedelta(days=10), "5m")
+    assert _cache_days(tmp_path, "SPY", "5m") == ["date=2026-04-20"]
+
+    # Nothing at all for a symbol that was never recorded.
+    store.load_bars("NOSUCH", d1, d1 + timedelta(days=10), "5m")
+    assert _cache_days(tmp_path, "NOSUCH", "5m") == []
+
+    # Late ticks for a day beyond the span still build, because nothing
+    # claimed that day was empty.
+    _populate_ticks(tmp_path, _day_ticks("SPY", d1 + timedelta(days=3)))
+    late = store.load_bars("SPY", d1 + timedelta(days=3), d1 + timedelta(days=3, minutes=10), "5m")
+    assert late.height > 0
+
+
+def test_cache_hit_and_cache_miss_return_the_same_schema(tmp_path: Path) -> None:
+    """The miss path built its frame; the hit path read it back off disk with
+    the hive keys still attached. Ten columns one call, twelve the next —
+    `pl.concat` over a symbol loop raised ShapeError depending only on which
+    ranges someone had warmed before.
+    """
+    d1 = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)
+    _populate_ticks(tmp_path, _day_ticks("SPY", d1))
+    store = HistoryStore(tmp_path)
+
+    miss = store.load_bars("SPY", d1, d1 + timedelta(minutes=10), "5m")
+    hit = store.load_bars("SPY", d1, d1 + timedelta(minutes=10), "5m")
+    assert miss.height > 0 and hit.height == miss.height
+    assert hit.schema == miss.schema
+    assert "date" not in hit.columns and "timeframe" not in hit.columns
+    assert pl.concat([miss, hit]).height == 2 * miss.height
+
+
 def test_load_ticks_returns_rows_in_window(tmp_path: Path) -> None:
     _populate_ticks(
         tmp_path,
@@ -272,13 +384,17 @@ def test_rebuilding_one_window_keeps_the_rest_of_the_day(tmp_path: Path) -> None
     store = HistoryStore(tmp_path)
     part = tmp_path / "bars" / "timeframe=5m" / "symbol=SPY" / "date=2026-04-20" / "bars.parquet"
 
+    # A narrow window still builds the whole ET day — that is what lets the
+    # partition's presence mean "this day is done".
     store.load_bars("SPY", pre_open, pre_open + timedelta(minutes=20), "5m")
-    pre_rows = pl.read_parquet(part).height
-    assert pre_rows == 4
+    whole_day = pl.read_parquet(part).height
+    assert whole_day == 16, "4 pre-market + 12 RTH buckets"
 
-    store.load_bars("SPY", rth, rth + timedelta(hours=1), "5m")
+    # And a rebuild scoped to one window must not shrink it back to that
+    # window. `pq.write_table` overwrites, so this is the write path's job.
+    store.rebuild_bar_cache("SPY", rth, rth + timedelta(hours=1), "5m")
     after = pl.read_parquet(part)
-    assert after.height == pre_rows + 12, "the pre-market bars must survive the RTH rebuild"
+    assert after.height == whole_day, "the pre-market bars must survive an RTH-scoped rebuild"
     assert after["bucket_start"].is_sorted()
     assert after["bucket_start"].n_unique() == after.height
 

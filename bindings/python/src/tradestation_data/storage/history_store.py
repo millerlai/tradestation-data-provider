@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import UTC, date, datetime, time, timedelta
 from glob import glob
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import duckdb
 import polars as pl
@@ -60,11 +61,46 @@ _EMPTY_BAR_SCHEMA: dict[str, type[pl.DataType] | pl.DataType] = {
     "tick_count": pl.Int32,
     "source": pl.Utf8,
     "symbol": pl.Utf8,
-    # `timeframe` is the hive key of the single-file `1d` layout, so a read
-    # that hits the file carries it. This dict is only ever returned for
-    # NATIVE_ONLY_TIMEFRAMES, which is exactly that layout.
-    "timeframe": pl.Utf8,
 }
+
+# The one shape `load_bars` answers in, whichever path produced it.
+_BAR_COLUMNS = list(_EMPTY_BAR_SCHEMA)
+
+_ET_TZ = ZoneInfo(_ET_ZONE)
+
+
+def _empty_bars(symbol: str) -> pl.DataFrame:
+    return pl.DataFrame(schema=_EMPTY_BAR_SCHEMA).with_columns(pl.lit(symbol).alias("symbol"))
+
+
+def _et_days(start: datetime, end: datetime) -> list[date]:
+    """Every ET calendar date the window touches.
+
+    ET rather than UTC because that is what both writers partition on
+    (`TickWriter.write`, `BarWriter.write`) — a 19:00 EST bar belongs to the
+    day it traded, not to the UTC day it rolled into.
+    """
+    first = start.astimezone(_ET_TZ).date()
+    last = end.astimezone(_ET_TZ).date()
+    return [first + timedelta(days=i) for i in range((last - first).days + 1)]
+
+
+def _et_day_bounds(day: date) -> tuple[datetime, datetime]:
+    """One whole ET calendar day, as UTC instants — 23 or 25 hours twice a year.
+
+    Built from ET midnights rather than by adding 24 hours, so the DST days
+    come out the right length instead of losing or repeating an hour.
+    """
+    lo = datetime.combine(day, time.min, tzinfo=_ET_TZ)
+    hi = datetime.combine(day + timedelta(days=1), time.min, tzinfo=_ET_TZ)
+    return lo.astimezone(UTC), hi.astimezone(UTC)
+
+
+def _day_from_partition(dirname: str) -> date | None:
+    try:
+        return date.fromisoformat(dirname.removeprefix("date="))
+    except ValueError:
+        return None
 
 
 class HistoryStore:
@@ -125,9 +161,6 @@ class HistoryStore:
         timeframe: str | Timeframe,
     ) -> pl.DataFrame:
         tf = str(timeframe)
-        cached = self._load_cached_bars(symbol, start, end, tf)
-        if cached is not None and cached.height > 0:
-            return cached
         if tf in NATIVE_ONLY_TIMEFRAMES:
             # Not a cache miss — there is nothing to miss. A `1d` bar is only
             # ever what TradeStation published, so an empty answer is the
@@ -135,14 +168,17 @@ class HistoryStore:
             # that looks right, carries neither the exchange's official close
             # nor the split/dividend adjustment, and is indistinguishable
             # from the real thing once persisted. §2.3.
-            log.info(
-                "native_only_timeframe_not_cached",
-                extra={"symbol": symbol, "timeframe": tf},
-            )
-            return pl.DataFrame(schema=_EMPTY_BAR_SCHEMA).with_columns(
-                pl.lit(symbol).alias("symbol")
-            )
-        return self._miss_build_and_return(symbol, start, end, tf)
+            cached = self._load_cached_bars(symbol, start, end, tf)
+            if cached is None:
+                log.info(
+                    "native_only_timeframe_not_cached",
+                    extra={"symbol": symbol, "timeframe": tf},
+                )
+                return _empty_bars(symbol)
+            return cached
+        self._build_missing_days(symbol, tf, _et_days(start, end))
+        cached = self._load_cached_bars(symbol, start, end, tf)
+        return _empty_bars(symbol) if cached is None else cached
 
     def load_cached_bars(
         self,
@@ -178,7 +214,9 @@ class HistoryStore:
                 "Re-export it from TradeStation instead."
             )
         self._delete_cache(symbol, tf)
-        return self._miss_build_and_return(symbol, start, end, tf)
+        self._build_missing_days(symbol, tf, _et_days(start, end))
+        cached = self._load_cached_bars(symbol, start, end, tf)
+        return _empty_bars(symbol) if cached is None else cached
 
     # ----- internals ------------------------------------------------
 
@@ -214,11 +252,52 @@ class HistoryStore:
             ).pl()
         finally:
             con.close()
-        return _restore_et_zone(df)
+        # Select the canonical columns, in order. `hive_partitioning` bolts the
+        # path keys (`date`, `timeframe`) onto the read, which the build path
+        # never had: a hit answered 12 columns and a miss 10, so whether a
+        # caller could stack two results depended only on which ranges someone
+        # had warmed before.
+        return _restore_et_zone(df).select(_BAR_COLUMNS)
 
-    def _miss_build_and_return(
-        self, symbol: str, start: datetime, end: datetime, timeframe: str
-    ) -> pl.DataFrame:
+    def _ingested_days(self, symbol: str, timeframe: str) -> list[date]:
+        """ET days for which the *source* tier holds a partition.
+
+        Tier 1 for everything that has ticks; the live 1m cache for the index
+        symbols that never get any (`$TICK`, `$ADD`, `$VOLD` …), which is the
+        same fallback `_build_missing_days` uses.
+        """
+        days = {
+            _day_from_partition(p.parent.name)
+            for p in self._ticks_root.glob(f"symbol={symbol}/date=*/ticks.parquet")
+        }
+        if timeframe != "1m":
+            days |= {
+                _day_from_partition(p.parent.name)
+                for p in self._bars_root.glob(f"timeframe=1m/symbol={symbol}/date=*/bars.parquet")
+            }
+        return sorted(d for d in days if d is not None)
+
+    def _build_missing_days(self, symbol: str, timeframe: str, days: list[date]) -> None:
+        """Build whole ET days, so "the file exists" means "the day is done".
+
+        Building only the requested window is what made a partition's presence
+        say nothing about its completeness — the reason a partly-warm range
+        used to come back short.
+
+        One resample covers every missing day rather than one per day. The
+        resampler filters on `timestamp`, not on the `date` hive key, so it
+        cannot prune partitions: a per-day loop re-reads the symbol's whole
+        tick tree once per day, which would make warming a year 365 full
+        scans.
+        """
+        cache_dir = self._cache_dir(symbol, timeframe)
+        missing = [
+            d for d in days if not (cache_dir / f"date={d.isoformat()}" / "bars.parquet").exists()
+        ]
+        if not missing:
+            return
+        start, _ = _et_day_bounds(missing[0])
+        _, end = _et_day_bounds(missing[-1])
         df = self._resampler.resample(symbol, start, end, timeframe)
         if df.height == 0 and timeframe != "1m":
             # Tick-level source is unavailable for this symbol — roll up
@@ -232,18 +311,37 @@ class HistoryStore:
                     "bar_cache_built_from_1m_bars",
                     extra={"symbol": symbol, "timeframe": timeframe},
                 )
-        # Add the ET view before returning, not just before writing. A cache
-        # hit reads BAR_SCHEMA back off disk and always carries
-        # ``bucket_start_et``; without this the very first call — the one that
-        # builds the cache — would hand back a frame one column short, and the
-        # same code would work or KeyError depending on whether someone had
-        # asked for that range before. That applies to the zero-row answer too,
-        # so the column is added above the empty-return, not below it.
-        df = _with_bucket_start_et(df)
-        if df.height == 0:
-            return df
-        self._persist_cache(symbol, timeframe, df)
-        return df
+        built: set[date] = set()
+        if df.height > 0:
+            # Only the missing days: the others are already on disk, and a
+            # rewrite would put them through the native guard again for nothing.
+            df = _with_bucket_start_et(df).filter(
+                pl.col("bucket_start_et").dt.date().is_in(missing)
+            )
+            built = set(df.select(pl.col("bucket_start_et").dt.date()).to_series().to_list())
+            if df.height > 0:
+                self._persist_cache(symbol, timeframe, df)
+
+        # Days the build produced nothing for. Recording one as an empty
+        # partition turns every future query for it into a hit instead of
+        # another full scan of the tick tree — but only when the emptiness is a
+        # fact rather than a gap. Ticks on both sides mean ingestion was running
+        # across this day, so "no ticks" is "no session". Past the last ingested
+        # day it means "not ingested yet", and a file claiming otherwise would
+        # stop the bars from ever being built once the ticks arrive.
+        ingested = self._ingested_days(symbol, timeframe)
+        if not ingested:
+            return
+        for day in missing:
+            if day in built or not (ingested[0] < day < ingested[-1]):
+                continue
+            out_path = cache_dir / f"date={day.isoformat()}" / "bars.parquet"
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(_polars_bars_to_arrow(_empty_bars(symbol)), out_path, compression="zstd")
+            log.info(
+                "bar_cache_empty_day_recorded",
+                extra={"symbol": symbol, "timeframe": timeframe, "date": day.isoformat()},
+            )
 
     def _persist_cache(self, symbol: str, timeframe: str, df: pl.DataFrame) -> None:
         # Partition on the ET calendar date, exactly as BarWriter.write does.
