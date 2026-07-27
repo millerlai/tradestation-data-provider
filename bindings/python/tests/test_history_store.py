@@ -186,6 +186,77 @@ def test_load_cached_bars_partition_present_but_window_empty(tmp_path: Path) -> 
     assert store.load_cached_bars("NOSUCH", *window, "5m") is None
 
 
+def test_cache_hit_and_cache_miss_return_the_same_schema(tmp_path: Path) -> None:
+    """A hit reads Parquet, a miss builds a frame — they must not differ.
+
+    `hive_partitioning` bolts the path keys onto the read, so a hit answered 12
+    columns and a miss 10. Whether a caller could stack two results with
+    `pl.concat` therefore depended only on which ranges someone had warmed
+    before — the same "works or raises depending on history" failure this
+    module keeps producing.
+    """
+    _populate_ticks(tmp_path, [_tick("SPY", T0 + timedelta(seconds=5), 450.0)])
+    store = HistoryStore(tmp_path)
+    window = (T0, T0 + timedelta(minutes=5))
+
+    miss = store.load_bars("SPY", *window, "5m")
+    hit = store.load_bars("SPY", *window, "5m")
+    assert miss.height > 0 and hit.height == miss.height
+    assert hit.schema == miss.schema
+    assert "date" not in hit.columns and "timeframe" not in hit.columns
+    assert pl.concat([miss, hit]).height == 2 * miss.height
+
+
+def test_reads_a_partition_written_by_aggregate_parquet(tmp_path: Path) -> None:
+    """`aggregate_parquet.py` is the other Tier-3 producer, and its schema
+    differs: eight columns, no `bucket_start_et` (CLAUDE.md names it in the
+    storage-tier table). Normalising the read must derive the missing column,
+    not assume every file was written by the resampler — a bare `select` turns
+    every read of such a day into ColumnNotFoundError, and nothing rebuilds it.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from tradestation_data.domain.bar import derived_source
+
+    batch_schema = pa.schema(
+        [
+            pa.field("bucket_start", pa.timestamp("us", tz="UTC"), nullable=False),
+            pa.field("open", pa.float64(), nullable=False),
+            pa.field("high", pa.float64(), nullable=False),
+            pa.field("low", pa.float64(), nullable=False),
+            pa.field("close", pa.float64(), nullable=False),
+            pa.field("volume", pa.int64(), nullable=False),
+            pa.field("tick_count", pa.int32(), nullable=False),
+            pa.field("source", pa.string(), nullable=False),
+        ]
+    )
+    out = tmp_path / "bars" / "timeframe=5m" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
+    out.parent.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "bucket_start": [T0],
+                "open": [450.0],
+                "high": [451.0],
+                "low": [449.0],
+                "close": [450.5],
+                "volume": [100],
+                "tick_count": [3],
+                "source": [derived_source("ticks")],
+            },
+            schema=batch_schema,
+        ),
+        out,
+    )
+
+    store = HistoryStore(tmp_path)
+    df = store.load_bars("SPY", T0, T0 + timedelta(minutes=5), "5m")
+    assert df.height == 1
+    assert df.columns == store.load_bars("SPY", T0, T0 + timedelta(minutes=5), "5m").columns
+    assert df["bucket_start_et"].dt.hour().to_list() == [9]  # 13:30 UTC = 09:30 ET
+
+
 def test_empty_and_populated_answers_share_one_schema(tmp_path: Path) -> None:
     """The three ways of having no data must be indistinguishable to a caller.
 
