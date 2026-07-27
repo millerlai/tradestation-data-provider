@@ -15,9 +15,11 @@ from tradestation_data.domain.bar import is_derived
 from tradestation_data.domain.timeframe import (
     NATIVE_ONLY_TIMEFRAMES,
     SINGLE_FILE_TIMEFRAMES,
+    TIMEFRAME_MINUTES,
     Timeframe,
+    align_bucket_start,
 )
-from tradestation_data.storage.bar_coverage import CoverageRecord, SourceFingerprint
+from tradestation_data.storage.bar_coverage import CoverageRecord, Entry, SourceFingerprint
 from tradestation_data.storage.bar_writer import BAR_SCHEMA
 from tradestation_data.storage.resampler import Resampler
 
@@ -100,6 +102,37 @@ def _days_in(df: pl.DataFrame) -> set[date]:
     return set(df.select(pl.col("bucket_start_et").dt.date()).to_series().to_list())
 
 
+def _in_window(df: pl.DataFrame, start: datetime, end: datetime) -> pl.DataFrame:
+    if df.height == 0:
+        return df
+    lo, hi = _as_utc(start), _as_utc(end)
+    return df.filter(pl.col("bucket_start").is_between(lo, hi))
+
+
+def _merge_answers(cached: pl.DataFrame | None, extra: pl.DataFrame) -> pl.DataFrame | None:
+    """Prefer what is on disk; add rows that could not be written beside it.
+
+    A partition holding native bars refuses the derived write, so those buckets
+    exist only in the frame just built. Disk wins on a collision — that is where
+    the native bar lives.
+    """
+    if extra.height == 0:
+        return cached
+    if cached is None or cached.height == 0:
+        return extra
+    fresh = extra.filter(~pl.col("bucket_start").is_in(cached["bucket_start"]))
+    if fresh.height == 0:
+        return cached
+    return pl.concat([cached, fresh], how="vertical_relaxed").sort("bucket_start")
+
+
+def _day_from_partition(dirname: str) -> date | None:
+    try:
+        return date.fromisoformat(dirname.removeprefix("date="))
+    except ValueError:
+        return None
+
+
 def _et_day_bounds(day: date) -> tuple[datetime, datetime]:
     """One whole ET calendar day as UTC instants — 23 or 25 hours twice a year.
 
@@ -169,11 +202,19 @@ class HistoryStore:
         timeframe: str | Timeframe,
     ) -> pl.DataFrame:
         tf = str(timeframe)
+        unpersisted = _empty_bars(symbol)
         if tf not in NATIVE_ONLY_TIMEFRAMES:
-            self._build_uncovered_days(symbol, tf, _et_days(start, end))
+            # From the *bucket* containing `start`, not from `start`. The
+            # intraday grid is anchored to the session, so a 1h bucket runs
+            # HH:30 to HH:30 and the one covering 00:10 ET began at 23:30 the
+            # ET day before. Asking only for the days the window names would
+            # leave that bucket unbuilt.
+            first = align_bucket_start(_as_utc(start), tf)
+            unpersisted = self._build_uncovered_days(symbol, tf, _et_days(first, end))
         cached = self._load_cached_bars(symbol, start, end, tf)
-        if cached is not None and cached.height > 0:
-            return cached
+        merged = _merge_answers(cached, _in_window(unpersisted, start, end))
+        if merged is not None and merged.height > 0:
+            return merged
         if tf in NATIVE_ONLY_TIMEFRAMES:
             # Not a cache miss — there is nothing to miss. A `1d` bar is only
             # ever what TradeStation published, so an empty answer is the
@@ -225,11 +266,16 @@ class HistoryStore:
                 "Re-export it from TradeStation instead."
             )
         self._delete_cache(symbol, tf)
-        self._coverage(symbol, tf).forget(_et_days(start, end))
-        self._build_uncovered_days(symbol, tf, _et_days(start, end))
+        # `_delete_cache` rglobs the whole (symbol, timeframe) tree, not just
+        # the requested window, so forgetting only that window would leave the
+        # days either side deleted and still claimed as covered.
+        self._coverage(symbol, tf).forget()
+        first = align_bucket_start(_as_utc(start), tf)
+        unpersisted = self._build_uncovered_days(symbol, tf, _et_days(first, end))
         cached = self._load_cached_bars(symbol, start, end, tf)
-        if cached is not None and cached.height > 0:
-            return cached
+        merged = _merge_answers(cached, _in_window(unpersisted, start, end))
+        if merged is not None and merged.height > 0:
+            return merged
         return _canonical_bars(_empty_bars(symbol))
 
     # ----- internals ------------------------------------------------
@@ -276,43 +322,74 @@ class HistoryStore:
     def _coverage(self, symbol: str, timeframe: str) -> CoverageRecord:
         return CoverageRecord(self._cache_dir(symbol, timeframe))
 
-    def _source_files(self, symbol: str, timeframe: str, day: date) -> list[Path]:
-        """The partitions a build of `day` would read. §2.6 rule 2.
+    def _source_index(self, symbol: str, timeframe: str) -> dict[date, list[Path]]:
+        """Every source partition this symbol has, keyed by ET day. §2.6 rule 2.
 
         Tier 1 normally; the live 1m cache as well for every coarser frame,
         because that is the fallback source for index symbols ($TICK, $ADD,
         $VOLD …) which never have ticks. Both are stamped, so a build stops
         matching whichever of them changes.
-        """
-        stamp = f"date={day.isoformat()}"
-        paths = [self._ticks_root / f"symbol={symbol}" / stamp / "ticks.parquet"]
-        if timeframe != "1m":
-            paths.append(self._bars_root / f"timeframe=1m/symbol={symbol}" / stamp / "bars.parquet")
-        return [p for p in paths if p.exists()]
 
-    def _build_uncovered_days(self, symbol: str, timeframe: str, days: list[date]) -> None:
+        Built by globbing rather than probing each requested day, so the cost
+        tracks what is on disk instead of how wide the question was: a five-year
+        window over a symbol with 500 recorded days costs 500 stats, not 3,650
+        `exists()` calls that mostly answer no.
+        """
+        index: dict[date, list[Path]] = {}
+        patterns = [self._ticks_root.glob(f"symbol={symbol}/date=*/ticks.parquet")]
+        if timeframe != "1m":
+            patterns.append(
+                self._bars_root.glob(f"timeframe=1m/symbol={symbol}/date=*/bars.parquet")
+            )
+        for found in patterns:
+            for path in found:
+                day = _day_from_partition(path.parent.name)
+                if day is not None:
+                    index.setdefault(day, []).append(path)
+        return index
+
+    def _build_uncovered_days(self, symbol: str, timeframe: str, days: list[date]) -> pl.DataFrame:
         """Build every ET day in `days` this binding has not already built.
 
         Coverage is the record's answer, never the partition's presence: the
         same path is written by the live `BarWriter`, by the batch aggregation
         tool, and by older versions of this binding, none of which leave a whole
         day behind. §2.6.
+
+        Returns the rows that were built but could **not** be stored, which
+        happens when the day's partition holds native bars: §2.3 rule 3 refuses
+        the write, and reading the answer back off disk would then lose them.
         """
         record = self._coverage(symbol, timeframe)
-        wanted = {
-            day: SourceFingerprint.of(self._source_files(symbol, timeframe, day)) for day in days
-        }
-        stale = [day for day, fingerprint in wanted.items() if not record.covers(day, fingerprint)]
+        cache_dir = self._cache_dir(symbol, timeframe)
+        index = self._source_index(symbol, timeframe)
+        wanted = {day: SourceFingerprint.of(index.get(day, [])) for day in days}
+        stale: list[date] = [
+            day
+            for day, fingerprint in wanted.items()
+            if not record.covers(
+                day,
+                fingerprint,
+                partition_exists=(cache_dir / f"date={day.isoformat()}" / "bars.parquet").exists(),
+            )
+        ]
         if not stale:
-            return
+            return _empty_bars(symbol)
 
         # One resample for the whole run rather than one per day: the resampler
         # filters on `timestamp`, not on the `date` hive key, so it cannot prune
         # partitions and a per-day loop would re-read the symbol's entire tick
         # tree once per day.
+        #
+        # Widened by one interval on each side because the intraday grid is
+        # anchored to the session, not to midnight: a 1h bucket runs HH:30 to
+        # HH:30, so the last bucket of an ET day extends into the next one.
+        # Cutting the window at ET midnight truncated it, and the bucket that
+        # covers the first half hour after midnight belongs to the previous day.
+        pad = timedelta(minutes=TIMEFRAME_MINUTES[timeframe])
         start, _ = _et_day_bounds(stale[0])
         _, end = _et_day_bounds(stale[-1])
-        df = self._resampler.resample(symbol, start, end, timeframe)
+        df = self._resampler.resample(symbol, start - pad, end + pad, timeframe)
         if df.height > 0:
             df = _with_bucket_start_et(df).filter(pl.col("bucket_start_et").dt.date().is_in(stale))
 
@@ -328,7 +405,7 @@ class HistoryStore:
             lo, _ = _et_day_bounds(gaps[0])
             _, hi = _et_day_bounds(gaps[-1])
             rolled = self._resampler.resample_from_bars(
-                symbol, lo, hi, timeframe, source_timeframe="1m"
+                symbol, lo - pad, hi + pad, timeframe, source_timeframe="1m"
             )
             if rolled.height > 0:
                 rolled = _with_bucket_start_et(rolled).filter(
@@ -340,25 +417,43 @@ class HistoryStore:
                     "bar_cache_built_from_1m_bars",
                     extra={"symbol": symbol, "timeframe": timeframe, "days": len(gaps)},
                 )
-        if df.height > 0:
-            self._persist_cache(symbol, timeframe, df)
-        # Days that produced nothing are recorded too, and *only* in the record
-        # — a 0-row placeholder partition would land in the native Tier-2
-        # directory for `1m`, which `clear_bar_cache` deliberately never
-        # touches, leaving a wrong answer nothing could clear. §2.6 rule 3.
-        record.record({day: wanted[day] for day in stale})
+        written = self._persist_cache(symbol, timeframe, df) if df.height > 0 else set()
+        # A day whose write the native guard refused is *not* covered: the
+        # derived bars were computed and dropped, so recording it would hide
+        # them for good behind a record that says the day is done. Only what
+        # actually reached disk, plus the days that genuinely produced nothing,
+        # go in — and the empty ones go in the record *only*, never as a 0-row
+        # partition, which for `1m` would land in the native Tier-2 directory
+        # `clear_bar_cache` deliberately never touches. §2.6 rule 3.
+        produced = _days_in(df)
+        recorded = {
+            day: Entry(wanted[day], produced_rows=day in written)
+            for day in stale
+            if day in written or day not in produced
+        }
+        record.record(recorded)
         log.info(
             "bar_cache_days_built",
-            extra={"symbol": symbol, "timeframe": timeframe, "days": len(stale)},
+            extra={"symbol": symbol, "timeframe": timeframe, "days": len(recorded)},
         )
+        refused = produced - written
+        if not refused:
+            return _empty_bars(symbol)
+        return _canonical_bars(df.filter(pl.col("bucket_start_et").dt.date().is_in(list(refused))))
 
-    def _persist_cache(self, symbol: str, timeframe: str, df: pl.DataFrame) -> None:
+    def _persist_cache(self, symbol: str, timeframe: str, df: pl.DataFrame) -> set[date]:
+        """Write each ET day of `df`; return the days that actually landed.
+
+        The native guard below can refuse a day, and the caller has to know:
+        recording a refused day as covered would hide its derived bars behind
+        a record claiming the day was done."""
         # Partition on the ET calendar date, exactly as BarWriter.write does.
         # Splitting on the UTC date instead would put an evening EST bar in a
         # different date= directory than the writer did, so the native-guard
         # below would be checking the wrong file — and _load_cached_bars
         # globs date=*, so a second copy would come back as a duplicate row.
         df = _with_bucket_start_et(df)
+        written: set[date] = set()
         dates = (
             df.select(pl.col("bucket_start_et").dt.date().alias("day"))
             .unique()
@@ -398,6 +493,8 @@ class HistoryStore:
             day_df = df.filter(pl.col("bucket_start_et").dt.date() == day)
             table = _merge_with_existing_partition(out_path, _polars_bars_to_arrow(day_df))
             pq.write_table(table, out_path, compression="zstd")
+            written.add(day)
+        return written
 
     def _delete_cache(self, symbol: str, timeframe: str) -> None:
         """Evict computed partitions. Native ones are not cache — they are data.

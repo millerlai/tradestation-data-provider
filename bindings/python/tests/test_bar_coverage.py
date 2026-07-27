@@ -298,3 +298,102 @@ def test_daily_has_no_coverage_record(tmp_path: Path) -> None:
         "SPY", datetime(2026, 4, 19, tzinfo=UTC), datetime(2026, 4, 24, tzinfo=UTC), "1d"
     )
     assert not list((tmp_path / "bars" / "timeframe=1d").rglob("_coverage.json"))
+
+
+# ---- the record must not outlive what it vouches for ----------------------
+
+
+def test_clearing_the_cache_leaves_the_days_rebuildable(tmp_path: Path) -> None:
+    """§2.6 rule 4, from the other direction.
+
+    The record decides whether to build; the answer is read off a partition the
+    record does not own. Believing an entry whose partition has been deleted
+    answers 0 rows forever — which is exactly what `clear_bar_cache`, the tool
+    documented as the fix for a stale cache, used to produce.
+    """
+    _write_ticks(tmp_path, _minutes(OPEN, 60))
+    store = HistoryStore(tmp_path)
+    window = (OPEN, OPEN + timedelta(hours=1))
+    assert store.load_bars("SPY", *window, "5m").height == 12
+
+    for parquet in (tmp_path / "bars").rglob("bars.parquet"):
+        parquet.unlink()
+    assert list((tmp_path / "bars").rglob("_coverage.json")), "the record outlives the parquet"
+
+    assert HistoryStore(tmp_path).load_bars("SPY", *window, "5m").height == 12
+
+
+def test_rebuild_does_not_strand_the_days_it_also_deleted(tmp_path: Path) -> None:
+    """`_delete_cache` wipes the whole (symbol, timeframe) tree, not the window.
+
+    Forgetting only the requested days left the ones either side deleted and
+    still claimed as covered — unrecoverable, because nothing rebuilds a day
+    the record says is done.
+    """
+    monday, tuesday = OPEN, OPEN + timedelta(days=1)
+    _write_ticks(tmp_path, _minutes(monday, 60) + _minutes(tuesday, 60))
+    store = HistoryStore(tmp_path)
+    store.load_bars("SPY", monday, tuesday + timedelta(hours=1), "5m")
+
+    store.rebuild_bar_cache("SPY", tuesday, tuesday + timedelta(hours=1), "5m")
+
+    fresh = HistoryStore(tmp_path)
+    assert fresh.load_bars("SPY", monday, monday + timedelta(hours=1), "5m").height == 12
+
+
+def test_a_day_the_native_guard_refused_still_answers(tmp_path: Path) -> None:
+    """§2.3 rule 3 refuses the write; the caller must still get the bars.
+
+    `_persist_cache` skips the whole partition when it holds anything native, so
+    the derived buckets exist only in the frame just built. Reading the answer
+    back off disk loses them, and recording the day as covered would hide them
+    for good.
+    """
+    _write_ticks(tmp_path, _minutes(OPEN, 60))
+    with BarWriter(tmp_path / "bars") as w:
+        w.write(
+            Bar(
+                symbol="SPY",
+                bucket_start=OPEN + timedelta(hours=5, minutes=30),
+                open=1.0,
+                high=2.0,
+                low=0.5,
+                close=999.0,
+                volume=10,
+                tick_count=3,
+                source="tradestation_el",
+                timeframe="5m",
+            )
+        )
+    store = HistoryStore(tmp_path)
+    window = (OPEN, OPEN + timedelta(hours=1))
+    assert store.load_bars("SPY", *window, "5m").height == 12
+    assert store.load_bars("SPY", *window, "5m").height == 12, "and again on the second call"
+
+    whole = store.load_bars("SPY", OPEN, OPEN + timedelta(hours=7), "5m")
+    assert 999.0 in whole["close"].to_list(), "the native bar is still the one on disk"
+
+
+def test_a_bucket_straddling_et_midnight_is_still_built(tmp_path: Path) -> None:
+    """The intraday grid is anchored to the session, not to midnight.
+
+    A 1h bucket runs HH:30 to HH:30, so the one covering 00:10 ET began at
+    23:30 the ET day before. Building only the days the window names left that
+    bucket unbuilt and recorded the day as empty, losing the last half hour
+    before the boundary for anything trading through it.
+    """
+    late = datetime(2026, 4, 21, 3, 40, tzinfo=UTC)  # 23:40 ET on 04-20
+    _write_ticks(tmp_path, [_tick(late + timedelta(minutes=i), 450.0 + i) for i in range(40)])
+    store = HistoryStore(tmp_path)
+    store.load_bars(
+        "SPY",
+        datetime(2026, 4, 21, 4, 0, tzinfo=UTC),
+        datetime(2026, 4, 21, 6, 0, tzinfo=UTC),
+        "1h",
+    )
+
+    part = tmp_path / "bars/timeframe=1h/symbol=SPY/date=2026-04-20/bars.parquet"
+    assert part.exists(), "the straddling bucket belongs to the ET day it started on"
+    stored = pl.read_parquet(part)
+    assert stored.height == 1
+    assert stored["bucket_start_et"].dt.hour().to_list() == [23]

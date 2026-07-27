@@ -83,18 +83,33 @@ class SourceFingerprint(NamedTuple):
         return cls(tuple(out))
 
 
+class Entry(NamedTuple):
+    """What one build of one ET day produced, and from what.
+
+    `produced_rows` is not bookkeeping — it is what keeps the record honest
+    about a file it does not own. An entry claiming rows while the day's
+    partition has been deleted is self-contradictory, and trusting it is how
+    `clear_bar_cache` turned a warm cache into a permanent empty answer. §2.6
+    rule 4 says desyncing the record may only cost a recompute, so the record
+    has to be able to notice.
+    """
+
+    source: SourceFingerprint
+    produced_rows: bool
+
+
 class CoverageRecord:
     """The builder's record for one `(timeframe, symbol)` cache directory."""
 
     def __init__(self, cache_dir: Path) -> None:
         self._path = cache_dir / COVERAGE_FILENAME
-        self._days: dict[date, SourceFingerprint] | None = None
+        self._days: dict[date, Entry] | None = None
 
     @property
     def path(self) -> Path:
         return self._path
 
-    def _load(self) -> dict[date, SourceFingerprint]:
+    def _load(self) -> dict[date, Entry]:
         if self._days is not None:
             return self._days
         self._days = {}
@@ -118,25 +133,48 @@ class CoverageRecord:
                 day = date.fromisoformat(key)
             except (TypeError, ValueError):
                 continue
-            fingerprint = SourceFingerprint.from_json(value)
-            if fingerprint is not None:
-                self._days[day] = fingerprint
+            if not isinstance(value, dict):
+                continue
+            fingerprint = SourceFingerprint.from_json(value.get("src"))
+            produced = value.get("rows")
+            if fingerprint is not None and isinstance(produced, bool):
+                self._days[day] = Entry(fingerprint, produced)
         return self._days
 
-    def covers(self, day: date, current: SourceFingerprint) -> bool:
-        """True when this builder built `day` from exactly this source."""
-        return self._load().get(day) == current
+    def covers(self, day: date, current: SourceFingerprint, *, partition_exists: bool) -> bool:
+        """True when this builder built `day` from this source and it is still there.
 
-    def record(self, entries: dict[date, SourceFingerprint]) -> None:
+        The second half is what makes the record discardable in both
+        directions. The record decides whether to build; the answer is read
+        back off a partition the record does not own. Believing an entry whose
+        partition has since been deleted answers 0 rows forever — which is
+        precisely what the documented `clear_bar_cache` recovery produced.
+        """
+        entry = self._load().get(day)
+        if entry is None or entry.source != current:
+            return False
+        return partition_exists or not entry.produced_rows
+
+    def record(self, entries: dict[date, Entry]) -> None:
         if not entries:
             return
         days = dict(self._load())
         days.update(entries)
         self._write(days)
 
-    def forget(self, days: list[date]) -> None:
+    def forget(self, days: list[date] | None = None) -> None:
+        """Drop `days`, or every day when `days` is None.
+
+        `rebuild_bar_cache` deletes the whole `(symbol, timeframe)` tree, not
+        just the requested window, so forgetting only that window left the days
+        either side deleted *and* still claimed as covered.
+        """
         known = self._load()
-        remaining = {d: fp for d, fp in known.items() if d not in days}
+        if days is None:
+            if known:
+                self._write({})
+            return
+        remaining = {d: e for d, e in known.items() if d not in days}
         if len(remaining) == len(known):
             return
         self._write(remaining)
@@ -145,10 +183,13 @@ class CoverageRecord:
         self._days = None
         self._path.unlink(missing_ok=True)
 
-    def _write(self, days: dict[date, SourceFingerprint]) -> None:
+    def _write(self, days: dict[date, Entry]) -> None:
         payload = {
             "version": _VERSION,
-            "days": {d.isoformat(): fp.as_json() for d, fp in sorted(days.items())},
+            "days": {
+                d.isoformat(): {"src": e.source.as_json(), "rows": e.produced_rows}
+                for d, e in sorted(days.items())
+            },
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
         # Write-then-replace so a reader never sees a half-written record and a
