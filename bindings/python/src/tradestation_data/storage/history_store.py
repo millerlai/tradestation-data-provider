@@ -25,6 +25,47 @@ log = logging.getLogger(__name__)
 # paths have to restore it explicitly; see _restore_et_zone.
 _ET_ZONE = "America/New_York"
 
+# Every read path materialises with `.pl()`, never `.arrow()`. DuckDB 1.5
+# changed `.arrow()` to return a RecordBatchReader, and a reader over an empty
+# result carries neither a batch nor a schema, so `pl.from_arrow` raised
+# "Must pass schema, or at least one RecordBatch". The file-existence guards
+# only rule out a missing partition — a window a symbol did not trade in is an
+# ordinary question, and it was aborting the caller instead of answering 0 rows.
+#
+# The two schemas below are what the *no-partition* branches return, so that
+# "this symbol was never recorded" and "this symbol was quiet" answer with the
+# same columns and dtypes. They are pinned against the real non-empty output by
+# test_empty_and_populated_answers_share_one_schema.
+_EMPTY_TICK_SCHEMA: dict[str, type[pl.DataType] | pl.DataType] = {
+    "timestamp": pl.Datetime("us", "UTC"),
+    "timestamp_et": pl.Datetime("us", "America/New_York"),
+    "price": pl.Float64,
+    "volume": pl.Int64,
+    "bid": pl.Float64,
+    "ask": pl.Float64,
+    "tick_count": pl.Int32,
+    "source": pl.Utf8,
+    "date": pl.Date,
+    "symbol": pl.Utf8,
+}
+
+_EMPTY_BAR_SCHEMA: dict[str, type[pl.DataType] | pl.DataType] = {
+    "bucket_start": pl.Datetime("us", "UTC"),
+    "bucket_start_et": pl.Datetime("us", "America/New_York"),
+    "open": pl.Float64,
+    "high": pl.Float64,
+    "low": pl.Float64,
+    "close": pl.Float64,
+    "volume": pl.Int64,
+    "tick_count": pl.Int32,
+    "source": pl.Utf8,
+    "symbol": pl.Utf8,
+    # `timeframe` is the hive key of the single-file `1d` layout, so a read
+    # that hits the file carries it. This dict is only ever returned for
+    # NATIVE_ONLY_TIMEFRAMES, which is exactly that layout.
+    "timeframe": pl.Utf8,
+}
+
 
 class HistoryStore:
     """
@@ -58,20 +99,20 @@ class HistoryStore:
     def load_ticks(self, symbol: str, start: datetime, end: datetime) -> pl.DataFrame:
         files = sorted(self._ticks_root.glob(f"symbol={symbol}/date=*/ticks.parquet"))
         if not files:
-            return pl.DataFrame()
+            return pl.DataFrame(schema=_EMPTY_TICK_SCHEMA).with_columns(
+                pl.lit(symbol).alias("symbol")
+            )
         pattern = (self._ticks_root / f"symbol={symbol}" / "date=*" / "ticks.parquet").as_posix()
         con = duckdb.connect()
         try:
             con.execute("SET TimeZone='UTC'")
-            arrow_tbl = con.execute(
+            df = con.execute(
                 "SELECT * FROM read_parquet(?, hive_partitioning = true) "
                 "WHERE timestamp BETWEEN ? AND ? ORDER BY timestamp",
                 [pattern, start, end],
-            ).arrow()
+            ).pl()
         finally:
             con.close()
-        df = pl.from_arrow(arrow_tbl)
-        assert isinstance(df, pl.DataFrame)
         return _restore_et_zone(df)
 
     # ----- bars -----------------------------------------------------
@@ -85,7 +126,7 @@ class HistoryStore:
     ) -> pl.DataFrame:
         tf = str(timeframe)
         cached = self._load_cached_bars(symbol, start, end, tf)
-        if cached is not None:
+        if cached is not None and cached.height > 0:
             return cached
         if tf in NATIVE_ONLY_TIMEFRAMES:
             # Not a cache miss — there is nothing to miss. A `1d` bar is only
@@ -98,7 +139,9 @@ class HistoryStore:
                 "native_only_timeframe_not_cached",
                 extra={"symbol": symbol, "timeframe": tf},
             )
-            return pl.DataFrame()
+            return pl.DataFrame(schema=_EMPTY_BAR_SCHEMA).with_columns(
+                pl.lit(symbol).alias("symbol")
+            )
         return self._miss_build_and_return(symbol, start, end, tf)
 
     def load_cached_bars(
@@ -164,17 +207,13 @@ class HistoryStore:
         con = duckdb.connect()
         try:
             con.execute("SET TimeZone='UTC'")
-            arrow_tbl = con.execute(
+            df = con.execute(
                 "SELECT * FROM read_parquet(?, hive_partitioning = true) "
                 "WHERE bucket_start BETWEEN ? AND ? ORDER BY bucket_start",
                 [pattern, start, end],
-            ).arrow()
+            ).pl()
         finally:
             con.close()
-        df = pl.from_arrow(arrow_tbl)
-        assert isinstance(df, pl.DataFrame)
-        if df.height == 0:
-            return None
         return _restore_et_zone(df)
 
     def _miss_build_and_return(
@@ -193,15 +232,16 @@ class HistoryStore:
                     "bar_cache_built_from_1m_bars",
                     extra={"symbol": symbol, "timeframe": timeframe},
                 )
-        if df.height == 0:
-            return df
         # Add the ET view before returning, not just before writing. A cache
         # hit reads BAR_SCHEMA back off disk and always carries
         # ``bucket_start_et``; without this the very first call — the one that
         # builds the cache — would hand back a frame one column short, and the
         # same code would work or KeyError depending on whether someone had
-        # asked for that range before.
+        # asked for that range before. That applies to the zero-row answer too,
+        # so the column is added above the empty-return, not below it.
         df = _with_bucket_start_et(df)
+        if df.height == 0:
+            return df
         self._persist_cache(symbol, timeframe, df)
         return df
 
@@ -219,7 +259,6 @@ class HistoryStore:
             .to_list()
         )
         for day in dates:
-            day_df = df.filter(pl.col("bucket_start_et").dt.date() == day)
             out_dir = self._cache_dir(symbol, timeframe) / f"date={day.isoformat()}"
             out_dir.mkdir(parents=True, exist_ok=True)
             out_path = out_dir / "bars.parquet"
@@ -249,7 +288,8 @@ class HistoryStore:
                 )
                 continue
 
-            table = _polars_bars_to_arrow(day_df)
+            day_df = df.filter(pl.col("bucket_start_et").dt.date() == day)
+            table = _merge_with_existing_partition(out_path, _polars_bars_to_arrow(day_df))
             pq.write_table(table, out_path, compression="zstd")
 
     def _delete_cache(self, symbol: str, timeframe: str) -> None:
@@ -337,6 +377,47 @@ def _polars_bars_to_arrow(df: pl.DataFrame) -> pa.Table:
         ]
     ).to_arrow()
     return table.cast(BAR_SCHEMA)
+
+
+def _merge_with_existing_partition(path: Path, fresh: pa.Table) -> pa.Table:
+    """Union a rebuilt window with the derived rows already in the partition.
+
+    A partition is a whole ET day, but a build only covers the window that was
+    asked for, and ``pq.write_table`` overwrites. Rebuilding the RTH window of
+    a day whose pre-market bars were cached by an earlier call would otherwise
+    drop them: the row count on disk falls with nothing raised, and the bars
+    are unrecoverable once the Tier-1 ticks are pruned.
+
+    Rebuilt buckets win — they are the fresher computation of the same input.
+    Buckets outside the rebuilt window survive. Only derived partitions reach
+    here; ``_persist_cache`` skips native ones before calling this.
+    """
+    if not path.exists():
+        return fresh
+    try:
+        # ParquetFile, not read_table: given a path under `timeframe=/symbol=/
+        # date=`, read_table runs hive discovery and hands back three extra
+        # dictionary columns, which then fail the cast and silently drop us
+        # into the overwrite this function exists to prevent.
+        existing = pq.ParquetFile(path).read().cast(BAR_SCHEMA)
+    except Exception:
+        # Unreadable means we cannot know what we would be discarding, so we
+        # cannot claim to be preserving it either. Writing the rebuilt window
+        # over a file nothing can read is still the better of two bad options.
+        log.warning("bar_cache_partition_unreadable", extra={"path": str(path)})
+        return fresh
+    fresh_df = pl.from_arrow(fresh)
+    existing_df = pl.from_arrow(existing)
+    assert isinstance(fresh_df, pl.DataFrame)
+    assert isinstance(existing_df, pl.DataFrame)
+    keep = existing_df.filter(~pl.col("bucket_start").is_in(fresh_df["bucket_start"]))
+    if keep.height == 0:
+        return fresh
+    log.info(
+        "bar_cache_partition_merged",
+        extra={"path": str(path), "kept_rows": keep.height, "new_rows": fresh.num_rows},
+    )
+    return pl.concat([keep, fresh_df]).sort("bucket_start").to_arrow().cast(BAR_SCHEMA)
 
 
 def partition_holds_native(path: Path) -> bool:

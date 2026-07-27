@@ -69,8 +69,13 @@ def _bucket_expr(column: str, timeframe: str) -> str:
     return f"time_bucket(INTERVAL '{interval}', {column}, {_INTRADAY_ORIGIN_UTC_SQL})"
 
 
-_EMPTY_SCHEMA: dict[str, type[pl.DataType]] = {
-    "bucket_start": pl.Datetime,
+# The no-files answer. Its dtypes have to match what the DuckDB path returns
+# for a query that matches nothing, or the two empty frames are not
+# interchangeable to a caller: `bucket_start` comes back UTC-aware, and
+# `volume` is BIGINT only because the SQL casts it — a bare `sum()` is HUGEINT,
+# which polars surfaces as Decimal(38,0).
+_EMPTY_SCHEMA: dict[str, type[pl.DataType] | pl.DataType] = {
+    "bucket_start": pl.Datetime("us", "UTC"),
     "open": pl.Float64,
     "high": pl.Float64,
     "low": pl.Float64,
@@ -138,7 +143,7 @@ class Resampler:
           max(price)                      AS high,
           min(price)                      AS low,
           last(price ORDER BY timestamp)  AS close,
-          sum(volume)                     AS volume,
+          CAST(sum(volume) AS BIGINT)     AS volume,
           CAST(count(*) AS INTEGER)       AS tick_count,
           ? AS source
         FROM read_parquet(?, hive_partitioning = true)
@@ -152,12 +157,10 @@ class Resampler:
             # timezone (Windows lacks tzdata, and polars refuses to parse
             # non-UTC zones without it).
             con.execute("SET TimeZone='UTC'")
-            arrow_tbl = con.execute(sql, [derived_source("ticks"), pattern, start, end]).arrow()
+            df = con.execute(sql, [derived_source("ticks"), pattern, start, end]).pl()
         finally:
             con.close()
 
-        df = pl.from_arrow(arrow_tbl)
-        assert isinstance(df, pl.DataFrame)
         return df.with_columns(pl.lit(symbol).alias("symbol"))
 
     def resample_from_bars(
@@ -196,7 +199,7 @@ class Resampler:
           max(high)                          AS high,
           min(low)                           AS low,
           last(close  ORDER BY bucket_start) AS close,
-          sum(volume)                        AS volume,
+          CAST(sum(volume) AS BIGINT)        AS volume,
           CAST(sum(tick_count) AS INTEGER)   AS tick_count,
           ? AS source
         FROM read_parquet(?, hive_partitioning = true)
@@ -207,13 +210,10 @@ class Resampler:
         con = duckdb.connect()
         try:
             con.execute("SET TimeZone='UTC'")
-            arrow_tbl = con.execute(
-                sql, [derived_source(source_timeframe), pattern, start, end]
-            ).arrow()
+            df = con.execute(sql, [derived_source(source_timeframe), pattern, start, end]).pl()
         finally:
             con.close()
-        df = pl.from_arrow(arrow_tbl)
-        assert isinstance(df, pl.DataFrame)
+
         if "bkt" in df.columns:
             df = df.rename({"bkt": "bucket_start"})
         return df.with_columns(pl.lit(symbol).alias("symbol"))
