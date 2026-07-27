@@ -109,6 +109,20 @@ def test_resample_no_data_returns_empty(tmp_path: Path) -> None:
     assert "bucket_start" in df.columns
 
 
+def test_resample_partition_present_but_window_empty(tmp_path: Path) -> None:
+    """A day the symbol did not trade is a question, not an error.
+
+    The file-existence guard above only rules out "no partition at all"; the
+    query itself can still match nothing, and both callers of this method
+    branch on ``height == 0``.
+    """
+    ticks_root = tmp_path / "ticks"
+    _write_ticks(ticks_root, [_tick("SPY", T0 + timedelta(seconds=10), 450.0)])
+    df = Resampler(ticks_root).resample("SPY", T0 + timedelta(days=1), T0 + timedelta(days=2), "5m")
+    assert df.height == 0
+    assert "bucket_start" in df.columns
+
+
 def test_resample_time_window_filters(tmp_path: Path) -> None:
     ticks_root = tmp_path / "ticks"
     _write_ticks(
@@ -206,6 +220,17 @@ def test_resample_from_bars_returns_empty_when_no_source(tmp_path: Path) -> None
     resampler = Resampler(tmp_path / "ticks", bars_root=tmp_path / "bars")
     df = resampler.resample_from_bars("SPY", T0, T0 + timedelta(hours=1), "5m")
     assert df.height == 0
+
+
+def test_resample_from_bars_partition_present_but_window_empty(tmp_path: Path) -> None:
+    bars_root = tmp_path / "bars"
+    _write_bars(bars_root, [_bar_1m("SPY", T0, 450.0, 450.5, 449.5, 450.2)])
+    resampler = Resampler(tmp_path / "ticks", bars_root=bars_root)
+    df = resampler.resample_from_bars(
+        "SPY", T0 + timedelta(days=1), T0 + timedelta(days=2), "5m", source_timeframe="1m"
+    )
+    assert df.height == 0
+    assert "bucket_start" in df.columns
 
 
 def test_resample_from_bars_rejects_equal_source_and_target(tmp_path: Path) -> None:

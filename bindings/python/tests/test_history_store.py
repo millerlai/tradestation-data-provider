@@ -148,6 +148,141 @@ def test_load_ticks_empty_root_returns_empty_df(tmp_path: Path) -> None:
     assert df.height == 0
 
 
+# ---- empty result sets ----------------------------------------------------
+#
+# The file-existence guards only rule out "no partition at all". A partition
+# that exists but holds nothing inside the window still has to come back as an
+# empty frame: asking about a day a symbol did not trade is an ordinary
+# question, and it used to abort the whole caller.
+
+
+def test_load_ticks_partition_present_but_window_empty(tmp_path: Path) -> None:
+    _populate_ticks(tmp_path, [_tick("SPY", T0 + timedelta(seconds=5), 450.0)])
+    store = HistoryStore(tmp_path)
+    df = store.load_ticks("SPY", T0 + timedelta(days=1), T0 + timedelta(days=2))
+    assert isinstance(df, pl.DataFrame)
+    assert df.height == 0
+
+
+def test_load_cached_bars_partition_present_but_window_empty(tmp_path: Path) -> None:
+    """`None` means "nothing stored"; a quiet window is 0 rows, not `None`.
+
+    `audit_bar_cache` leans on that distinction — it substitutes an empty
+    frame only when nothing is cached — so the two cases must stay tellable
+    apart.
+    """
+    _populate_ticks(tmp_path, [_tick("SPY", T0 + timedelta(seconds=5), 450.0)])
+    store = HistoryStore(tmp_path)
+    store.load_bars("SPY", T0, T0 + timedelta(minutes=5), "5m")  # writes the cache
+
+    # The cache file now exists, so the glob guard passes and the query runs.
+    window = (T0 + timedelta(days=1), T0 + timedelta(days=2))
+    quiet = store.load_cached_bars("SPY", *window, "5m")
+    assert quiet is not None
+    assert quiet.height == 0
+    assert "bucket_start" in quiet.columns
+
+    # Nothing stored at all still answers None.
+    assert store.load_cached_bars("NOSUCH", *window, "5m") is None
+
+
+def test_empty_and_populated_answers_share_one_schema(tmp_path: Path) -> None:
+    """The three ways of having no data must be indistinguishable to a caller.
+
+    "Never recorded", "recorded but quiet", and "has rows" differ only in
+    height. When they differed in width or dtype, stacking a symbol loop with
+    `pl.concat` raised ShapeError the first time one symbol had a quiet day,
+    and `df["bucket_start_et"]` raised ColumnNotFoundError on the empty frame.
+    """
+    _populate_ticks(tmp_path, [_tick("SPY", T0 + timedelta(seconds=5), 450.0)])
+    store = HistoryStore(tmp_path)
+    quiet_window = (T0 + timedelta(days=1), T0 + timedelta(days=2))
+
+    populated = store.load_ticks("SPY", T0, T0 + timedelta(minutes=5))
+    quiet = store.load_ticks("SPY", *quiet_window)
+    never = store.load_ticks("NOSUCH", T0, T0 + timedelta(minutes=5))
+    assert populated.height > 0
+    assert quiet.height == 0 and never.height == 0
+    assert quiet.schema == populated.schema
+    assert never.schema == populated.schema
+    assert pl.concat([populated, quiet, never]).height == populated.height
+
+    bars_populated = store.load_bars("SPY", T0, T0 + timedelta(minutes=5), "5m")
+    bars_quiet = store.load_bars("SPY", *quiet_window, "5m")
+    bars_never = store.load_bars("NOSUCH", T0, T0 + timedelta(minutes=5), "5m")
+    assert bars_populated.height > 0
+    assert bars_quiet.height == 0 and bars_never.height == 0
+    assert bars_quiet.schema == bars_populated.schema
+    assert bars_never.schema == bars_populated.schema
+    assert pl.concat([bars_populated, bars_quiet, bars_never]).height == bars_populated.height
+
+
+def test_daily_empty_answer_matches_the_daily_hit(tmp_path: Path) -> None:
+    """`1d` returns through its own branch, and its layout has no `date=` level.
+
+    A read that hits the single file carries the `timeframe` hive key, so the
+    empty answer has to as well — otherwise the same stacking that works for
+    intraday raises on the one timeframe that is data rather than cache.
+    """
+    from tradestation_data.domain.bar import Bar
+    from tradestation_data.storage.bar_writer import BarWriter
+
+    with BarWriter(tmp_path / "bars") as w:
+        w.write(
+            Bar(
+                symbol="SPY",
+                bucket_start=datetime(2026, 4, 20, 8, 0, tzinfo=UTC),
+                open=1.0,
+                high=2.0,
+                low=0.5,
+                close=450.0,
+                volume=10,
+                tick_count=3,
+                source="tradestation_el",
+                timeframe="1d",
+            )
+        )
+    store = HistoryStore(tmp_path)
+    populated = store.load_bars(
+        "SPY", datetime(2026, 4, 19, tzinfo=UTC), datetime(2026, 4, 24, tzinfo=UTC), "1d"
+    )
+    quiet = store.load_bars(
+        "SPY", datetime(2026, 6, 1, tzinfo=UTC), datetime(2026, 6, 5, tzinfo=UTC), "1d"
+    )
+    assert populated.height == 1
+    assert quiet.height == 0
+    assert quiet.schema == populated.schema
+    assert pl.concat([populated, quiet]).height == 1
+
+
+def test_rebuilding_one_window_keeps_the_rest_of_the_day(tmp_path: Path) -> None:
+    """A partition is a whole ET day; a build only covers the asked-for window.
+
+    `pq.write_table` overwrites, so rebuilding the RTH window used to drop the
+    pre-market bars cached by an earlier call — row count on disk falling with
+    nothing raised, and unrecoverable once the Tier-1 ticks are pruned.
+    """
+    pre_open = datetime(2026, 4, 20, 12, 0, tzinfo=UTC)  # 08:00 ET
+    rth = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)  # 09:30 ET, same ET date
+    _populate_ticks(
+        tmp_path,
+        [_tick("SPY", pre_open + timedelta(minutes=i), 440.0 + i) for i in range(20)]
+        + [_tick("SPY", rth + timedelta(minutes=i), 450.0 + i) for i in range(60)],
+    )
+    store = HistoryStore(tmp_path)
+    part = tmp_path / "bars" / "timeframe=5m" / "symbol=SPY" / "date=2026-04-20" / "bars.parquet"
+
+    store.load_bars("SPY", pre_open, pre_open + timedelta(minutes=20), "5m")
+    pre_rows = pl.read_parquet(part).height
+    assert pre_rows == 4
+
+    store.load_bars("SPY", rth, rth + timedelta(hours=1), "5m")
+    after = pl.read_parquet(part)
+    assert after.height == pre_rows + 12, "the pre-market bars must survive the RTH rebuild"
+    assert after["bucket_start"].is_sorted()
+    assert after["bucket_start"].n_unique() == after.height
+
+
 def test_load_bars_falls_back_to_1m_cache_for_index_symbol(tmp_path: Path) -> None:
     """Covers lines 131-134: rollup from cached 1m bars when no ticks exist."""
     from tradestation_data.domain.bar import Bar
