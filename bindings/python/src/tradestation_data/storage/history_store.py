@@ -60,11 +60,10 @@ _EMPTY_BAR_SCHEMA: dict[str, type[pl.DataType] | pl.DataType] = {
     "tick_count": pl.Int32,
     "source": pl.Utf8,
     "symbol": pl.Utf8,
-    # `timeframe` is the hive key of the single-file `1d` layout, so a read
-    # that hits the file carries it. This dict is only ever returned for
-    # NATIVE_ONLY_TIMEFRAMES, which is exactly that layout.
-    "timeframe": pl.Utf8,
 }
+
+# The one shape `load_bars` answers in, whichever path produced it.
+_BAR_COLUMNS = list(_EMPTY_BAR_SCHEMA)
 
 
 class HistoryStore:
@@ -214,7 +213,12 @@ class HistoryStore:
             ).pl()
         finally:
             con.close()
-        return _restore_et_zone(df)
+        # `_with_bucket_start_et` before the select, not after: this is a read
+        # of whatever is on disk, and `scripts/aggregate_parquet.py` — the other
+        # Tier-3 producer named in CLAUDE.md's storage table — writes eight
+        # columns with no `bucket_start_et`. Selecting it blind turns every read
+        # of such a day into ColumnNotFoundError.
+        return _canonical_bars(_restore_et_zone(df))
 
     def _miss_build_and_return(
         self, symbol: str, start: datetime, end: datetime, timeframe: str
@@ -241,9 +245,9 @@ class HistoryStore:
         # so the column is added above the empty-return, not below it.
         df = _with_bucket_start_et(df)
         if df.height == 0:
-            return df
+            return _canonical_bars(df)
         self._persist_cache(symbol, timeframe, df)
-        return df
+        return _canonical_bars(df)
 
     def _persist_cache(self, symbol: str, timeframe: str, df: pl.DataFrame) -> None:
         # Partition on the ET calendar date, exactly as BarWriter.write does.
@@ -345,6 +349,22 @@ def _restore_et_zone(df: pl.DataFrame) -> pl.DataFrame:
     return df.with_columns(
         [pl.col(c).dt.convert_time_zone(_ET_ZONE) for c in et_cols],
     )
+
+
+def _canonical_bars(df: pl.DataFrame) -> pl.DataFrame:
+    """One column list and order for every `load_bars` answer.
+
+    The build path returns what the resampler produced; the read path returns
+    that plus whatever `hive_partitioning` recovered from the path (`date`,
+    `timeframe`). Twelve columns on a hit and ten on a miss meant a caller
+    stacking two results with `pl.concat` got a ShapeError or not depending
+    purely on which ranges someone had warmed earlier.
+
+    `date` and `timeframe` are dropped rather than added to both sides: they
+    restate the path, the build path never had them, and so nothing could have
+    been reading them without breaking on its first cold call.
+    """
+    return _with_bucket_start_et(df).select(_BAR_COLUMNS)
 
 
 def _with_bucket_start_et(df: pl.DataFrame) -> pl.DataFrame:
