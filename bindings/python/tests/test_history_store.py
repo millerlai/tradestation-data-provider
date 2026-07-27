@@ -327,11 +327,12 @@ def test_daily_empty_answer_matches_the_daily_hit(tmp_path: Path) -> None:
 
 
 def test_rebuilding_one_window_keeps_the_rest_of_the_day(tmp_path: Path) -> None:
-    """A partition is a whole ET day; a build only covers the asked-for window.
+    """A partition is a whole ET day, and a build now covers the whole day.
 
-    `pq.write_table` overwrites, so rebuilding the RTH window used to drop the
-    pre-market bars cached by an earlier call — row count on disk falling with
-    nothing raised, and unrecoverable once the Tier-1 ticks are pruned.
+    Building only the asked-for window is what made a partition's presence say
+    nothing about its completeness. Asking for twenty pre-market minutes must
+    therefore leave the session's RTH bars on disk too — and asking again for a
+    different window must neither shrink the file nor duplicate a bucket.
     """
     pre_open = datetime(2026, 4, 20, 12, 0, tzinfo=UTC)  # 08:00 ET
     rth = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)  # 09:30 ET, same ET date
@@ -344,12 +345,12 @@ def test_rebuilding_one_window_keeps_the_rest_of_the_day(tmp_path: Path) -> None
     part = tmp_path / "bars" / "timeframe=5m" / "symbol=SPY" / "date=2026-04-20" / "bars.parquet"
 
     store.load_bars("SPY", pre_open, pre_open + timedelta(minutes=20), "5m")
-    pre_rows = pl.read_parquet(part).height
-    assert pre_rows == 4
+    whole_day = pl.read_parquet(part).height
+    assert whole_day == 16, "4 pre-market + 12 RTH buckets"
 
     store.load_bars("SPY", rth, rth + timedelta(hours=1), "5m")
     after = pl.read_parquet(part)
-    assert after.height == pre_rows + 12, "the pre-market bars must survive the RTH rebuild"
+    assert after.height == whole_day, "a second window must not shrink the partition"
     assert after["bucket_start"].is_sorted()
     assert after["bucket_start"].n_unique() == after.height
 
