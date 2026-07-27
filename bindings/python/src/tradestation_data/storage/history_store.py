@@ -102,28 +102,16 @@ def _days_in(df: pl.DataFrame) -> set[date]:
     return set(df.select(pl.col("bucket_start_et").dt.date()).to_series().to_list())
 
 
-def _in_window(df: pl.DataFrame, start: datetime, end: datetime) -> pl.DataFrame:
-    if df.height == 0:
-        return df
-    lo, hi = _as_utc(start), _as_utc(end)
-    return df.filter(pl.col("bucket_start").is_between(lo, hi))
+def _is_derived_tier(timeframe: str) -> bool:
+    """Whether the coverage record governs this timeframe. §2.6 covers Tier 3.
 
-
-def _merge_answers(cached: pl.DataFrame | None, extra: pl.DataFrame) -> pl.DataFrame | None:
-    """Prefer what is on disk; add rows that could not be written beside it.
-
-    A partition holding native bars refuses the derived write, so those buckets
-    exist only in the frame just built. Disk wins on a collision — that is where
-    the native bar lives.
+    `1m` is Tier 2 — the live `BarWriter` owns it, and a day missing from it is
+    missing *data*, not a cold cache. Running the day builder over it filled
+    the gaps with `derived:ticks` bars, which the native guard cannot refuse
+    because there is no file there yet to recognise as native. `1d` is
+    published outright and never computed at all.
     """
-    if extra.height == 0:
-        return cached
-    if cached is None or cached.height == 0:
-        return extra
-    fresh = extra.filter(~pl.col("bucket_start").is_in(cached["bucket_start"]))
-    if fresh.height == 0:
-        return cached
-    return pl.concat([cached, fresh], how="vertical_relaxed").sort("bucket_start")
+    return timeframe not in NATIVE_ONLY_TIMEFRAMES and timeframe != "1m"
 
 
 def _day_from_partition(dirname: str) -> date | None:
@@ -202,19 +190,21 @@ class HistoryStore:
         timeframe: str | Timeframe,
     ) -> pl.DataFrame:
         tf = str(timeframe)
-        unpersisted = _empty_bars(symbol)
-        if tf not in NATIVE_ONLY_TIMEFRAMES:
+        if _is_derived_tier(tf):
             # From the *bucket* containing `start`, not from `start`. The
             # intraday grid is anchored to the session, so a 1h bucket runs
             # HH:30 to HH:30 and the one covering 00:10 ET began at 23:30 the
             # ET day before. Asking only for the days the window names would
             # leave that bucket unbuilt.
             first = align_bucket_start(_as_utc(start), tf)
-            unpersisted = self._build_uncovered_days(symbol, tf, _et_days(first, end))
+            self._build_uncovered_days(symbol, tf, _et_days(first, end))
         cached = self._load_cached_bars(symbol, start, end, tf)
-        merged = _merge_answers(cached, _in_window(unpersisted, start, end))
-        if merged is not None and merged.height > 0:
-            return merged
+        if cached is not None and cached.height > 0:
+            return cached
+        if tf not in NATIVE_ONLY_TIMEFRAMES:
+            built = self._build_window(symbol, start, end, tf)
+            if built.height > 0:
+                return built
         if tf in NATIVE_ONLY_TIMEFRAMES:
             # Not a cache miss — there is nothing to miss. A `1d` bar is only
             # ever what TradeStation published, so an empty answer is the
@@ -265,18 +255,18 @@ class HistoryStore:
                 f"{tf!r} is published, not derived: it cannot be rebuilt. "
                 "Re-export it from TradeStation instead."
             )
-        self._delete_cache(symbol, tf)
-        # `_delete_cache` rglobs the whole (symbol, timeframe) tree, not just
-        # the requested window, so forgetting only that window would leave the
-        # days either side deleted and still claimed as covered.
-        self._coverage(symbol, tf).forget()
         first = align_bucket_start(_as_utc(start), tf)
-        unpersisted = self._build_uncovered_days(symbol, tf, _et_days(first, end))
+        scope = _et_days(first, end)
+        # Delete and forget exactly the requested days. Wiping the whole tree
+        # and rebuilding only the window destroyed every other cached day, and
+        # once the Tier-1 ticks are pruned those are unrecoverable.
+        self._delete_cache(symbol, tf, days=scope)
+        self._coverage(symbol, tf).forget(scope)
+        self._build_uncovered_days(symbol, tf, scope)
         cached = self._load_cached_bars(symbol, start, end, tf)
-        merged = _merge_answers(cached, _in_window(unpersisted, start, end))
-        if merged is not None and merged.height > 0:
-            return merged
-        return _canonical_bars(_empty_bars(symbol))
+        if cached is not None and cached.height > 0:
+            return cached
+        return self._build_window(symbol, start, end, tf)
 
     # ----- internals ------------------------------------------------
 
@@ -319,8 +309,46 @@ class HistoryStore:
         # of such a day into ColumnNotFoundError.
         return _canonical_bars(_restore_et_zone(df))
 
+    def _build_window(self, symbol: str, start: datetime, end: datetime, tf: str) -> pl.DataFrame:
+        """Resample exactly the requested window and return it, persisting what
+        the native guard allows.
+
+        The last resort, and the behaviour this facade has always had when the
+        store held nothing for a window: the coverage pass rebuilds whole days,
+        but it deliberately leaves partitions written by other producers alone,
+        so a window they do not cover still has to be answered from the source.
+        """
+        df = self._resampler.resample(symbol, start, end, tf)
+        if df.height == 0 and tf != "1m":
+            df = self._resampler.resample_from_bars(symbol, start, end, tf, source_timeframe="1m")
+        df = _with_bucket_start_et(df)
+        if df.height == 0:
+            return _canonical_bars(df)
+        self._persist_cache(symbol, tf, df)
+        return _canonical_bars(df)
+
     def _coverage(self, symbol: str, timeframe: str) -> CoverageRecord:
         return CoverageRecord(self._cache_dir(symbol, timeframe))
+
+    @staticmethod
+    def _is_covered(
+        record: CoverageRecord, cache_dir: Path, day: date, fingerprint: SourceFingerprint
+    ) -> bool:
+        """Whether `day` may be left alone.
+
+        A partition this builder did not write is left alone too. It belongs to
+        the live `BarWriter`, to the batch aggregation tool, or to an older
+        version — all of which know things this builder does not, and none of
+        which can be reproduced by resampling. Rebuilding one overwrote 24 bars
+        with 6 and put `derived:ticks` rows into the native Tier-2 tree, so the
+        record governs only the days this builder owns and the days that have
+        no partition at all. That is still the case the record was added for:
+        a range whose middle days were never built.
+        """
+        partition = cache_dir / f"date={day.isoformat()}" / "bars.parquet"
+        if record.knows(day):
+            return record.covers(day, fingerprint, partition_exists=partition.exists())
+        return partition.exists()
 
     def _source_index(self, symbol: str, timeframe: str) -> dict[date, list[Path]]:
         """Every source partition this symbol has, keyed by ET day. §2.6 rule 2.
@@ -363,18 +391,28 @@ class HistoryStore:
         record = self._coverage(symbol, timeframe)
         cache_dir = self._cache_dir(symbol, timeframe)
         index = self._source_index(symbol, timeframe)
+        if not index:
+            # No source for this symbol at all. There is nothing to build and
+            # nothing worth recording — writing one anyway created a
+            # `symbol=<X>/` directory for a symbol that has no data, which
+            # `verify_parquet` then discovers and reports on forever.
+            return _empty_bars(symbol)
         wanted = {day: SourceFingerprint.of(index.get(day, [])) for day in days}
         stale: list[date] = [
             day
             for day, fingerprint in wanted.items()
-            if not record.covers(
-                day,
-                fingerprint,
-                partition_exists=(cache_dir / f"date={day.isoformat()}" / "bars.parquet").exists(),
-            )
+            if not self._is_covered(record, cache_dir, day, fingerprint)
         ]
         if not stale:
             return _empty_bars(symbol)
+        # A bucket may straddle ET midnight — the 1h grid runs HH:30 to HH:30 —
+        # so rebuilding a day means rebuilding whichever day owns the bucket its
+        # first instant falls in, or the straddling bucket keeps the stale side.
+        owners = {
+            align_bucket_start(_et_day_bounds(day)[0], timeframe).astimezone(_ET_TZ).date()
+            for day in stale
+        }
+        stale = sorted(set(stale) | {d for d in owners if d in wanted})
 
         # One resample for the whole run rather than one per day: the resampler
         # filters on `timestamp`, not on the `date` hive key, so it cannot prune
@@ -426,11 +464,11 @@ class HistoryStore:
         # partition, which for `1m` would land in the native Tier-2 directory
         # `clear_bar_cache` deliberately never touches. §2.6 rule 3.
         produced = _days_in(df)
-        recorded = {
-            day: Entry(wanted[day], produced_rows=day in written)
-            for day in stale
-            if day in written or day not in produced
-        }
+        # Refused days are recorded too, as producing nothing *of ours*: the
+        # answer for them comes from the native partition already on disk and
+        # the rows we built are returned to the caller instead. Leaving them
+        # unrecorded made every later call re-resample the whole day.
+        recorded = {day: Entry(wanted[day], produced_rows=day in written) for day in stale}
         record.record(recorded)
         log.info(
             "bar_cache_days_built",
@@ -492,11 +530,15 @@ class HistoryStore:
 
             day_df = df.filter(pl.col("bucket_start_et").dt.date() == day)
             table = _merge_with_existing_partition(out_path, _polars_bars_to_arrow(day_df))
+            if table is None:
+                # The file is there but not ours to rewrite. Skipping keeps it
+                # whole; the caller still gets the rows from the built frame.
+                continue
             pq.write_table(table, out_path, compression="zstd")
             written.add(day)
         return written
 
-    def _delete_cache(self, symbol: str, timeframe: str) -> None:
+    def _delete_cache(self, symbol: str, timeframe: str, days: list[date] | None = None) -> None:
         """Evict computed partitions. Native ones are not cache — they are data.
 
         The write-side guard in `_persist_cache` is worthless on its own here:
@@ -504,11 +546,21 @@ class HistoryStore:
         the guard would look at an empty directory and wave the derived bar
         through. §2.3 rule 3 is "derived must not overwrite native", and
         unlink-then-write is an overwrite spelled differently.
+
+        `days` bounds the eviction. Without it `rebuild_bar_cache` deleted every
+        cached day for the symbol while rebuilding only the window it was asked
+        about, and once the Tier-1 ticks behind the others are pruned that is
+        not recoverable.
         """
         cache_dir = self._cache_dir(symbol, timeframe)
         if not cache_dir.exists():
             return
+        wanted = None if days is None else {d.isoformat() for d in days}
         for parquet_file in cache_dir.rglob("bars.parquet"):
+            if wanted is not None:
+                day = _day_from_partition(parquet_file.parent.name)
+                if day is None or day.isoformat() not in wanted:
+                    continue
             if partition_holds_native(parquet_file):
                 log.warning(
                     "bar_cache_delete_skipped_native_present",
@@ -599,7 +651,7 @@ def _polars_bars_to_arrow(df: pl.DataFrame) -> pa.Table:
     return table.cast(BAR_SCHEMA)
 
 
-def _merge_with_existing_partition(path: Path, fresh: pa.Table) -> pa.Table:
+def _merge_with_existing_partition(path: Path, fresh: pa.Table) -> pa.Table | None:
     """Union a rebuilt window with the derived rows already in the partition.
 
     A partition is a whole ET day, but a build only covers the window that was
@@ -621,11 +673,14 @@ def _merge_with_existing_partition(path: Path, fresh: pa.Table) -> pa.Table:
         # into the overwrite this function exists to prevent.
         existing = pq.ParquetFile(path).read().cast(BAR_SCHEMA)
     except Exception:
-        # Unreadable means we cannot know what we would be discarding, so we
-        # cannot claim to be preserving it either. Writing the rebuilt window
-        # over a file nothing can read is still the better of two bad options.
+        # Unreadable, or written to a schema this binding does not know — the
+        # batch aggregation tool omits `bucket_start_et`, and the cast fails.
+        # Either way we cannot see what we would be discarding, so we must not
+        # discard it: overwriting turned a 24-bar day into the 6 bars the
+        # current window happened to cover. `None` means "leave the file
+        # alone", the same answer `partition_holds_native` gives.
         log.warning("bar_cache_partition_unreadable", extra={"path": str(path)})
-        return fresh
+        return None
     fresh_df = pl.from_arrow(fresh)
     existing_df = pl.from_arrow(existing)
     assert isinstance(fresh_df, pl.DataFrame)

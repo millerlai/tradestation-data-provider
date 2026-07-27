@@ -141,6 +141,15 @@ class CoverageRecord:
                 self._days[day] = Entry(fingerprint, produced)
         return self._days
 
+    def knows(self, day: date) -> bool:
+        """Whether this builder has an entry for `day` at all.
+
+        Distinct from `covers`: a partition with no entry was written by
+        somebody else, and the caller must leave it alone rather than rebuild
+        over it.
+        """
+        return day in self._load()
+
     def covers(self, day: date, current: SourceFingerprint, *, partition_exists: bool) -> bool:
         """True when this builder built `day` from this source and it is still there.
 

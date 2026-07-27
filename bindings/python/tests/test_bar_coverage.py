@@ -201,11 +201,17 @@ def test_a_day_whose_only_source_is_1m_bars_still_builds(tmp_path: Path) -> None
 # ---- the other writers ----------------------------------------------------
 
 
-def test_a_partition_this_builder_did_not_write_is_rebuilt(tmp_path: Path) -> None:
-    """An existing cache holds partitions written by older, window-scoped code.
+def test_a_partition_this_builder_did_not_write_is_left_alone(tmp_path: Path) -> None:
+    """A partition with no record belongs to somebody else, and is trusted.
 
-    They carry no record, so they cannot be trusted as complete — otherwise
-    upgrading would preserve the short-series bug forever.
+    This test asserted the opposite until review measured the cost: rebuilding
+    a foreign partition overwrote 24 batch-aggregated bars with the 6 the
+    current tick window could produce, and wrote `derived:ticks` rows into the
+    native Tier-2 tree. The other writers — the live `BarWriter`, the batch
+    aggregation tool, an older version — know things resampling cannot
+    reproduce, so a legacy cache is stale rather than wrong, and staleness is
+    what `rebuild_bar_cache` is for. Data loss is not recoverable; a short
+    series is.
     """
     _write_ticks(tmp_path, _minutes(OPEN, 60))
     partial = pa.table(
@@ -225,7 +231,12 @@ def test_a_partition_this_builder_did_not_write_is_rebuilt(tmp_path: Path) -> No
     pq.write_table(partial, out)
 
     df = HistoryStore(tmp_path).load_bars("SPY", OPEN, OPEN + timedelta(hours=1), "5m")
-    assert df.height == 12, "a partition with no coverage record must be rebuilt, not trusted"
+    assert df.height == 1, "the foreign partition is served as-is"
+    assert pl.read_parquet(out).height == 1, "and is not overwritten by the rebuild"
+
+    # It is stale, not wrong — and the documented tool recovers it.
+    rebuilt = HistoryStore(tmp_path).rebuild_bar_cache("SPY", OPEN, OPEN + timedelta(hours=1), "5m")
+    assert rebuilt.height == 12
 
 
 def test_native_partitions_are_neither_rebuilt_nor_overwritten(tmp_path: Path) -> None:
@@ -397,3 +408,149 @@ def test_a_bucket_straddling_et_midnight_is_still_built(tmp_path: Path) -> None:
     stored = pl.read_parquet(part)
     assert stored.height == 1
     assert stored["bucket_start_et"].dt.hour().to_list() == [23]
+
+
+# ---- the read path must not damage what other producers wrote -------------
+
+
+def test_a_window_narrower_than_one_bucket_still_answers(tmp_path: Path) -> None:
+    """Bars are left-labelled, so the bucket covering a two-minute slice of a
+    5m series starts before the window. Answering only from a `bucket_start`
+    predicate reported silence for a period that traded."""
+    _write_ticks(tmp_path, _minutes(OPEN + timedelta(minutes=2), 2))
+    df = HistoryStore(tmp_path).load_bars(
+        "SPY", OPEN + timedelta(minutes=2), OPEN + timedelta(minutes=4), "5m"
+    )
+    assert df.height == 1
+    assert df["bucket_start"].to_list() == [OPEN]
+
+
+def test_a_partition_written_to_another_schema_is_never_overwritten(tmp_path: Path) -> None:
+    """`aggregate_parquet.py` writes eight columns and no `bucket_start_et`.
+
+    The merge cannot cast it, and the old answer to that was to write the
+    rebuilt window over the top: 24 batch-aggregated bars became the 6 the
+    current tick window happened to cover, unrecoverable once the source was
+    pruned. Not being able to read a file is a reason to leave it alone.
+    """
+    _write_ticks(tmp_path, _minutes(OPEN, 60))
+    batch = pa.schema(
+        [
+            pa.field(n, t, nullable=False)
+            for n, t in [
+                ("bucket_start", pa.timestamp("us", tz="UTC")),
+                ("open", pa.float64()),
+                ("high", pa.float64()),
+                ("low", pa.float64()),
+                ("close", pa.float64()),
+                ("volume", pa.int64()),
+                ("tick_count", pa.int32()),
+                ("source", pa.string()),
+            ]
+        ]
+    )
+    out = tmp_path / "bars/timeframe=5m/symbol=SPY/date=2026-04-20/bars.parquet"
+    out.parent.mkdir(parents=True)
+    starts = [OPEN - timedelta(hours=2) + timedelta(minutes=5 * i) for i in range(24)]
+    pq.write_table(
+        pa.table(
+            {
+                "bucket_start": starts,
+                "open": [1.0] * 24,
+                "high": [2.0] * 24,
+                "low": [0.5] * 24,
+                "close": [float(i) for i in range(24)],
+                "volume": [1] * 24,
+                "tick_count": [1] * 24,
+                "source": [derived_source("ticks")] * 24,
+            },
+            schema=batch,
+        ),
+        out,
+    )
+
+    HistoryStore(tmp_path).load_bars("SPY", OPEN, OPEN + timedelta(minutes=30), "5m")
+    assert pl.read_parquet(out).height == 24
+
+
+def test_rebuild_only_touches_the_days_it_was_asked_about(tmp_path: Path) -> None:
+    """`_delete_cache` used to rglob the whole tree while only the requested
+    window was rebuilt, so every other cached day was destroyed — and after the
+    record was widened to match, destroyed *and* forgotten."""
+    monday, tuesday = OPEN, OPEN + timedelta(days=1)
+    _write_ticks(tmp_path, _minutes(monday, 60) + _minutes(tuesday, 60))
+    store = HistoryStore(tmp_path)
+    store.load_bars("SPY", monday, tuesday + timedelta(hours=1), "5m")
+
+    store.rebuild_bar_cache("SPY", tuesday, tuesday + timedelta(hours=1), "5m")
+
+    monday_part = tmp_path / "bars/timeframe=5m/symbol=SPY/date=2026-04-20/bars.parquet"
+    assert monday_part.exists(), "the day outside the rebuild window must survive"
+    assert (
+        HistoryStore(tmp_path).load_bars("SPY", monday, monday + timedelta(hours=1), "5m").height
+        == 12
+    )
+
+
+def test_a_gap_in_the_native_tier_is_not_filled_with_derived_bars(tmp_path: Path) -> None:
+    """`timeframe=1m` is the native tier. A day missing from it is missing
+    data, not a cache miss — filling it with `derived:ticks` puts computed bars
+    where only the wire should write, distinguishable afterwards solely by the
+    provenance column."""
+    # Ticks for all three days — the middle one could be resampled, which is
+    # exactly what must not be written into the native tier.
+    for offset in (0, 1, 2):
+        _write_ticks(tmp_path, _minutes(OPEN + timedelta(days=offset), 10))
+    with BarWriter(tmp_path / "bars") as w:
+        for offset in (0, 2):
+            w.write(
+                Bar(
+                    symbol="SPY",
+                    bucket_start=OPEN + timedelta(days=offset),
+                    open=1.0,
+                    high=2.0,
+                    low=0.5,
+                    close=9.0,
+                    volume=1,
+                    tick_count=1,
+                    source="tradestation_el",
+                    timeframe="1m",
+                )
+            )
+    HistoryStore(tmp_path).load_bars("SPY", OPEN, OPEN + timedelta(days=2, hours=1), "1m")
+    gap = tmp_path / "bars/timeframe=1m/symbol=SPY/date=2026-04-21/bars.parquet"
+    assert not gap.exists()
+
+
+def test_a_native_answer_is_not_mixed_with_computed_bars(tmp_path: Path) -> None:
+    """§2.3 keeps the two distinguishable; folding a fresh resample into a frame
+    read off a native partition handed the caller both at once."""
+    _write_ticks(tmp_path, _minutes(OPEN, 2))
+    with BarWriter(tmp_path / "bars") as w:
+        w.write(
+            Bar(
+                symbol="SPY",
+                bucket_start=OPEN,
+                open=1.0,
+                high=2.0,
+                low=0.5,
+                close=9.0,
+                volume=1,
+                tick_count=1,
+                source="tradestation_el",
+                timeframe="1m",
+            )
+        )
+    df = HistoryStore(tmp_path).load_bars(
+        "SPY", OPEN - timedelta(minutes=30), OPEN + timedelta(minutes=30), "1m"
+    )
+    assert set(df["source"].to_list()) == {"tradestation_el"}
+
+
+def test_a_symbol_with_no_data_leaves_nothing_behind(tmp_path: Path) -> None:
+    """`verify_parquet` discovers symbols by listing `symbol=*` directories, so
+    one exploratory or typo'd call used to add a phantom symbol to every future
+    verification run."""
+    _write_ticks(tmp_path, _minutes(OPEN, 10))
+    HistoryStore(tmp_path).load_bars("NOSUCH", OPEN, OPEN + timedelta(hours=1), "5m")
+    assert not list((tmp_path / "bars").rglob("symbol=NOSUCH"))
