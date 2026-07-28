@@ -384,24 +384,80 @@ binding 應把 `bid` / `ask` 視為無效，若**任一**成立：
 > **所以這一節不足以解釋任意大的差距。** 看到三倍量級時，先懷疑 `vol` / `tc` 兩個
 > 欄位裝的到底是什麼，而不是急著用上面四點合理化 —— 見下節。
 
-#### `tc` 在 `1d` 上不是成交筆數 —— 未決
+#### EasyLanguage 的 `Volume` / `Ticks` 在 intraday 與 daily 上語意相反
 
-EL indicator 送出的 `vol` 取自 EasyLanguage 的 `Volume`、`tc` 取自 `Ticks`
-（`EL/TS2Python_Exporter.el`）。這兩個保留字在 intraday 與 daily 上的語意並不相同。
+這是 wire 上 `vol` / `tc` 的來源，也是本節前面那個「落差過大」的主因。
 
-已確認的事實：**在 `1d` 上 `vol` 與 `tc` 完全相同**（本 repo 的 SPY 日線 499 筆
-全數如此），也就是說 `1d` 的 `tc` 只是 `vol` 的複本，不帶任何資訊 —— 日線來自 EOD
-彙總，本來就沒有逐筆概念。
+TradeStation 官方定義（股票商品，[EL 保留字文件][elvol]）：
 
-> **未決（需 live TradeStation 確認）**：intraday 的 `Volume` / `Ticks` 各自裝
-> 什麼，尚未證實。已知在 intraday 上兩者不相等且 `tc` 明顯大於 `vol`，但
-> 「`vol` 是股數、`tc` 是筆數」這個直覺讀法與實測對不上。
+| EL 保留字 | **intraday**（分鐘 / tick / volume bar） | **daily 以上** |
+| --- | --- | --- |
+| `Volume` | **只有上漲 tick 的成交股數** | 總成交股數 |
+| `Ticks` | **總成交股數** | 總 tick 數 |
+| `UpTicks` | 上漲 tick 成交股數 | 總成交股數 |
+| `DownTicks` | 下跌 tick 成交股數 | 0 |
+
+[elvol]: https://help.tradestation.com/10_00/eng/tsdevhelp/elword/el_definitions/easylanguage_words_related_to_ticks,_volume_&_open_interest.htm
+
+**兩者在 intraday 與 daily 之間是對調的。** 直覺的「`Volume` 是量、`Ticks` 是筆數」
+只在日線成立；在 intraday 上 `Volume` 少算了下跌 tick 的成交，而真正的總量在 `Ticks`。
+
+#### 規則
+
+1. **wire 的 `vol` 一律是總成交股數。** publisher 必須依圖表型態取值：intraday 取
+   `Ticks`，daily 取 `Volume`。取錯的後果不是精度問題，是**系統性低估**。
+2. **wire 的 `tc` 只在 daily 上是成交筆數。** intraday 拿不到筆數 —— EL 沒有任何
+   保留字提供它 —— 所以 intraday 的 `tc` **不具意義**，binding 不得將它當筆數使用。
+3. **binding 不得自行推導或修正。** 這個對調發生在 publisher 那一側，wire 上看不出
+   來；若 publisher 送錯，binding 無從分辨，這正是它必須寫在契約裡的原因。
+
+> **本 repo 實測（SPY 100-tick 圖，2026-07-24 收盤前後）**：`Ticks` 與 `Volume`
+> 同時輸出，`Ticks` 恆大於 `Volume`，比值散在 1.01–7.60、中位數約 1.6 —— 與「總量
+> vs 上漲量」相符（上漲量通常占總量四到六成）。最有力的一筆是 16:00:00 的收盤集合
+> 競價：`Ticks=760951` / `Volume=753328`，比值 1.01。單一大額成交整筆被歸為上漲
+> tick，於是上漲量幾乎等於總量。文件與實測互證。
 >
-> 確認方式：在分鐘圖與日線圖各跑一次
-> `Print(Date, " ", Time, " V=", Volume, " T=", Ticks);`，並一併確認圖表的
-> Volume 設定是 Trade Volume 還是 Tick Count —— 該設定會直接改變這兩個欄位的意義。
+> **這解釋了前面那個落差的絕大部分。** 以本 repo 已收的 SPY 2026-07-23 實測：
 >
-> 在確認之前，binding **不應**把 `tc` 當成成交筆數使用，也不應假設 `vol` 是股數。
+> | | 值 | 對日線 55,437,545 的落差 |
+> | --- | --- | --- |
+> | intraday `vol` 加總（取自 `Volume`，即上漲量） | 18,505,973 | **3.00×** |
+> | intraday `tc` 加總（取自 `Ticks`，即總量） | 41,552,075 | **1.33×** |
+>
+> 也就是說那個「遠超過四個原因所能解釋」的 3 倍，主要是讀錯欄位。改用正確欄位後
+> 剩下 1.33 倍，落在 late prints、consolidated tape 涵蓋範圍、收盤集合競價與
+> session 設定這四項的合理範圍內。**兩者本來就不該相等，但也不該差三倍。**
+>
+> 已收資料的 intraday `tc`/`vol` 比值穩定在 **1.85–2.25**（1m 與 5m、五個交易日），
+> 與「上漲量約占總量一半」相符。
+
+#### `tc` 沒有 provenance，同一欄混著三種來源 —— 已知限制
+
+修正上述對調之後，`tc` 在同一個 `timeframe=` 目錄裡可能來自三個不同的地方，而
+**欄位本身沒有任何東西能區分它們**：
+
+| bar 從哪來 | `tc` 的值 | 是筆數嗎 |
+| --- | --- | --- |
+| native intraday（EL 直接送） | `0` | 否 —— intraday 拿不到筆數 |
+| native `1d` | `Ticks` | 存疑（見下） |
+| derived from ticks（binding 自己數 `count(*)`） | 該 bucket 的 tick 列數 | **是**，而且可信 |
+| derived from 1m bars（`sum(tc)`） | 上游是 0 → `0` | 否 |
+
+所以讀到 `tc = 0` 的呼叫端無法判斷那是「沒有筆數可給」還是「真的沒有成交」，讀到
+`tc = 12` 也無法判斷那是 binding 自己數的、還是 publisher 給的。
+
+這不是新問題 —— 修正前 native 給的是股數、derived 給的是列數，一樣不同源 —— 但
+修正後從「兩者都錯」變成「一者為 0、一者可信」，混在一起反而更容易被誤讀。
+
+> 正解是讓 `tc` 像 `source` 一樣帶 provenance，或乾脆拆成兩個欄位（publisher 給的
+> 筆數 vs binding 數出來的筆數）。兩者都要升 wire 版本，尚未進行。
+>
+> **在那之前**：binding 不得依賴 `tc` 做任何跨來源的比較或聚合。它在 derived-
+> from-ticks 的 bar 上是可信的成交筆數，其餘一律視為無資訊。
+
+> **仍未決**：依上表，daily 的 `Ticks` 應是筆數、不該等於 `Volume`，但本 repo 的
+> SPY 日線 499 筆中兩者逐位元組相同。推測是 TradeStation 的日線來源未提供 tick
+> count 而以總量填充，尚未證實。在證實之前，`1d` 的 `tc` 同樣不應被當成筆數。
 
 ### 3.5 `Bar` 是否保留 bid / ask 由 binding 決定
 

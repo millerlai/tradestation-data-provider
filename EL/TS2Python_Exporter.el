@@ -47,7 +47,16 @@
 Inputs:
     ZMQEndpoint("tcp://127.0.0.1:5555"),
     Enabled(True),
-    LogErrors(True);
+    LogErrors(True),
+    { Print one line per publish call: the raw EL words alongside the values
+      actually put on the wire. This is the switch to turn on when working out
+      what a chart type really hands over — it shows Volume and Ticks together,
+      which is the pair whose meaning flips between intraday and daily
+      (contract/semantics.md 3.4).
+
+      Off by default and worth leaving off: on a tick chart, or on any chart in
+      "update every tick" mode, this prints once per print. }
+    LogPublish(False);
 
 Variables:
     InitRC(0),
@@ -56,6 +65,8 @@ Variables:
     UnsupportedLogged(False),
     SubMinuteChart(False),
     AggregatedTickChart(False),
+    BarVol(0),
+    BarTc(0),
     Sym(""),
     TsStr("");
 
@@ -166,6 +177,36 @@ If Enabled and InitDone and SubMinuteChart = False
           + "-"
           + FormatTime("HH:mm:ss", ElTimeToDateTime(Time));
 
+    { Volume and Ticks mean OPPOSITE things on intraday and on daily charts.
+      TradeStation's own definition, for stock symbols:
+
+                     intraday                     daily and up
+        Volume       shares traded on UP TICKS    total shares
+        Ticks        TOTAL shares                 number of ticks
+
+      So the intuitive reading — Volume is the quantity, Ticks is the count —
+      holds only on daily. Sending EL's Volume as the wire's `vol` on an
+      intraday chart ships the up-tick share volume alone, which is roughly
+      half of what traded, and nothing downstream can tell: it is a plausible
+      number, just consistently too small. That is the larger part of the
+      day-versus-intraday volume gap recorded in contract/semantics.md §3.4.
+
+      The wire's `vol` is defined as total share volume on every timeframe
+      (§3.4), so the publisher picks the field the chart type requires.
+
+      `tc` has no honest intraday value — EL exposes no reserved word for the
+      number of trades on an intraday bar — so it goes out as 0 and §3.4
+      forbids reading it as a count there. UpTicks / DownTicks do carry the
+      up/down share split intraday, which is real order-flow information, but
+      the wire has nowhere to put it; adding a field is a version bump. }
+    If BarType >= 2 Then Begin
+        BarVol = Volume;
+        BarTc  = Ticks;
+    End Else Begin
+        BarVol = Ticks;
+        BarTc  = 0;
+    End;
+
     { InsideBid / InsideAsk are live-quote functions. They return 0 when
       there is no quote to report — during historical replay (chart load,
       any non-realtime bar), and for symbols that carry no quote at all
@@ -187,10 +228,19 @@ If Enabled and InitDone and SubMinuteChart = False
             Sym,
             TsStr,
             Close,
-            Volume,
+            BarVol,
             Insidebid,
             Insideask,
-            Ticks);
+            BarTc);
+
+        If LogPublish Then
+            Print("[TS2Python] tick ", TsStr,
+                  " bar_type=", BarType, " bar_interval=", BarInterval,
+                  " px=", Close,
+                  " el_volume=", Volume, " el_ticks=", Ticks,
+                  " wire_vol=", BarVol, " wire_tc=", BarTc,
+                  " bid=", InsideBid, " ask=", InsideAsk,
+                  " rc=", PubRC);
     End Else Begin
         { Any bar series. BarType and BarInterval go out as-is; the DLL owns
           the mapping to a wire timeframe and returns -5 for intervals it
@@ -204,10 +254,19 @@ If Enabled and InitDone and SubMinuteChart = False
             High,
             Low,
             Close,
-            Volume,
+            BarVol,
             Insidebid,
             Insideask,
-            Ticks);
+            BarTc);
+
+        If LogPublish Then
+            Print("[TS2Python] bar  ", TsStr,
+                  " bar_type=", BarType, " bar_interval=", BarInterval,
+                  " o=", Open, " h=", High, " l=", Low, " c=", Close,
+                  " el_volume=", Volume, " el_ticks=", Ticks,
+                  " wire_vol=", BarVol, " wire_tc=", BarTc,
+                  " bid=", InsideBid, " ask=", InsideAsk,
+                  " rc=", PubRC);
 
         If PubRC = -5 and UnsupportedLogged = False Then Begin
             If LogErrors Then

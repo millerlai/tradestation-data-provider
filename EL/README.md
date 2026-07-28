@@ -39,6 +39,33 @@ ready-made binaries. See [`../cpp/README.md`](../cpp/README.md) for the details.
 6. Apply it to the chart you want (SPY, QQQ, `$TICK`, …) with the data series set
    to **tick or 1 minute**
 
+## Inputs
+
+| input | default | what it does |
+| --- | --- | --- |
+| `ZMQEndpoint` | `tcp://127.0.0.1:5555` | where the DLL publishes |
+| `Enabled` | `True` | master switch |
+| `LogErrors` | `True` | init failures, refused charts, non-zero publish return codes |
+| `LogPublish` | `False` | one line per publish call — see below |
+
+### `LogPublish`
+
+Prints the raw EasyLanguage words next to the values actually put on the wire:
+
+```
+[TS2Python] tick 2026-07/24-15:59:00 bar_type=0.00 bar_interval=1.00 px=742.55
+            el_volume=13465 el_ticks=21152 wire_vol=21152 wire_tc=0
+            bid=742.54 ask=742.56 rc=0
+```
+
+`el_volume` / `el_ticks` are what EL handed over; `wire_vol` / `wire_tc` are what
+went out after the intraday/daily mapping. Having both on one line is the point
+— that pair is what flips meaning between chart types, and it is how the mapping
+gets checked on a chart type nobody has measured yet.
+
+Leave it off in normal use. On a tick chart, or on any chart in "update every
+tick" mode, it prints once per print.
+
 ## Supported chart intervals
 
 | chart | behaviour |
@@ -49,6 +76,31 @@ ready-made binaries. See [`../cpp/README.md`](../cpp/README.md) for the details.
 | Daily (`BarType = 2`, `BarInterval = 0` or `1`) | full OHLC sent under the `1d` timeframe. TradeStation 10 reports `0` here — `1` is accepted too, because that is what the ABI documented before a live install was measured |
 | Weekly / monthly / P&F / any other unsupported interval | **idle**; the DLL rejects it with `-5` and the reason is printed once |
 | Second-based charts | **idle**; the indicator detects it itself, stops sending, and prints the reason once |
+
+### Why `vol` does not come from EasyLanguage's `Volume`
+
+TradeStation defines these two reserved words with **opposite meanings** on
+intraday and daily charts (stock symbols):
+
+| | intraday | daily and up |
+| --- | --- | --- |
+| `Volume` | shares traded on **up ticks** | total shares |
+| `Ticks` | **total shares** | number of ticks |
+
+So the intuitive reading — `Volume` is the quantity, `Ticks` is the count — is
+true only on daily. This indicator used to send `Volume` as the wire's `vol` on
+every chart, which on intraday shipped the up-tick share volume alone: roughly
+half of what traded, and undetectable downstream because it is a perfectly
+plausible number that is simply too small.
+
+The indicator now selects by `BarType`, so `vol` is total share volume on every
+timeframe, as [`../contract/semantics.md`](../contract/semantics.md) §3.4
+requires. `tc` has no honest intraday value — EL exposes no word for the number
+of trades on an intraday bar — so it is sent as `0` there.
+
+`UpTicks` / `DownTicks` do carry the up/down share split intraday, which is real
+order-flow information, but the wire has nowhere to put it; adding a field is a
+version bump and has not been done.
 
 ### Why an N-tick chart is refused
 
