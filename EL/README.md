@@ -43,11 +43,32 @@ ready-made binaries. See [`../cpp/README.md`](../cpp/README.md) for the details.
 
 | chart | behaviour |
 | --- | --- |
-| Tick series (`BarType = 0`) | sent print by print |
+| 1-tick series (`BarType = 0`, `BarInterval = 1`) | sent print by print |
+| N-tick series (`BarType = 0`, `BarInterval > 1`) | **idle**; each call is N prints aggregated and the tick wire cannot say so |
 | 1 / 5 / 15 / 30 / 60 minute | full OHLC sent under the matching timeframe (`1m`, `5m`, …) |
 | Daily (`BarType = 2`, `BarInterval = 0` or `1`) | full OHLC sent under the `1d` timeframe. TradeStation 10 reports `0` here — `1` is accepted too, because that is what the ABI documented before a live install was measured |
 | Weekly / monthly / P&F / any other unsupported interval | **idle**; the DLL rejects it with `-5` and the reason is printed once |
 | Second-based charts | **idle**; the indicator detects it itself, stops sending, and prints the reason once |
+
+### Why an N-tick chart is refused
+
+A tick series is one print per call only when `BarInterval = 1`. On a 100-tick
+chart each call carries a finished bar: `Close` is the last of the hundred
+prints, `Volume` is their sum, `Ticks` is 100. `EL_PublishTick` has no field to
+express that, so Tier 1 would store it as **one trade priced at the last print
+and carrying a hundred prints' volume** — wrong by two orders of magnitude in
+the volume column, with nothing downstream able to notice.
+
+Unlike the second-based case, the information needed to detect this survives:
+`BarInterval` says exactly how many prints went into the call. Measured on a
+live install — a 100-tick chart reports `bar_interval=100.00` at `EL_Init`, and
+a 1-tick chart reports `1.00` and calls `EL_PublishTick` once per print.
+
+Note this also means `TsStr` cannot separate the prints inside one minute: a
+1-tick chart happily emits eight calls all stamped `19:48:00`, because `Time`
+has minute resolution. What separates them is the DLL's receive-side `ts`,
+which is why [`../contract/semantics.md`](../contract/semantics.md) §1 makes
+that — not `ts_str` — the tick's authoritative time.
 
 ### Why second-based charts need their own guard
 

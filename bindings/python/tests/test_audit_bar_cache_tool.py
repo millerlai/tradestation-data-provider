@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import polars as pl
 import pytest
@@ -77,7 +78,9 @@ def test_parse_args_parses_end_date():
     )
     assert args.symbols == ["SPY"]
     assert args.days == 3
-    assert args.end_date == datetime(2026, 4, 15, tzinfo=UTC)
+    # ET, not UTC: `--end-date` names an ET calendar day, because that is what a
+    # `date=` partition is. contract/semantics.md §2.4 rule 3.
+    assert args.end_date == datetime(2026, 4, 15, tzinfo=ZoneInfo("America/New_York"))
 
 
 def test_compare_identical_frames_has_no_diffs():
