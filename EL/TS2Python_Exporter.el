@@ -55,6 +55,7 @@ Variables:
     InitDone(False),
     UnsupportedLogged(False),
     SubMinuteChart(False),
+    AggregatedTickChart(False),
     Sym(""),
     TsStr("");
 
@@ -115,9 +116,36 @@ If Enabled and InitDone and SubMinuteChart = False
               " downstream able to tell. Use minute or daily charts.");
 End;
 
+{ -- Aggregated tick chart guard. Same shape as the sub-minute one, and for
+     the same reason: the data would be filed under a name that misdescribes it
+     and nothing downstream could tell.
+
+     A tick series is only one print per call when BarInterval = 1. On an
+     N-tick chart each call carries a whole bar — Close is the last print of
+     the N, Volume is their sum, Ticks is N — and EL_PublishTick has no field
+     to say so, so Tier 1 would record it as a single trade whose price is one
+     print and whose volume is a hundred. Nothing raises; the numbers are
+     simply wrong by two orders of magnitude in the volume column.
+
+     Measured on a live install: a 100-tick chart reports BarInterval = 100,
+     a 1-tick chart reports 1 and calls once per print. }
+If Enabled and InitDone and AggregatedTickChart = False
+   and BarType = 0 and BarInterval <> 1 Then Begin
+    AggregatedTickChart = True;
+    If LogErrors Then
+        Print("[TS2Python] aggregated tick chart detected on symbol=", GetSymbolName,
+              " — bar_interval=", BarInterval, ".",
+              " Publishing stopped: each call carries ", BarInterval,
+              " prints aggregated into one bar, and the tick wire has no way",
+              " to say so — it would be stored as a single trade with the",
+              " volume of ", BarInterval, ". Use a 1-tick chart, or a minute",
+              " chart if you want bars.");
+End;
+
 { -- Per-bar publish. Dispatch on BarType *and* BarInterval: BarType alone
      cannot tell a 1-minute chart from a 5-minute one. }
-If Enabled and InitDone and SubMinuteChart = False Then Begin
+If Enabled and InitDone and SubMinuteChart = False
+   and AggregatedTickChart = False Then Begin
     Sym = GetSymbolName;
     { Bar-time string "yyyy-MM/dd-HH:mm:ss" 24-hour (e.g. "2026-04/18-13:30:45").
       DLL parses this as the EL-side event time (ts_utc on the wire). The
@@ -149,7 +177,12 @@ If Enabled and InitDone and SubMinuteChart = False Then Begin
       re-derived by each EL script. See contract/semantics.md §3. }
 
     If BarType = 0 Then Begin
-        { Tick data series — one call per trade print. }
+        { Tick data series, BarInterval = 1 — one call per trade print,
+          confirmed on a live install. Anything coarser was refused above.
+          TsStr has minute resolution, so the prints inside one minute are
+          indistinguishable here; the DLL's receive-side ts is what separates
+          them, which is why contract/semantics.md §1 makes it the tick's
+          authoritative time rather than ts_str. }
         PubRC = EL_PublishTick(
             Sym,
             TsStr,
