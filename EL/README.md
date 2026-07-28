@@ -50,6 +50,31 @@ ready-made binaries. See [`../cpp/README.md`](../cpp/README.md) for the details.
 | Weekly / monthly / P&F / any other unsupported interval | **idle**; the DLL rejects it with `-5` and the reason is printed once |
 | Second-based charts | **idle**; the indicator detects it itself, stops sending, and prints the reason once |
 
+### Why `vol` does not come from EasyLanguage's `Volume`
+
+TradeStation defines these two reserved words with **opposite meanings** on
+intraday and daily charts (stock symbols):
+
+| | intraday | daily and up |
+| --- | --- | --- |
+| `Volume` | shares traded on **up ticks** | total shares |
+| `Ticks` | **total shares** | number of ticks |
+
+So the intuitive reading — `Volume` is the quantity, `Ticks` is the count — is
+true only on daily. This indicator used to send `Volume` as the wire's `vol` on
+every chart, which on intraday shipped the up-tick share volume alone: roughly
+half of what traded, and undetectable downstream because it is a perfectly
+plausible number that is simply too small.
+
+The indicator now selects by `BarType`, so `vol` is total share volume on every
+timeframe, as [`../contract/semantics.md`](../contract/semantics.md) §3.4
+requires. `tc` has no honest intraday value — EL exposes no word for the number
+of trades on an intraday bar — so it is sent as `0` there.
+
+`UpTicks` / `DownTicks` do carry the up/down share split intraday, which is real
+order-flow information, but the wire has nowhere to put it; adding a field is a
+version bump and has not been done.
+
 ### Why an N-tick chart is refused
 
 A tick series is one print per call only when `BarInterval = 1`. On a 100-tick

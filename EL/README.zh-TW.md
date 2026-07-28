@@ -39,11 +39,48 @@ cd cpp
 
 | chart | 行為 |
 | --- | --- |
-| Tick series（`BarType = 0`） | 逐筆送出 |
+| 1-tick series（`BarType = 0`, `BarInterval = 1`） | 逐筆送出 |
+| N-tick series（`BarType = 0`, `BarInterval > 1`） | **閒置**；每次呼叫是 N 筆聚合，tick wire 無欄位可表達 |
 | 1 / 5 / 15 / 30 / 60 分鐘圖 | 依照對應的 timeframe (`1m`, `5m`, 等) 送出完整 OHLC |
 | 日線圖（`BarType = 2`, `BarInterval = 0` 或 `1`） | 以 `1d` timeframe 送出完整 OHLC。TradeStation 10 實測回報 `0`；`1` 也收，那是實機量測前 ABI 寫定的值 |
 | 週 / 月 / P&F / 其他不支援的間隔 | **閒置**，並由 DLL 回傳 `-5` 拒收，Print 一次原因 |
 | 秒級圖表 | **閒置**，由 indicator 自行偵測後停止送出，Print 一次原因 |
+
+### `vol` 為何不取 EasyLanguage 的 `Volume`
+
+TradeStation 對這兩個保留字在 intraday 與 daily 上的定義是**相反的**（股票商品）：
+
+| | intraday | daily 以上 |
+| --- | --- | --- |
+| `Volume` | **只有上漲 tick** 的成交股數 | 總成交股數 |
+| `Ticks` | **總成交股數** | tick 數 |
+
+所以「`Volume` 是量、`Ticks` 是筆數」這個直覺讀法只在日線成立。本 indicator 先前
+在所有圖表都送 `Volume` 當 `vol`，在 intraday 上等於只送了上漲 tick 的量 —— 大約
+只有實際成交的一半，而且下游查不出來：那是個完全合理、只是持續偏小的數字。
+
+現在依 `BarType` 選欄位，使 `vol` 在每個 timeframe 都是總成交股數，符合
+[`../contract/semantics.md`](../contract/semantics.md) §3.4。`tc` 在 intraday
+沒有誠實的值可送 —— EL 沒有任何保留字提供 intraday 的成交筆數 —— 因此送 `0`。
+
+`UpTicks` / `DownTicks` 在 intraday 確實帶有上漲／下跌的量能拆分，是有價值的
+order flow 資訊，但 wire 沒有欄位可放；新增欄位要升版，尚未進行。
+
+### N-tick 圖為何被拒收
+
+tick series 只有在 `BarInterval = 1` 時才是「一次呼叫一筆成交」。100-tick 圖的每次
+呼叫帶的是一整根 bar：`Close` 是那一百筆的最後一筆、`Volume` 是它們的總和。
+`EL_PublishTick` 沒有欄位能表達這件事，於是 Tier 1 會把它記成**單一筆成交，價格是
+其中一筆、成交量卻是一百筆的和** —— 成交量欄位錯兩個數量級，而且無人能察覺。
+
+與秒級圖不同的是，判斷所需的資訊還在：`BarInterval` 直接說明一次呼叫涵蓋幾筆。
+實機量測：100-tick 圖在 `EL_Init` 回報 `bar_interval=100.00`，1-tick 圖回報 `1.00`
+並且每筆成交呼叫一次 `EL_PublishTick`。
+
+另外這也表示 `TsStr` 無法區分同一分鐘內的多筆成交：1-tick 圖會連送八次、全部標記
+`19:48:00`，因為 `Time` 只有分鐘解析度。真正區分它們的是 DLL 的收訊端 `ts`，這正是
+[`../contract/semantics.md`](../contract/semantics.md) §1 規定 tick 時間取自 `ts`
+而非 `ts_str` 的原因。
 
 ### 秒級圖表為何要另外擋
 
