@@ -39,6 +39,33 @@ ready-made binaries. See [`../cpp/README.md`](../cpp/README.md) for the details.
 6. Apply it to the chart you want (SPY, QQQ, `$TICK`, …) with the data series set
    to **tick or 1 minute**
 
+## Inputs
+
+| input | default | what it does |
+| --- | --- | --- |
+| `ZMQEndpoint` | `tcp://127.0.0.1:5555` | where the DLL publishes |
+| `Enabled` | `True` | master switch |
+| `LogErrors` | `True` | init failures, refused charts, non-zero publish return codes |
+| `LogPublish` | `False` | one line per publish call — see below |
+
+### `LogPublish`
+
+Prints the raw EasyLanguage words next to the values actually put on the wire:
+
+```
+[TS2Python] tick 2026-07/24-15:59:00 bar_type=0.00 bar_interval=1.00 px=742.55
+            el_volume=13465 el_ticks=21152 wire_vol=21152 wire_tc=0
+            bid=742.54 ask=742.56 rc=0
+```
+
+`el_volume` / `el_ticks` are what EL handed over; `wire_vol` / `wire_tc` are what
+went out after the intraday/daily mapping. Having both on one line is the point
+— that pair is what flips meaning between chart types, and it is how the mapping
+gets checked on a chart type nobody has measured yet.
+
+Leave it off in normal use. On a tick chart, or on any chart in "update every
+tick" mode, it prints once per print.
+
 ## Supported chart intervals
 
 | chart | behaviour |

@@ -35,6 +35,31 @@ cd cpp
 5. Verify indicator（F3）
 6. 掛到目標 chart（SPY、QQQ、`$TICK`, …），data series 設為 **tick 或 1 分鐘**
 
+## Inputs
+
+| input | 預設 | 作用 |
+| --- | --- | --- |
+| `ZMQEndpoint` | `tcp://127.0.0.1:5555` | DLL 發布的位址 |
+| `Enabled` | `True` | 總開關 |
+| `LogErrors` | `True` | init 失敗、被拒收的圖表、非零的 publish 回傳碼 |
+| `LogPublish` | `False` | 每次 publish 印一行 —— 見下 |
+
+### `LogPublish`
+
+把 EasyLanguage 的原始保留字與**實際送上 wire 的值**並排印出來：
+
+```
+[TS2Python] tick 2026-07/24-15:59:00 bar_type=0.00 bar_interval=1.00 px=742.55
+            el_volume=13465 el_ticks=21152 wire_vol=21152 wire_tc=0
+            bid=742.54 ask=742.56 rc=0
+```
+
+`el_volume` / `el_ticks` 是 EL 交出來的，`wire_vol` / `wire_tc` 是經過 intraday /
+daily 對映後送出去的。**兩者印在同一行是重點** —— 那一對正是在不同圖表型態之間會
+反轉語意的欄位，也是驗證對映是否正確的唯一方式（尤其是還沒有人量過的圖表型態）。
+
+平時請關閉。在 tick 圖、或任何開啟 "update every tick" 的圖上，它會每筆成交印一次。
+
 ## 支援的 chart 間隔
 
 | chart | 行為 |

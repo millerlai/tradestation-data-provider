@@ -431,6 +431,30 @@ TradeStation 官方定義（股票商品，[EL 保留字文件][elvol]）：
 > 已收資料的 intraday `tc`/`vol` 比值穩定在 **1.85–2.25**（1m 與 5m、五個交易日），
 > 與「上漲量約占總量一半」相符。
 
+#### `tc` 沒有 provenance，同一欄混著三種來源 —— 已知限制
+
+修正上述對調之後，`tc` 在同一個 `timeframe=` 目錄裡可能來自三個不同的地方，而
+**欄位本身沒有任何東西能區分它們**：
+
+| bar 從哪來 | `tc` 的值 | 是筆數嗎 |
+| --- | --- | --- |
+| native intraday（EL 直接送） | `0` | 否 —— intraday 拿不到筆數 |
+| native `1d` | `Ticks` | 存疑（見下） |
+| derived from ticks（binding 自己數 `count(*)`） | 該 bucket 的 tick 列數 | **是**，而且可信 |
+| derived from 1m bars（`sum(tc)`） | 上游是 0 → `0` | 否 |
+
+所以讀到 `tc = 0` 的呼叫端無法判斷那是「沒有筆數可給」還是「真的沒有成交」，讀到
+`tc = 12` 也無法判斷那是 binding 自己數的、還是 publisher 給的。
+
+這不是新問題 —— 修正前 native 給的是股數、derived 給的是列數，一樣不同源 —— 但
+修正後從「兩者都錯」變成「一者為 0、一者可信」，混在一起反而更容易被誤讀。
+
+> 正解是讓 `tc` 像 `source` 一樣帶 provenance，或乾脆拆成兩個欄位（publisher 給的
+> 筆數 vs binding 數出來的筆數）。兩者都要升 wire 版本，尚未進行。
+>
+> **在那之前**：binding 不得依賴 `tc` 做任何跨來源的比較或聚合。它在 derived-
+> from-ticks 的 bar 上是可信的成交筆數，其餘一律視為無資訊。
+
 > **仍未決**：依上表，daily 的 `Ticks` 應是筆數、不該等於 `Volume`，但本 repo 的
 > SPY 日線 499 筆中兩者逐位元組相同。推測是 TradeStation 的日線來源未提供 tick
 > count 而以總量填充，尚未證實。在證實之前，`1d` 的 `tc` 同樣不應被當成筆數。

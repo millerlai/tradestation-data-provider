@@ -47,7 +47,16 @@
 Inputs:
     ZMQEndpoint("tcp://127.0.0.1:5555"),
     Enabled(True),
-    LogErrors(True);
+    LogErrors(True),
+    { Print one line per publish call: the raw EL words alongside the values
+      actually put on the wire. This is the switch to turn on when working out
+      what a chart type really hands over — it shows Volume and Ticks together,
+      which is the pair whose meaning flips between intraday and daily
+      (contract/semantics.md 3.4).
+
+      Off by default and worth leaving off: on a tick chart, or on any chart in
+      "update every tick" mode, this prints once per print. }
+    LogPublish(False);
 
 Variables:
     InitRC(0),
@@ -223,6 +232,15 @@ If Enabled and InitDone and SubMinuteChart = False
             Insidebid,
             Insideask,
             BarTc);
+
+        If LogPublish Then
+            Print("[TS2Python] tick ", TsStr,
+                  " bar_type=", BarType, " bar_interval=", BarInterval,
+                  " px=", Close,
+                  " el_volume=", Volume, " el_ticks=", Ticks,
+                  " wire_vol=", BarVol, " wire_tc=", BarTc,
+                  " bid=", InsideBid, " ask=", InsideAsk,
+                  " rc=", PubRC);
     End Else Begin
         { Any bar series. BarType and BarInterval go out as-is; the DLL owns
           the mapping to a wire timeframe and returns -5 for intervals it
@@ -240,6 +258,15 @@ If Enabled and InitDone and SubMinuteChart = False
             Insidebid,
             Insideask,
             BarTc);
+
+        If LogPublish Then
+            Print("[TS2Python] bar  ", TsStr,
+                  " bar_type=", BarType, " bar_interval=", BarInterval,
+                  " o=", Open, " h=", High, " l=", Low, " c=", Close,
+                  " el_volume=", Volume, " el_ticks=", Ticks,
+                  " wire_vol=", BarVol, " wire_tc=", BarTc,
+                  " bid=", InsideBid, " ask=", InsideAsk,
+                  " rc=", PubRC);
 
         If PubRC = -5 and UnsupportedLogged = False Then Begin
             If LogErrors Then
