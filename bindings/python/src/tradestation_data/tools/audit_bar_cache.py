@@ -24,8 +24,9 @@ from __future__ import annotations
 import argparse
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import polars as pl
 
@@ -33,6 +34,8 @@ from tradestation_data.storage.history_store import HistoryStore
 from tradestation_data.storage.resampler import Resampler
 
 log = logging.getLogger("tradestation_data.tools.audit_bar_cache")
+
+_ET = ZoneInfo("America/New_York")
 
 # OHLC tolerance: prices are stored as float64, so byte-for-byte equality
 # is fine if resampler is deterministic — but leave a tiny epsilon in case
@@ -70,9 +73,9 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     p.add_argument(
         "--end-date",
-        type=lambda s: datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=UTC),
+        type=lambda s: datetime.strptime(s, "%Y-%m-%d").replace(tzinfo=_ET),
         default=None,
-        help="Last day to audit (YYYY-MM-DD UTC, default: today).",
+        help="Last day to audit (YYYY-MM-DD, ET calendar day; default: today).",
     )
     p.add_argument("--log-level", default="INFO")
     return p.parse_args(argv)
@@ -160,7 +163,10 @@ def main(argv: list[str] | None = None) -> int:
         log.error("data_root_not_found path=%s", args.data_root)
         return 2
 
-    end_date = args.end_date or datetime.now(tz=UTC).replace(
+    # ET, not UTC: a `date=` partition is an ET calendar day, and UTC midnight
+    # is 20:00 ET the day before — so every audited window used to start in the
+    # previous session. contract/semantics.md §2.4 rule 3.
+    end_date = args.end_date or datetime.now(tz=_ET).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
     days = [end_date - timedelta(days=i) for i in range(args.days)]

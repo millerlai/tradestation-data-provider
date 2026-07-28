@@ -93,7 +93,15 @@ def _et_days(start: datetime, end: datetime) -> list[date]:
 
 
 def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
+    """Resolve a caller's instant, reading a naive one as ET. §2.4.
+
+    This is a US-equity API — sessions, holidays and `date=` partitions are all
+    defined in `America/New_York`, so a bare `datetime(2026, 4, 20, 9, 30)`
+    means the open. It used to mean 05:30 ET, which nobody chose: the query
+    engine runs its session in UTC for determinism, and that leaked out into
+    the API. An aware input is unambiguous and is left alone.
+    """
+    return value.replace(tzinfo=_ET_TZ).astimezone(UTC) if value.tzinfo is None else value
 
 
 def _days_in(df: pl.DataFrame) -> set[date]:
@@ -103,7 +111,7 @@ def _days_in(df: pl.DataFrame) -> set[date]:
 
 
 def _is_derived_tier(timeframe: str) -> bool:
-    """Whether the coverage record governs this timeframe. §2.6 covers Tier 3.
+    """Whether the coverage record governs this timeframe. §2.7 covers Tier 3.
 
     `1m` is Tier 2 — the live `BarWriter` owns it, and a day missing from it is
     missing *data*, not a cold cache. Running the day builder over it filled
@@ -162,6 +170,7 @@ class HistoryStore:
     # ----- ticks ----------------------------------------------------
 
     def load_ticks(self, symbol: str, start: datetime, end: datetime) -> pl.DataFrame:
+        start, end = _as_utc(start), _as_utc(end)
         files = sorted(self._ticks_root.glob(f"symbol={symbol}/date=*/ticks.parquet"))
         if not files:
             return pl.DataFrame(schema=_EMPTY_TICK_SCHEMA).with_columns(
@@ -190,6 +199,7 @@ class HistoryStore:
         timeframe: str | Timeframe,
     ) -> pl.DataFrame:
         tf = str(timeframe)
+        start, end = _as_utc(start), _as_utc(end)
         if _is_derived_tier(tf):
             # From the *bucket* containing `start`, not from `start`. The
             # intraday grid is anchored to the session, so a 1h bucket runs
@@ -236,7 +246,7 @@ class HistoryStore:
         auditing the cache, which would otherwise be diffing a freshly built
         frame against itself. This is the read-only view for those callers.
         """
-        return self._load_cached_bars(symbol, start, end, str(timeframe))
+        return self._load_cached_bars(symbol, _as_utc(start), _as_utc(end), str(timeframe))
 
     def rebuild_bar_cache(
         self,
@@ -246,6 +256,7 @@ class HistoryStore:
         timeframe: str | Timeframe,
     ) -> pl.DataFrame:
         tf = str(timeframe)
+        start, end = _as_utc(start), _as_utc(end)
         if tf in NATIVE_ONLY_TIMEFRAMES:
             # Rebuilding means deleting and recomputing, and neither half is
             # legal here: the file is the only copy, and the recomputed
@@ -351,7 +362,7 @@ class HistoryStore:
         return partition.exists()
 
     def _source_index(self, symbol: str, timeframe: str) -> dict[date, list[Path]]:
-        """Every source partition this symbol has, keyed by ET day. §2.6 rule 2.
+        """Every source partition this symbol has, keyed by ET day. §2.7 rule 2.
 
         Tier 1 normally; the live 1m cache as well for every coarser frame,
         because that is the fallback source for index symbols ($TICK, $ADD,
@@ -382,7 +393,7 @@ class HistoryStore:
         Coverage is the record's answer, never the partition's presence: the
         same path is written by the live `BarWriter`, by the batch aggregation
         tool, and by older versions of this binding, none of which leave a whole
-        day behind. §2.6.
+        day behind. §2.7.
 
         Returns the rows that were built but could **not** be stored, which
         happens when the day's partition holds native bars: §2.3 rule 3 refuses
@@ -462,7 +473,7 @@ class HistoryStore:
         # actually reached disk, plus the days that genuinely produced nothing,
         # go in — and the empty ones go in the record *only*, never as a 0-row
         # partition, which for `1m` would land in the native Tier-2 directory
-        # `clear_bar_cache` deliberately never touches. §2.6 rule 3.
+        # `clear_bar_cache` deliberately never touches. §2.7 rule 3.
         produced = _days_in(df)
         # Refused days are recorded too, as producing nothing *of ours*: the
         # answer for them comes from the native partition already on disk and

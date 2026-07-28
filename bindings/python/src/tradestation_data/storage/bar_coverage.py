@@ -1,6 +1,6 @@
 """Which ET days of a Tier-3 cache this binding has actually built.
 
-`contract/semantics.md` §2.6. The question "has this day been built?" cannot be
+`contract/semantics.md` §2.7. The question "has this day been built?" cannot be
 answered by looking for `date=<D>/bars.parquet`, because four different writers
 produce that path — the lazy resampler (only the queried window), `BarWriter`
 during live ingest (the day so far, still growing), the batch aggregation tool
@@ -89,7 +89,7 @@ class Entry(NamedTuple):
     `produced_rows` is not bookkeeping — it is what keeps the record honest
     about a file it does not own. An entry claiming rows while the day's
     partition has been deleted is self-contradictory, and trusting it is how
-    `clear_bar_cache` turned a warm cache into a permanent empty answer. §2.6
+    `clear_bar_cache` turned a warm cache into a permanent empty answer. §2.7
     rule 4 says desyncing the record may only cost a recompute, so the record
     has to be able to notice.
     """

@@ -21,21 +21,32 @@ Bars are LEFT-labelled: `bucket_start` covers [t, t+step). A 09:30 five-minute
 bar spans 09:30 to 09:35, and an RTH 1m session ends at 15:59, not 16:00
 (contract/semantics.md §2). Grids anchor to the 09:30 ET session open rather
 than to the Unix epoch, so a 1-hour bar starts at 09:30, not 09:00.
+
+Times are Eastern. This is a US-equity store, so a bare `datetime(...)` passed
+to `load_bars` / `load_ticks` means `America/New_York` (§2.4) — you never do
+offset arithmetic to ask a question. Every frame still carries both views,
+`bucket_start` in UTC beside `bucket_start_et`; converting further is your
+choice, not something this package decides for you.
+
+An *event* timestamp is different: `Tick.timestamp` is an absolute instant, so
+give it a timezone-aware value. Only the query bounds have a default.
 """
 
 from __future__ import annotations
 
 import argparse
 import shutil
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from tradestation_data.domain.tick import Tick
 from tradestation_data.storage.history_store import HistoryStore
 from tradestation_data.storage.tick_writer import TickWriter
 
-# 2026-04-20 09:30 ET. April is EDT (UTC-4), so the session opens at 13:30Z.
-SESSION_OPEN = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)
+ET = ZoneInfo("America/New_York")
+# The session open, said the way a US-equity desk says it.
+SESSION_OPEN = datetime(2026, 4, 20, 9, 30, tzinfo=ET)
 SYMBOL = "SPY"
 
 
@@ -88,8 +99,10 @@ def main() -> int:
     print(f"wrote {n} ticks to {root / 'ticks'}\n")
 
     store = HistoryStore(root)
-    start = SESSION_OPEN - timedelta(minutes=1)
-    end = SESSION_OPEN + timedelta(hours=1)
+    # Bare datetimes, no tzinfo and no offset arithmetic: on the read API these
+    # are Eastern, because that is the only clock this data has ever been in.
+    start = datetime(2026, 4, 20, 9, 29)
+    end = datetime(2026, 4, 20, 10, 30)
 
     for timeframe in ("1m", "5m", "15m"):
         # Cache miss the first time: resample from ticks, persist, return.
