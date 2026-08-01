@@ -78,6 +78,25 @@ def _output_schema(source: pa.Schema) -> pa.Schema:
     return source.append(_IMPUTED_FIELD)
 
 
+def _passthrough_table(path: Path) -> pa.Table:
+    """One source day, rows unchanged, with `imputed` = False appended.
+
+    A day that needed no imputation still has to reach --output. Skipping it
+    would make the output a *delta* against --root, while its own --help calls
+    it a copy: a caller pointing HistoryStore at it would get zero rows for
+    every complete day and no error, because an empty range is an ordinary
+    answer (semantics.md §2.4).
+
+    The column is appended rather than the file copied byte-for-byte so every
+    file under --output carries one schema. A tree mixing 11-column and
+    12-column files puts the reader back on the schema-drift trap this
+    protocol exists to remove.
+    """
+    table = pq.read_table(path)
+    flags = pa.array([False] * table.num_rows, type=pa.bool_())
+    return table.append_column(_IMPUTED_FIELD, flags)
+
+
 def _build_imputed_row(bucket_start: datetime, value: float) -> dict:
     # Every quantity is 0: this bar records no trading, because none was
     # observed. Carrying a neighbour's volume forward would invent activity
@@ -232,7 +251,11 @@ def main() -> int:
             "Destination root for the imputed copy. REQUIRED, and must not be "
             "--root: imputed bars are guesses that look exactly like real ones "
             "once written, so they are kept in a separate tree under a schema "
-            "with an extra `imputed` column."
+            "with an extra `imputed` column. Every day in range is written, "
+            "not only the ones that needed filling — the result is a complete "
+            "store you can read directly, not a delta against --root. Days "
+            "with no source file are the one exception and are reported as "
+            "FILE_MISSING."
         ),
     )
     ap.add_argument(
@@ -400,8 +423,17 @@ def _impute_one_symbol(
 
         skipped = sum(1 for _, note in log if note == "SKIP_no_reference")
         if new_table is None:
+            # Complete day: still copy it, or --output is a delta rather than
+            # the "imputed copy" its --help promises. See _passthrough_table.
             no_change += 1
-            print(f"{d.isoformat():<11}  {'OK':<14}  {before:>5}  {0:>5}  {0:>5}")
+            if not dry_run:
+                out_path = output / path.relative_to(root)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                _write_atomic(out_path, _passthrough_table(path))
+                status = "COPIED"
+            else:
+                status = "WOULD_COPY"
+            print(f"{d.isoformat():<11}  {status:<14}  {before:>5}  {0:>5}  {0:>5}")
             d += timedelta(days=1)
             continue
 
@@ -428,7 +460,7 @@ def _impute_one_symbol(
     print(f"  files_touched   {touched}")
     print(f"  rows_imputed    {imputed_total}")
     print(f"  rows_skipped    {skipped_total}  (no reference bar available)")
-    print(f"  already_ok      {no_change}")
+    print(f"  copied_intact   {no_change}  (complete already; copied so --output is whole)")
     print(f"  file_missing    {file_missing}")
     print(f"  holiday         {holiday_n}")
     print(f"  weekend         {weekend_n}")

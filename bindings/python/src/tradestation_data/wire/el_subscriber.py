@@ -28,6 +28,13 @@ log = logging.getLogger(__name__)
 # Windows timezone — wrong whenever the operator's system isn't ET).
 _ET_TZ: ZoneInfo = ZoneInfo("America/New_York")
 
+# EL's TsStr, and the same thing spelled for a human in the refusal message.
+# One constant each so the parser and the error can never describe different
+# formats — an error naming a format the code does not accept is worse than
+# no error at all.
+_EL_TS_FORMAT = "%Y-%m/%d-%H:%M:%S"
+_EL_TS_FORMAT_HUMAN = "yyyy-MM/dd-HH:mm:ss (24-hour)"
+
 # Symbols TradeStation emits as indices / breadth, with no bid/ask/volume
 # semantics. The wire carries bid/ask as plain floats for these (usually 0.0
 # or stale), so the invalidation has to happen here — it is a contract rule,
@@ -377,23 +384,46 @@ class TradeStationELProvider:
         )
 
     def _parse_bar(self, symbol: str, data: dict[str, Any], timeframe: str = "1m") -> Bar:
-        # Priority for bucket_start (UTC):
+        # Priority for bucket_start (UTC) — semantics.md §1.1:
         #   1. ts_str (authoritative) — EL wall-clock string, parsed here
         #      as America/New_York. Zone-correct on any DLL host because
-        #      we never rely on the host's system tz. The publisher no longer
-        #      parses this string at all, so a malformed one arrives intact
-        #      and is caught here rather than upstream.
-        #   2. ts — receive-side wall clock, last-resort only. During
-        #      historical replay every bar shares one ts and would collapse
-        #      onto a single bucket, so this is strictly a fallback for a
-        #      publisher that sent no ts_str.
+        #      we never rely on the host's system tz.
+        #   2. ts — receive-side wall clock, last-resort only, and ONLY when
+        #      the publisher sent no ts_str at all.
+        #
+        # "Absent" and "present but unparseable" are two different states and
+        # must not share a path. The publisher no longer parses ts_str, so the
+        # DLL-side format check that used to catch a bad string is gone; this
+        # is the only place left that can notice. Falling back on a string we
+        # could not read is what makes that failure silent AND wrong: `ts` is
+        # the receive clock, so during a chart replay every bar of a session
+        # arrives within the same minute, collapses onto one bucket_start, and
+        # the runtime's dedupe discards all but one — a whole session reduced
+        # to a single plausible-looking bar in today's partition. That is the
+        # zh-TW FormatTime("tt") incident this repo already shipped once.
         bucket_start: datetime | None = None
 
         ts_str_raw = data.get("ts_str")
         if isinstance(ts_str_raw, str) and ts_str_raw:
             bucket_start = _parse_el_str_as_et(ts_str_raw)
+            if bucket_start is None:
+                # Refuse. events() logs the payload and drops the frame; the
+                # stream survives, and no invented bucket reaches storage.
+                raise ValueError(
+                    f"bar payload carries an unparseable 'ts_str': {ts_str_raw!r}. "
+                    f"Expected {_EL_TS_FORMAT_HUMAN}, read as America/New_York. "
+                    f"A localised or reformatted time string from the indicator "
+                    f"is the usual cause; the DLL no longer validates it."
+                )
 
         if bucket_start is None:
+            # No ts_str at all. §1.1 allows the degradation but requires it be
+            # recorded — an operator seeing this on every frame is looking at a
+            # publisher that will collapse any replay onto one bucket.
+            log.warning(
+                "bar_ts_str_absent_using_recv_clock",
+                extra={"symbol": symbol, "timeframe": timeframe},
+            )
             bucket_start = _floor_to_minute_utc(float(data["ts"]))
 
         # §2 — the wire is right-labelled, the contract is left-labelled.
@@ -467,16 +497,18 @@ def _floor_to_minute_utc(epoch_seconds: float) -> datetime:
 def _parse_el_str_as_et(s: str) -> datetime | None:
     """Parse EL TsStr ``yyyy-MM/dd-HH:mm:ss`` (24-hour) as ET, return
     UTC-aware datetime floored to the minute. Returns None on any parse
-    failure. DST is resolved by ZoneInfo from the parsed local fields.
+    failure — the caller refuses the frame rather than substituting a
+    guess. DST is resolved by ZoneInfo from the parsed local fields.
 
     24-hour format is deliberate: the prior ``hh:mm:ss tt`` format broke
     on zh-TW Windows hosts where ``FormatTime("tt")`` emits localized
     AM/PM ("上午"/"下午") that neither C's sscanf nor Python's %p can
     match — every bar would then fall through to the receive-time ``ts``
-    fallback and collapse onto today's date partition.
+    fallback and collapse onto today's date partition. That fallback is
+    now a refusal, so the same regression fails loudly instead.
     """
     try:
-        local = datetime.strptime(s, "%Y-%m/%d-%H:%M:%S")
+        local = datetime.strptime(s, _EL_TS_FORMAT)
     except (TypeError, ValueError):
         return None
     aware_et = local.replace(tzinfo=_ET_TZ)

@@ -287,13 +287,21 @@ async def test_bar_ts_str_handles_dst_boundary(zmq_inproc_bus) -> None:
 
 
 @pytest.mark.asyncio
-async def test_bar_rejects_localized_am_pm_ts_str(zmq_inproc_bus) -> None:
-    """Regression lock: the wire moved from 12-hour + ``tt`` to 24-hour
-    because ``FormatTime("tt")`` on a zh-TW TradeStation host emits
-    "上午"/"下午" (UTF-8), which ``%I:%M:%S %p`` strptime could not match.
-    The bar then silently fell through to the receive-time ``ts`` fallback
-    and collapsed every historical bar onto today's date partition. The
-    parser must reject the localized form outright."""
+async def test_bar_with_localized_am_pm_ts_str_is_refused(zmq_inproc_bus, caplog) -> None:
+    """A `ts_str` the parser cannot read gets the frame dropped, not guessed.
+
+    The wire moved from 12-hour + ``tt`` to 24-hour because
+    ``FormatTime("tt")`` on a zh-TW TradeStation host emits "上午"/"下午"
+    (UTF-8), which ``%I:%M:%S %p`` could not match. Every bar then fell
+    through to the receive-time ``ts`` — and on a chart replay that is one
+    instant for the whole session, so 390 bars collapsed onto one bucket and
+    the runtime's dedupe kept exactly one. A full day, gone, every number in
+    the survivor plausible.
+
+    Falling back on a string we could not read is the bug. The publisher no
+    longer parses ts_str either (`ts_utc` is gone), so this is the only layer
+    that can notice. It refuses, and says why.
+    """
     provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
     await _publish(
         pub,
@@ -303,30 +311,47 @@ async def test_bar_rejects_localized_am_pm_ts_str(zmq_inproc_bus) -> None:
             ts_str="2026-04/18-01:31:00 下午",
         ),
     )
+    # A good frame behind it proves the refusal drops one frame, not the stream.
+    # ts_str is ET: 09:31 EDT is the 09:30 bar's close, so it left-labels to
+    # 09:30 EDT == 13:30 UTC.
+    await _publish(pub, "SPY", _bar_frame(seq=2, ts_str="2026-04/18-09:31:00"))
 
     gen = provider.events()
-    event = await asyncio.wait_for(anext(gen), timeout=1.0)
+    with caplog.at_level("WARNING", logger="tradestation_data.wire.el_subscriber"):
+        event = await asyncio.wait_for(anext(gen), timeout=1.0)
+
+    # The localized frame never surfaced; the next one did.
     assert isinstance(event, Bar)
-    # Fell back to ts (13:31 UTC floored, then left-labelled to 13:30) —
-    # not 01:31 AM/PM guesswork.
     assert event.bucket_start == datetime(2026, 4, 18, 13, 30, 0, tzinfo=UTC)
+    assert any("unparseable 'ts_str'" in r.message for r in caplog.records), (
+        "the refusal must name the field, or an operator cannot act on it"
+    )
 
     await gen.aclose()
     await provider.close()
 
 
 @pytest.mark.asyncio
-async def test_bar_falls_back_to_ts_when_ts_str_absent(zmq_inproc_bus) -> None:
-    """The DLL no longer parses `ts_str`, so an absent one reaches here."""
+async def test_bar_absent_ts_str_falls_back_but_says_so(zmq_inproc_bus, caplog) -> None:
+    """No `ts_str` at all is a degradation, not a lie — allowed, but logged.
+
+    semantics.md §1.1 permits the receive-clock fallback when the publisher
+    sent no string. It requires the binding to record it, because an operator
+    seeing this on every frame is watching a publisher that will collapse any
+    replay onto a single bucket.
+    """
     provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
     frame = _bar_frame(ts=datetime(2026, 4, 18, 13, 31, 12, tzinfo=UTC).timestamp())
     del frame["ts_str"]
     await _publish(pub, "SPY", frame)
 
     gen = provider.events()
-    event = await asyncio.wait_for(anext(gen), timeout=1.0)
+    with caplog.at_level("WARNING", logger="tradestation_data.wire.el_subscriber"):
+        event = await asyncio.wait_for(anext(gen), timeout=1.0)
+
     assert isinstance(event, Bar)
     assert event.bucket_start == datetime(2026, 4, 18, 13, 30, 0, tzinfo=UTC)
+    assert any("bar_ts_str_absent_using_recv_clock" in r.message for r in caplog.records)
 
     await gen.aclose()
     await provider.close()
