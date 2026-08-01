@@ -14,7 +14,7 @@
 | --- | --- | --- |
 | 0 準備 | ✅ `c3d015a` | 相依 8 → 5 |
 | 1 Contract | ✅ | v1–v4 + compat.md 刪除；`wire.md` + 兩份 schema 新建；semantics 601 → 430 行 |
-| 2 EL indicator | ⬜ | |
+| 2 EL indicator | ✅ | 五個量值原樣送；`EL_Init3` + `EL_DllVersion` latch；原型/呼叫端參數數已自動核對 |
 | 3 C++ DLL | ⬜ | |
 | 4 重錄 fixtures | ⬜ | 需關閉 TradeStation 釋放 5555 |
 | 5 domain + wire | ⬜ | |
