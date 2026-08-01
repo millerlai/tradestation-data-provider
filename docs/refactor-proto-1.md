@@ -15,7 +15,7 @@
 | 0 準備 | ✅ `c3d015a` | 相依 8 → 5 |
 | 1 Contract | ✅ | v1–v4 + compat.md 刪除；`wire.md` + 兩份 schema 新建；semantics 601 → 430 行 |
 | 2 EL indicator | ✅ | 五個量值原樣送；`EL_Init3` + `EL_DllVersion` latch；原型/呼叫端參數數已自動核對 |
-| 3 C++ DLL | ⬜ | |
+| 3 C++ DLL | ✅ | ABI 1；x86+x64 建置通過；匯出修飾 `_EL_PublishTick@72` / `_EL_PublishBar@88` 與 EL 端逐位元組吻合；墓碑驗證已自動化 |
 | 4 重錄 fixtures | ⬜ | 需關閉 TradeStation 釋放 5555 |
 | 5 domain + wire | ⬜ | |
 | 6 storage | ⬜ | |
@@ -34,6 +34,9 @@
 | D-2 | `uv.lock` 重產從 Phase 0 延到 Phase 6 之後 | 現在 `uv sync` 會把 duckdb 移出環境，但 `history_store.py` / `resampler.py` 仍 import 它 → Phase 5 的 domain/wire 改動將完全無法驗證。`pyproject.toml` 的宣告先改，環境後動 |
 | D-3 | T-1.3 要刪的 `semantics.md` §2.5（空區間讀取語意）**保留**，改編號為 §2.4 | 計畫內部矛盾：T-9.7 明列保留「空結果 schema 一致」的測試，但 T-1.3 要刪掉定義那條規則的章節。這條講的是讀取 API 的基本契約（空區間回 0 列而非拋錯、空/非空 schema 必須一致），與衍生運算無關，`HistoryStore` 改純讀取後仍然成立 |
 | D-4 | `semantics.md` 收在 430 行，未達計畫的「250 行內」 | 減幅 28%。再往下砍就要動 §2.2 的 DST 論證與 §3.4 的實測數據，兩者都是被真實 bug 逼出來、且無法從程式碼重新推導的內容。行數是估計值，內容取捨優先 |
+| D-5 | T-3.11 的「手動驗證墓碑」改成 **harness 每次啟動都自動驗證** | 手動檢查是不會被重複執行的檢查。`test_harness.cpp` 現在在任何 init 之前先斷言 `EL_DllVersion() == 1` 且 `EL_Init` / `EL_Init2` 都回 `-6`，任何 mode 跑起來都會驗一次 |
+| D-6 | 計畫未列：**更新 `cpp/prebuilt/` 的兩顆 DLL** | 那兩顆是 committed 的 ABI 9 binary，而 README 教使用者直接拿來用。不更新的話，新 `.ELD` 會在 `DefineDLLFunc` 找不到 `EL_Init3` —— 雖然是可讀的失敗，但對照著文件走的人會撞上它。已用本次 x86/x64 Release 產物覆蓋 |
+| D-7 | 計畫未列：`cpp/README.md` / `README.zh-TW.md` 的 ABI 敘述 | 兩份都寫著過時的 `EL_DllVersion() == 6`（`issues.md` E-01 已記錄過一次）。計畫的 Phase 10 文件清單漏掉這兩份，已補進 T-10.11 |
 
 ---
 
