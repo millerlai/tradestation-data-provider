@@ -34,7 +34,30 @@ extern "C" {
 //  -4  invalid argument (null pointer etc.)
 //  -5  unsupported bar type / interval (no wire timeframe for it)
 
+// Initialise without declaring a publisher convention. Every payload then
+// carries "pv":0 — see EL_Init2. Kept for indicators compiled before that
+// function existed; new callers should not use it.
 TS2P_API int TS2P_CALL EL_Init(const char* zmq_endpoint);
+
+// Initialise and declare which publisher convention the caller implements.
+// The value is echoed on every payload as `pv`.
+//
+//   0  not declared (what plain EL_Init produces)
+//   1  ../contract/semantics.md §3.4: `vol` is total share volume on every
+//      timeframe, and intraday `tc` is 0
+//
+// The declaration is needed because this DLL cannot see it. The convention
+// is decided in EasyLanguage, by which reserved word the indicator reads,
+// and the indicator lives in the user's TradeStation install — it does not
+// update when a binding or this DLL does. An exporter older than the §3.4
+// fix sends up-tick share volume in `vol`: roughly half of what traded,
+// with nothing in the number to say so. `pv` is what lets a subscriber
+// separate the two after the fact.
+//
+// A separate export rather than a new parameter on EL_Init: these are
+// __stdcall, so an old indicator calling a widened EL_Init would corrupt
+// the stack. Both remain; whichever is called wins.
+TS2P_API int TS2P_CALL EL_Init2(const char* zmq_endpoint, int publisher_version);
 
 TS2P_API int TS2P_CALL EL_PublishTick(
     const char* symbol,
@@ -102,7 +125,7 @@ TS2P_API int TS2P_CALL EL_Shutdown(void);
 
 // Version identifier for this DLL build (bumps independently of the wire
 // protocol version carried in the payload's "v" field). Current pairing is
-// ABI 8 <-> wire 3; see ../contract/compat.md for the full matrix.
+// ABI 9 <-> wire 4; see ../contract/compat.md for the full matrix.
 TS2P_API int TS2P_CALL EL_DllVersion(void);
 
 #ifdef __cplusplus

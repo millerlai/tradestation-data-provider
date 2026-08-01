@@ -20,7 +20,7 @@ from tradestation_data.domain.timeframe import (
     align_bucket_start,
 )
 from tradestation_data.storage.bar_coverage import CoverageRecord, Entry, SourceFingerprint
-from tradestation_data.storage.bar_writer import BAR_SCHEMA
+from tradestation_data.storage.bar_writer import BAR_SCHEMA, with_publisher_version
 from tradestation_data.storage.resampler import Resampler
 
 log = logging.getLogger(__name__)
@@ -49,6 +49,7 @@ _EMPTY_TICK_SCHEMA: dict[str, type[pl.DataType] | pl.DataType] = {
     "ask": pl.Float64,
     "tick_count": pl.Int32,
     "source": pl.Utf8,
+    "publisher_version": pl.Int32,
     "date": pl.Date,
     "symbol": pl.Utf8,
 }
@@ -63,6 +64,7 @@ _EMPTY_BAR_SCHEMA: dict[str, type[pl.DataType] | pl.DataType] = {
     "volume": pl.Int64,
     "tick_count": pl.Int32,
     "source": pl.Utf8,
+    "publisher_version": pl.Int32,
     "symbol": pl.Utf8,
 }
 
@@ -181,7 +183,13 @@ class HistoryStore:
         try:
             con.execute("SET TimeZone='UTC'")
             df = con.execute(
-                "SELECT * FROM read_parquet(?, hive_partitioning = true) "
+                # union_by_name: without it read_parquet takes the FIRST
+                # file's schema and silently drops any column the others add.
+                # One partition written before `publisher_version` existed
+                # would therefore erase the column for every row in the glob —
+                # no error, just the field this store added to tell two
+                # volume conventions apart, gone. Measured on duckdb 1.5.3.
+                "SELECT * FROM read_parquet(?, hive_partitioning = true, union_by_name = true) "
                 "WHERE timestamp BETWEEN ? AND ? ORDER BY timestamp",
                 [pattern, start, end],
             ).pl()
@@ -307,7 +315,13 @@ class HistoryStore:
         try:
             con.execute("SET TimeZone='UTC'")
             df = con.execute(
-                "SELECT * FROM read_parquet(?, hive_partitioning = true) "
+                # union_by_name: without it read_parquet takes the FIRST
+                # file's schema and silently drops any column the others add.
+                # One partition written before `publisher_version` existed
+                # would therefore erase the column for every row in the glob —
+                # no error, just the field this store added to tell two
+                # volume conventions apart, gone. Measured on duckdb 1.5.3.
+                "SELECT * FROM read_parquet(?, hive_partitioning = true, union_by_name = true) "
                 "WHERE bucket_start BETWEEN ? AND ? ORDER BY bucket_start",
                 [pattern, start, end],
             ).pl()
@@ -627,7 +641,21 @@ def _canonical_bars(df: pl.DataFrame) -> pl.DataFrame:
     restate the path, the build path never had them, and so nothing could have
     been reading them without breaking on its first cold call.
     """
-    return _with_bucket_start_et(df).select(_BAR_COLUMNS)
+    return _with_publisher_version(_with_bucket_start_et(df)).select(_BAR_COLUMNS)
+
+
+def _with_publisher_version(df: pl.DataFrame) -> pl.DataFrame:
+    """Add a null ``publisher_version`` when the frame has none.
+
+    Two producers reach here without it: a partition written before the field
+    existed, and `scripts/aggregate_parquet.py`, which has always written its
+    own narrower column list. Selecting the column blind would turn every read
+    of either into a ColumnNotFoundError — the same trap `_with_bucket_start_et`
+    exists for.
+    """
+    if "publisher_version" in df.columns:
+        return df
+    return df.with_columns(pl.lit(None, dtype=pl.Int32).alias("publisher_version"))
 
 
 def _with_bucket_start_et(df: pl.DataFrame) -> pl.DataFrame:
@@ -645,7 +673,7 @@ def _with_bucket_start_et(df: pl.DataFrame) -> pl.DataFrame:
 
 def _polars_bars_to_arrow(df: pl.DataFrame) -> pa.Table:
     """Convert a resampled Polars DataFrame to the canonical BAR_SCHEMA."""
-    df = _with_bucket_start_et(df)
+    df = _with_publisher_version(_with_bucket_start_et(df))
     table = df.select(
         [
             "bucket_start",
@@ -657,6 +685,7 @@ def _polars_bars_to_arrow(df: pl.DataFrame) -> pa.Table:
             "volume",
             "tick_count",
             "source",
+            "publisher_version",
         ]
     ).to_arrow()
     return table.cast(BAR_SCHEMA)
@@ -682,7 +711,7 @@ def _merge_with_existing_partition(path: Path, fresh: pa.Table) -> pa.Table | No
         # date=`, read_table runs hive discovery and hands back three extra
         # dictionary columns, which then fail the cast and silently drop us
         # into the overwrite this function exists to prevent.
-        existing = pq.ParquetFile(path).read().cast(BAR_SCHEMA)
+        existing = with_publisher_version(pq.ParquetFile(path).read()).cast(BAR_SCHEMA)
     except Exception:
         # Unreadable, or written to a schema this binding does not know — the
         # batch aggregation tool omits `bucket_start_et`, and the cast fails.

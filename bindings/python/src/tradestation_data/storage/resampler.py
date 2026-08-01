@@ -83,8 +83,35 @@ _EMPTY_SCHEMA: dict[str, type[pl.DataType] | pl.DataType] = {
     "volume": pl.Int64,
     "tick_count": pl.Int32,
     "source": pl.Utf8,
+    "publisher_version": pl.Int32,
     "symbol": pl.Utf8,
 }
+
+# What to select for `publisher_version` when no source file carries it.
+# `union_by_name` unions the columns that exist; it cannot invent one, so
+# naming the column outright over a store written entirely before the field
+# raises "Referenced column not found" and takes the whole resample down.
+_NO_PUBLISHER_VERSION_SQL = "CAST(NULL AS INTEGER) AS publisher_version"
+
+
+def _publisher_version_expr(con: duckdb.DuckDBPyConnection, pattern: str, order_by: str) -> str:
+    """`last(publisher_version)` if the glob has that column, else a null cast.
+
+    Asks DuckDB rather than reading footers here: one DESCRIBE over the same
+    `union_by_name` read answers "does any file in this glob carry it", which
+    is exactly the condition, and is what the real query will see.
+    """
+    cols = {
+        row[0]
+        for row in con.execute(
+            "DESCRIBE SELECT * FROM read_parquet(?, hive_partitioning = true, "
+            "union_by_name = true)",
+            [pattern],
+        ).fetchall()
+    }
+    if "publisher_version" not in cols:
+        return _NO_PUBLISHER_VERSION_SQL
+    return f"CAST(last(publisher_version ORDER BY {order_by}) AS INTEGER) AS publisher_version"
 
 
 class Resampler:
@@ -136,27 +163,32 @@ class Resampler:
             return pl.DataFrame(schema=_EMPTY_SCHEMA)
 
         pattern = (self._ticks_root / f"symbol={symbol}" / "date=*" / "ticks.parquet").as_posix()
-        sql = f"""
-        SELECT
-          {_bucket_expr("timestamp", tf)} AS bucket_start,
-          first(price ORDER BY timestamp) AS open,
-          max(price)                      AS high,
-          min(price)                      AS low,
-          last(price ORDER BY timestamp)  AS close,
-          CAST(sum(volume) AS BIGINT)     AS volume,
-          CAST(count(*) AS INTEGER)       AS tick_count,
-          ? AS source
-        FROM read_parquet(?, hive_partitioning = true)
-        WHERE timestamp BETWEEN ? AND ?
-        GROUP BY bucket_start
-        ORDER BY bucket_start
-        """
         con = duckdb.connect()
         try:
             # Force UTC so TIMESTAMPTZ results don't inherit the system
             # timezone (Windows lacks tzdata, and polars refuses to parse
             # non-UTC zones without it).
             con.execute("SET TimeZone='UTC'")
+            # union_by_name: read_parquet otherwise takes the FIRST file's
+            # schema and silently drops columns the others add, which would
+            # erase publisher_version for the whole glob the moment one old
+            # partition is in range. Measured on duckdb 1.5.3.
+            sql = f"""
+            SELECT
+              {_bucket_expr("timestamp", tf)} AS bucket_start,
+              first(price ORDER BY timestamp) AS open,
+              max(price)                      AS high,
+              min(price)                      AS low,
+              last(price ORDER BY timestamp)  AS close,
+              CAST(sum(volume) AS BIGINT)     AS volume,
+              CAST(count(*) AS INTEGER)       AS tick_count,
+              ? AS source,
+              {_publisher_version_expr(con, pattern, "timestamp")}
+            FROM read_parquet(?, hive_partitioning = true, union_by_name = true)
+            WHERE timestamp BETWEEN ? AND ?
+            GROUP BY bucket_start
+            ORDER BY bucket_start
+            """
             df = con.execute(sql, [derived_source("ticks"), pattern, start, end]).pl()
         finally:
             con.close()
@@ -190,26 +222,27 @@ class Resampler:
             return pl.DataFrame(schema=_EMPTY_SCHEMA)
 
         pattern = (src_dir / "date=*" / "bars.parquet").as_posix()
-        # Alias the bucketed column to ``bkt`` to avoid an ambiguous
-        # GROUP BY against the source's ``bucket_start`` column.
-        sql = f"""
-        SELECT
-          {_bucket_expr("bucket_start", tf)} AS bkt,
-          first(open  ORDER BY bucket_start) AS open,
-          max(high)                          AS high,
-          min(low)                           AS low,
-          last(close  ORDER BY bucket_start) AS close,
-          CAST(sum(volume) AS BIGINT)        AS volume,
-          CAST(sum(tick_count) AS INTEGER)   AS tick_count,
-          ? AS source
-        FROM read_parquet(?, hive_partitioning = true)
-        WHERE bucket_start BETWEEN ? AND ?
-        GROUP BY bkt
-        ORDER BY bkt
-        """
         con = duckdb.connect()
         try:
             con.execute("SET TimeZone='UTC'")
+            # Alias the bucketed column to ``bkt`` to avoid an ambiguous
+            # GROUP BY against the source's ``bucket_start`` column.
+            sql = f"""
+            SELECT
+              {_bucket_expr("bucket_start", tf)} AS bkt,
+              first(open  ORDER BY bucket_start) AS open,
+              max(high)                          AS high,
+              min(low)                           AS low,
+              last(close  ORDER BY bucket_start) AS close,
+              CAST(sum(volume) AS BIGINT)        AS volume,
+              CAST(sum(tick_count) AS INTEGER)   AS tick_count,
+              ? AS source,
+              {_publisher_version_expr(con, pattern, "bucket_start")}
+            FROM read_parquet(?, hive_partitioning = true, union_by_name = true)
+            WHERE bucket_start BETWEEN ? AND ?
+            GROUP BY bkt
+            ORDER BY bkt
+            """
             df = con.execute(sql, [derived_source(source_timeframe), pattern, start, end]).pl()
         finally:
             con.close()

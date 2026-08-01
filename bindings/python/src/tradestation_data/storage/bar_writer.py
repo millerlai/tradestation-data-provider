@@ -35,8 +35,35 @@ BAR_SCHEMA: pa.Schema = pa.schema(
         pa.field("volume", pa.int64(), nullable=False),
         pa.field("tick_count", pa.int32(), nullable=False),
         pa.field("source", pa.string(), nullable=False),
+        # Which publisher convention produced `volume` — wire v4's `pv`.
+        # Nullable and last in the schema on purpose: every partition written
+        # before this field existed simply lacks the column, and null is the
+        # only honest value for those rows. `with_publisher_version` is what
+        # lets such a file still be read and rewritten.
+        pa.field("publisher_version", pa.int32(), nullable=True),
     ]
 )
+
+
+def with_publisher_version(table: pa.Table) -> pa.Table:
+    """Give a table read off disk the `publisher_version` column if it lacks one.
+
+    Partitions written before the field existed have no such column, and
+    ``Table.cast(BAR_SCHEMA)`` compares field lists — it raises rather than
+    filling the gap. Both rewrite paths cast, and both treat a failure as
+    "this file is not ours, leave it alone", so without this an old partition
+    would quietly become un-rebuildable: the row count on disk stops changing
+    and nothing says why.
+
+    Null, not 0: 0 is a publisher that declared itself undeclared, null is a
+    row written before anything could declare.
+    """
+    if "publisher_version" in table.column_names:
+        return table
+    return table.append_column(
+        BAR_SCHEMA.field("publisher_version"),
+        pa.nulls(table.num_rows, pa.int32()),
+    )
 
 
 @dataclass(slots=True)
@@ -204,7 +231,20 @@ class BarWriter:
         """
         incoming = pl.from_arrow(_bars_to_table(bars))
         assert isinstance(incoming, pl.DataFrame)
-        frames = [pl.read_parquet(path), incoming] if path.exists() else [incoming]
+        frames = [incoming]
+        if path.exists():
+            # Through pyarrow rather than pl.read_parquet so a file written
+            # before `publisher_version` existed gets the column back as
+            # nulls; pl.concat(how="vertical") requires matching widths and
+            # this is the only copy of a native daily bar.
+            #
+            # ParquetFile, not read_table: this path sits under
+            # timeframe=/symbol=, and read_table runs hive discovery on those
+            # and hands back two extra dictionary columns — a width mismatch
+            # in the other direction.
+            existing = pl.from_arrow(with_publisher_version(pq.ParquetFile(path).read()))
+            assert isinstance(existing, pl.DataFrame)
+            frames = [existing, incoming]
         merged = (
             pl.concat(frames, how="vertical")
             .unique(subset=["bucket_start"], keep="last", maintain_order=True)
@@ -266,6 +306,7 @@ def _bars_to_table(bars: list[Bar]) -> pa.Table:
             "volume": [b.volume for b in bars],
             "tick_count": [b.tick_count for b in bars],
             "source": [b.source for b in bars],
+            "publisher_version": [b.publisher_version for b in bars],
         },
         schema=BAR_SCHEMA,
     )

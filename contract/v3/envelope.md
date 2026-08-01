@@ -79,9 +79,9 @@ v1/v2 用 `kind: "bar_1m"` 把兩件事綁在同一個字串裡。v3 拆開：
 | `ts_str` | string | EL 原始字串 `yyyy-MM/dd-HH:mm:ss`，逐字透傳。**bar bucket 的權威來源**，但它是 bar 的**收盤**時間（EL 的 `Time`）—— binding 必須依 `semantics.md` §2 減一個 `tf` 才得到左標籤的 `bucket_start` |
 | `px` | float | 成交價（僅 `tick`） |
 | `o` `h` `l` `c` | float | OHLC（僅 `bar`） |
-| `vol` | float | 成交量。**是 float 不是 int** |
+| `vol` | float | **總**成交股數，每個 timeframe 皆然。**是 float 不是 int**。publisher 須依圖表型態選對 EL 保留字 —— 見 `../semantics.md` §3.4 |
 | `bid` `ask` | float \| **null** | 無報價時為 `null` —— 見 `../semantics.md` §3.1 |
-| `tc` | float | tick count，以 `%.0f` 格式化 |
+| `tc` | float | 以 `%.0f` 格式化。**只在 `1d` 上是筆數**，intraday 恆為 `0`，binding 不得當筆數讀 —— 見 `../semantics.md` §3.4 |
 
 `seq` / `sid` 是真正的無號 64 位元整數，其餘數值欄位皆為 double。`seq` 可能超過
 IEEE 754 double 能精確表示的 2^53，預設把 JSON 數字解析成 double 的函式庫**必須**

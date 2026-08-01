@@ -29,7 +29,12 @@ from tradestation_data.domain.bar import Bar
 from tradestation_data.domain.tick import Tick
 from tradestation_data.wire.el_subscriber import TradeStationELProvider
 
-CASES = ["smoke", "noquote", "bars", "session", "v1_legacy", "v1_noquote"]
+# The unprefixed cases are the current wire version; the prefixed ones are
+# superseded versions the DLL may still be emitting from a user's TradeStation
+# install, which compat.md requires every binding to keep reading.
+CURRENT_CASES = ["smoke", "noquote", "bars", "session"]
+V3_CASES = ["v3_smoke", "v3_noquote", "v3_bars", "v3_session"]
+CASES = [*CURRENT_CASES, *V3_CASES, "v1_legacy", "v1_noquote"]
 
 
 def _iso(dt: datetime) -> str:
@@ -201,11 +206,48 @@ async def test_v1_cannot_report_loss_and_must_not_claim_none() -> None:
     assert provider.gap_detection_available is False
 
 
-async def test_v3_feed_reports_a_real_zero() -> None:
-    frames, _expected = load_case("smoke")
+@pytest.mark.parametrize("case", ["smoke", "v3_smoke"])
+async def test_seq_bearing_feed_reports_a_real_zero(case: str) -> None:
+    frames, _expected = load_case(case)
     _events, provider = await _decode_all(frames)
     assert provider.gap_detection_available is True
     assert provider.messages_lost == 0
+
+
+@pytest.mark.parametrize("case", CURRENT_CASES)
+def test_current_wire_declares_a_publisher_convention(case: str) -> None:
+    """v4 — `pv` says which rules produced the numbers, not just where they are.
+
+    Recorded from the harness, which declares 1 through EL_Init2. Without a
+    frame that actually carries the field, nothing would notice the DLL
+    dropping it again — and its absence is silently read as "the pre-§3.4
+    convention", which is a real answer rather than an error.
+    """
+    import json as _json
+
+    frames, expected = load_case(case)
+    assert expected["wire_version"] == 4
+    for _topic, payload in frames:
+        raw = _json.loads(payload)
+        assert raw["v"] == 4
+        assert raw["pv"] == expected["publisher_version"]
+
+
+@pytest.mark.parametrize("case", V3_CASES)
+def test_superseded_wire_carries_no_publisher_convention(case: str) -> None:
+    """The other half: v3 has no `pv`, and that is what "undeclared" looks like.
+
+    A binding must read those frames as the pre-§3.4 convention rather than
+    refusing them, so the fixtures have to keep proving the field is genuinely
+    absent — not merely unasserted.
+    """
+    import json as _json
+
+    frames, expected = load_case(case)
+    assert expected["wire_version"] == 3
+    assert "publisher_version" not in expected
+    for _topic, payload in frames:
+        assert "pv" not in _json.loads(payload)
 
 
 async def test_v1_frames_are_accepted_not_rejected() -> None:

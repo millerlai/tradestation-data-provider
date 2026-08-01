@@ -35,6 +35,7 @@ class _BarBuilder:
     volume: int
     tick_count: int
     source: str
+    publisher_version: int | None
 
     def apply(self, tick: Tick) -> None:
         if tick.price > self.high:
@@ -43,7 +44,21 @@ class _BarBuilder:
             self.low = tick.price
         self.close = tick.price
         self.volume += tick.volume
-        self.tick_count += tick.tick_count
+        # Count rows, never sum the tick's own `tc`. contract/semantics.md §3.4
+        # defines a `derived:ticks` bar's tick_count as the bucket's tick row
+        # count, and that is the only definition that survives an indicator
+        # change: intraday `tc` arrives as 0 from a current exporter and as
+        # EL's `Ticks` — total *share* volume — from one imported before the
+        # §3.4 fix. Summing either produced a wrong number, and the wrong
+        # number disagreed with `Resampler`'s own count(*) over the same
+        # ticks, which is what audit_bar_cache compares.
+        self.tick_count += 1
+        # Last tick wins. A bucket whose ticks disagree can only happen if the
+        # operator re-imported the .ELD mid-minute, and this deployment is a
+        # single operator always running the current export — so "last" and
+        # "all agree" coincide. Revisit if a second publisher ever feeds the
+        # same store: then the honest answer for a mixed bucket is None.
+        self.publisher_version = tick.publisher_version
 
     def build(self) -> Bar:
         return Bar(
@@ -56,6 +71,7 @@ class _BarBuilder:
             volume=self.volume,
             tick_count=self.tick_count,
             source=self.source,
+            publisher_version=self.publisher_version,
         )
 
 
@@ -146,8 +162,9 @@ class BarAggregator:
             low=tick.price,
             close=tick.price,
             volume=tick.volume,
-            tick_count=tick.tick_count,
+            tick_count=1,  # this tick is the bucket's first row; see apply()
             source=derived_source("ticks"),
+            publisher_version=tick.publisher_version,
         )
 
     def _empty_bar(self, symbol: str, bucket_start: datetime) -> Bar:

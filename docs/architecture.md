@@ -50,15 +50,15 @@ flowchart TB
         direction TB
         TS["TradeStation Desktop"]
         EL["EL Exporter Indicator<br/>TS2Python_Exporter.el"]
-        DLL["TS2Python.dll<br/>C++ / Win32 x86 / ABI 8"]
+        DLL["TS2Python.dll<br/>C++ / Win32 x86 / ABI 9"]
         TS --> EL
         EL -->|"DefineDLLFunc __stdcall"| DLL
     end
 
     subgraph CON["② Contract — dp 真正的產品"]
         direction TB
-        WIRE["wire v2<br/>2-frame: topic + payload"]
-        SCHEMA["JSON Schema<br/>tick / bar_1m"]
+        WIRE["wire v4<br/>2-frame: topic + payload"]
+        SCHEMA["JSON Schema<br/>tick / bar"]
         SEM["semantics.md<br/>時間權威 · session 規則"]
         FIX["conformance fixtures<br/>錄自 test_harness"]
         COMPAT["compat.md<br/>ABI × wire 相容矩陣"]
@@ -136,8 +136,8 @@ tradestation-data-provider/
 │  ├─ verify-build-env.bat               　 逐項檢查環境，每項附修正指令
 │  ├─ build.bat                          　 x86 + x64 一次建完
 │  ├─ README.md · README.zh-TW.md
-│  ├─ include/ts2python.h                　 C ABI（EL_Init / EL_PublishTick[Ex] / …）
-│  ├─ src/ts2python.cpp                  　 ZMQ PUB publisher · seq/sid · 報價正規化
+│  ├─ include/ts2python.h                　 C ABI（EL_Init[2] / EL_PublishTick[Ex] / …）
+│  ├─ src/ts2python.cpp                  　 ZMQ PUB publisher · seq/sid/pv · 報價正規化
 │  ├─ src/test_harness.cpp               　 不依賴 TradeStation 的 frame 產生器
 │  ├─ src/TS2Python.def
 │  └─ build-tools/vcpkg/                 　 submodule
@@ -342,9 +342,14 @@ protocol」。對應關係記在 [`../contract/compat.md`](../contract/compat.md
 
 | 版本 | 現值 | 誰在乎 |
 | --- | --- | --- |
-| wire version（payload `"v"`） | **3**（`kind` 表形狀、`tf` 表區間） | 所有 binding |
-| DLL ABI（`EL_DllVersion()`） | **8** | 所有 binding |
+| wire version（payload `"v"`） | **4**（v3 的 `kind` / `tf` 之上再加 `pv`） | 所有 binding |
+| publisher convention（payload `"pv"`） | **1**（`vol` 為總成交股數、intraday `tc` 為 0） | 所有 binding |
+| DLL ABI（`EL_DllVersion()`） | **9** | 所有 binding |
 | Python package version | 0.2.0 | 僅 Python 消費端 |
+
+`pv` 與 `v` 是**兩個不同的東西**：`v` 說欄位擺在哪（由 DLL 決定），`pv` 說那些數字
+是依哪一版規則算出來的（由 EL indicator 決定）。兩者各自安裝、各自更新，所以不能
+共用一個版本號 —— 見 [`../contract/v4/envelope.md`](../contract/v4/envelope.md)。
 
 消費端 pin 的是 package version，但真正決定「能不能通」的是前兩者。
 v1 與 v2 已被取代但**仍須支援** —— DLL 裝在使用者的 TradeStation 裡，不會隨著

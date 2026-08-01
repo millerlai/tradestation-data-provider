@@ -49,7 +49,8 @@ cd cpp
 把 EasyLanguage 的原始保留字與**實際送上 wire 的值**並排印出來：
 
 ```
-[TS2Python] tick 2026-07/24-15:59:00 bar_type=0.00 bar_interval=1.00 px=742.55
+[TS2Python] bar  2026-07/24-15:59:00 bar_type=1.00 bar_interval=1.00
+            o=742.31 h=742.60 l=742.28 c=742.55
             el_volume=13465 el_ticks=21152 wire_vol=21152 wire_tc=0
             bid=742.54 ask=742.56 rc=0
 ```
@@ -57,6 +58,17 @@ cd cpp
 `el_volume` / `el_ticks` 是 EL 交出來的，`wire_vol` / `wire_tc` 是經過 intraday /
 daily 對映後送出去的。**兩者印在同一行是重點** —— 那一對正是在不同圖表型態之間會
 反轉語意的欄位，也是驗證對映是否正確的唯一方式（尤其是還沒有人量過的圖表型態）。
+
+**被拒收的圖表** publish 不會執行，因此另有第三種行的形狀：
+
+```
+[TS2Python] refused SPY bar_type=0.00 bar_interval=100.00
+            date=1260724.00 time=1600.00 el_volume=753328 el_ticks=760951
+```
+
+這行只有 EasyLanguage 側的字 —— `wire_vol` / `wire_tc` / `rc` 要 publish 真的跑過
+才存在。但要第一次量測一個圖表型態，需要的本來就是這一半；在此之前 LogPublish 在
+它文件上宣稱適用的那些圖表上一行都印不出來。
 
 平時請關閉。在 tick 圖、或任何開啟 "update every tick" 的圖上，它會每筆成交印一次。
 
@@ -94,13 +106,16 @@ order flow 資訊，但 wire 沒有欄位可放；新增欄位要升版，尚未
 ### N-tick 圖為何被拒收
 
 tick series 只有在 `BarInterval = 1` 時才是「一次呼叫一筆成交」。100-tick 圖的每次
-呼叫帶的是一整根 bar：`Close` 是那一百筆的最後一筆、`Volume` 是它們的總和。
-`EL_PublishTick` 沒有欄位能表達這件事，於是 Tier 1 會把它記成**單一筆成交，價格是
-其中一筆、成交量卻是一百筆的和** —— 成交量欄位錯兩個數量級，而且無人能察覺。
+呼叫帶的是一整根 bar：`Close` 是那一百筆的最後一筆，而兩個量能欄位依上表的 intraday
+規則涵蓋全部一百筆 —— `Ticks` 是它們的總成交股數、`Volume` 是其中的上漲部分。兩者
+都不是「100」；intraday 根本沒有任何保留字提供筆數。`EL_PublishTick` 也沒有欄位能
+說明這次呼叫是一根 bar，於是 Tier 1 會把它記成**單一筆成交，價格是其中一筆、成交量
+卻是一百筆的和** —— 成交量欄位錯約兩個數量級，而且無人能察覺。
 
 與秒級圖不同的是，判斷所需的資訊還在：`BarInterval` 直接說明一次呼叫涵蓋幾筆。
-實機量測：100-tick 圖在 `EL_Init` 回報 `bar_interval=100.00`，1-tick 圖回報 `1.00`
-並且每筆成交呼叫一次 `EL_PublishTick`。
+實機量測：100-tick 圖在 `EL_Init2` 回報 `bar_interval=100.00`、`Ticks = 760951`
+（那一百筆的成交股數，不是 `100`），1-tick 圖回報 `1.00` 並且每筆成交呼叫一次
+`EL_PublishTick`。
 
 另外這也表示 `TsStr` 無法區分同一分鐘內的多筆成交：1-tick 圖會連送八次、全部標記
 `19:48:00`，因為 `Time` 只有分鐘解析度。真正區分它們的是 DLL 的收訊端 `ts`，這正是

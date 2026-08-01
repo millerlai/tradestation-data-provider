@@ -41,16 +41,47 @@ DEFAULT_INDEX_SYMBOLS: frozenset[str] = frozenset(
 #   v1  no seq/sid, so no gap detection
 #   v2  adds seq/sid, and nullable bid/ask
 #   v3  adds `tf`; `kind` narrows to tick/bar with the interval in its own field
+#   v4  adds `pv` — which publisher convention produced the numbers
 # Reading a version above the maximum is an error rather than a guess — an
 # unknown high version may have changed field semantics we would silently
 # misread. See ../../../../contract/compat.md.
+
+# Publisher conventions this binding knows, reported as `pv` on wire v4.
+#   0  undeclared — an exporter older than the field. Read intraday `vol` as
+#      up-tick share volume alone, roughly half of what traded.
+#   1  contract/semantics.md §3.4: `vol` is total share volume on every
+#      timeframe, and intraday `tc` is 0.
+# Absent (v1/v2/v3) is read the same way as 0 — do not trust intraday `vol`
+# to be the total — but is *stored* as None; see _publisher_version.
+#
+# Unlike `v`, an unknown `pv` is logged and the frame is kept. `v` unknown
+# means we cannot tell where the fields are; `pv` unknown means we can read
+# them but some were computed by a rule we do not know — the data is not
+# damaged, and dropping it would lose more than it protects. compat.md
+# spells out the asymmetry.
+_PUBLISHER_UNDECLARED = 0
+KNOWN_PUBLISHER_VERSIONS: frozenset[int] = frozenset({0, 1})
+
+
+def _publisher_version(data: dict[str, Any]) -> int | None:
+    """`pv` off the wire, or None when the payload had no such field.
+
+    None and 0 both mean "do not trust intraday `vol` to be the total", but
+    they are not the same fact and are stored apart: 0 is a publisher that
+    declared itself undeclared, None is a wire version that had nowhere to
+    declare it. Collapsing them would make a v3 feed indistinguishable from
+    a v4 one running an old indicator.
+    """
+    pv = data.get("pv")
+    return None if pv is None else int(pv)
+
 
 # Timeframes this binding will accept on the wire live in
 # domain.timeframe.SUPPORTED_TIMEFRAMES — deliberately the same vocabulary the
 # storage layer partitions on. A `tf` we cannot place is a frame we must not
 # file, because filing it under a default would put bars of one interval into
 # another interval's partition.
-SUPPORTED_WIRE_VERSIONS: frozenset[int] = frozenset({1, 2, 3})
+SUPPORTED_WIRE_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4})
 
 
 class _SequenceTracker:
@@ -141,7 +172,8 @@ class TradeStationELProvider:
 
         Tick (EL_PublishTick):
           {
-            "v":      3,          # wire version
+            "v":      4,          # wire version
+            "pv":     <int>,      # publisher convention; 0 = undeclared
             "seq":    <int>,      # monotonic sequence per symbol
             "sid":    <int>,      # publisher session id
             "kind":   "tick",
@@ -157,7 +189,8 @@ class TradeStationELProvider:
 
         Bar (EL_PublishBar, non-tick OHLC):
           {
-            "v":      3,
+            "v":      4,
+            "pv":     <int>,
             "seq":    <int>,
             "sid":    <int>,
             "kind":   "bar",
@@ -200,6 +233,10 @@ class TradeStationELProvider:
         self._closed = False
         self._seq = _SequenceTracker()
         self._warned_no_gap_detection = False
+        # Which `pv` values have already been reported. Per value rather than
+        # a single flag: a publisher restart between two indicator vintages
+        # inside one subscriber session is exactly the case worth seeing twice.
+        self._reported_publisher_versions: set[int | None] = set()
 
     @property
     def gap_detection_available(self) -> bool:
@@ -324,6 +361,8 @@ class TradeStationELProvider:
         if version not in SUPPORTED_WIRE_VERSIONS:
             raise ValueError(f"Unsupported payload version: {version}")
 
+        self._note_publisher_version(data)
+
         kind = data.get("kind", "tick")
         if kind == "tick":
             return self._parse_tick(symbol, data)
@@ -348,6 +387,43 @@ class TradeStationELProvider:
                 raise ValueError(f"Unsupported timeframe: {tf!r}")
             return self._parse_bar(symbol, data, tf)
         raise ValueError(f"Unknown event kind: {kind!r}")
+
+    def _note_publisher_version(self, data: dict[str, Any]) -> None:
+        """Report the publisher convention once per distinct value.
+
+        The frame is never refused over this. An undeclared publisher is
+        still publishing real trades; what changes is how one column has to
+        be read, and a log line is the only place that can be said. It is the
+        one signal an operator who upgraded the binding but kept the
+        previously imported .ELD will ever see — the numbers themselves look
+        perfectly ordinary. compat.md requires exactly this handling.
+        """
+        pv = _publisher_version(data)
+        if pv in self._reported_publisher_versions:
+            return
+        self._reported_publisher_versions.add(pv)
+        if pv is None or pv == _PUBLISHER_UNDECLARED:
+            log.warning(
+                "publisher_convention_undeclared",
+                extra={
+                    "publisher_version": pv,
+                    "consequence": (
+                        "intraday vol may be up-tick share volume only, roughly half of "
+                        "what traded; re-import EL/TS2Python_Exporter.el to fix"
+                    ),
+                },
+            )
+        elif pv not in KNOWN_PUBLISHER_VERSIONS:
+            log.warning(
+                "publisher_convention_unknown",
+                extra={
+                    "publisher_version": pv,
+                    "known": sorted(KNOWN_PUBLISHER_VERSIONS),
+                    "consequence": "field semantics may have changed; frames are kept",
+                },
+            )
+        else:
+            log.info("publisher_convention", extra={"publisher_version": pv})
 
     def _parse_tick(self, symbol: str, data: dict[str, Any]) -> Tick:
         ts_epoch = float(data["ts"])
@@ -377,6 +453,7 @@ class TradeStationELProvider:
             ask=None if is_index else _quote_or_none(data.get("ask")),
             tick_count=int(data.get("tc", 0)),
             source=self.source_id,
+            publisher_version=_publisher_version(data),
         )
 
     def _parse_bar(self, symbol: str, data: dict[str, Any], timeframe: str = "1m") -> Bar:
@@ -446,6 +523,7 @@ class TradeStationELProvider:
             tick_count=int(data.get("tc", 0)),
             source=self.source_id,
             timeframe=timeframe,
+            publisher_version=_publisher_version(data),
         )
 
     async def close(self) -> None:

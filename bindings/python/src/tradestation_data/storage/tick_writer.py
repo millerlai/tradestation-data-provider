@@ -31,6 +31,12 @@ TICK_SCHEMA: pa.Schema = pa.schema(
         pa.field("ask", pa.float64(), nullable=True),
         pa.field("tick_count", pa.int32(), nullable=False),
         pa.field("source", pa.string(), nullable=False),
+        # Which publisher convention produced `volume` — wire v4's `pv`.
+        # Nullable and last in the schema on purpose: every partition written
+        # before this field existed simply lacks the column, and null is the
+        # only honest value for those rows. See contract/v4/envelope.md and
+        # _read_compat below for how such a file is still read.
+        pa.field("publisher_version", pa.int32(), nullable=True),
     ]
 )
 
@@ -198,6 +204,7 @@ def _ticks_to_table(ticks: list[Tick]) -> pa.Table:
             "ask": [t.ask for t in ticks],
             "tick_count": [t.tick_count for t in ticks],
             "source": [t.source for t in ticks],
+            "publisher_version": [t.publisher_version for t in ticks],
         },
         schema=TICK_SCHEMA,
     )

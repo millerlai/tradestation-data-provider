@@ -72,6 +72,11 @@ def _build_imputed_row(
     # bucket_start_et mirrors BAR_SCHEMA in bar_writer.py — it's non-nullable
     # in newer parquet files, so we must populate it on imputed rows or
     # pa.Table.from_pylist will fail when re-writing.
+    #
+    # `publisher_version` is deliberately absent: it is nullable, so
+    # from_pylist fills null, and null is the truthful value — no publisher
+    # produced this row, this script invented it. Filling it in from a
+    # neighbour would claim a provenance the bar does not have.
     return {
         "bucket_start": bucket_start,
         "bucket_start_et": bucket_start.astimezone(_ET_TZ),

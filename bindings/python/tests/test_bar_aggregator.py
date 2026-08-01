@@ -62,6 +62,25 @@ def test_cross_bucket_emits_previous_bar() -> None:
     assert bar.source == "derived:ticks"
 
 
+@pytest.mark.parametrize("wire_tc", [0, 21152])
+def test_tick_count_is_the_row_count_whatever_the_wire_carried(wire_tc: int) -> None:
+    """§3.4: a `derived:ticks` bar's tick_count is the bucket's tick row count.
+
+    The wire's own `tc` is not a count on an intraday tick — a current exporter
+    sends 0, and one imported before the §3.4 fix sent EL's `Ticks`, which is
+    total share volume. Summing either is wrong, and wrong in a way nothing
+    downstream can see: `audit_bar_cache` compares this against `Resampler`'s
+    count(*) over the same ticks, so a sum shows up as permanent count_drift.
+    """
+    agg = BarAggregator()
+    for i in range(4):
+        agg.ingest(_tick("SPY", T0 + timedelta(seconds=i * 10), 450.0 + i, tick_count=wire_tc))
+
+    emitted = agg.advance_time(T0 + timedelta(minutes=2))
+    assert len(emitted) == 1
+    assert emitted[0].tick_count == 4
+
+
 def test_gap_fills_with_empty_bars() -> None:
     agg = BarAggregator()
     agg.ingest(_tick("SPY", T0 + timedelta(seconds=10), 450.0, volume=100))

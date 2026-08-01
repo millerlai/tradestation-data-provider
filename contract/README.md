@@ -13,10 +13,10 @@
 
 | 檔案 | 內容 |
 | --- | --- |
-| [`v3/envelope.md`](v3/envelope.md) | **目前版本** —— frame 結構與 payload 格式 |
-| [`v3/tick.schema.json`](v3/tick.schema.json) | `EL_PublishTick` payload |
-| [`v3/bar.schema.json`](v3/bar.schema.json) | `EL_PublishBar` payload（含 `tf`） |
-| [`v2/`](v2/) [`v1/`](v1/) | 舊版。**仍須支援** —— 舊 DLL 可能留在使用者機器上 |
+| [`v4/envelope.md`](v4/envelope.md) | **目前版本** —— frame 結構與 payload 格式，含 `pv`（publisher 語意慣例版本） |
+| [`v4/tick.schema.json`](v4/tick.schema.json) | `EL_PublishTick` payload |
+| [`v4/bar.schema.json`](v4/bar.schema.json) | `EL_PublishBar` payload（含 `tf`） |
+| [`v3/`](v3/) [`v2/`](v2/) [`v1/`](v1/) | 舊版。**仍須支援** —— 舊 DLL 可能留在使用者機器上 |
 | [`semantics.md`](semantics.md) | **schema 管不到但 binding 必須一致的規則** |
 | [`error_codes.md`](error_codes.md) | DLL C ABI 回傳碼 |
 | [`compat.md`](compat.md) | DLL ABI × wire version 相容矩陣 |

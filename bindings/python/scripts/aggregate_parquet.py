@@ -73,6 +73,13 @@ BAR_SCHEMA: pa.Schema = pa.schema(
         pa.field("volume", pa.int64(), nullable=False),
         pa.field("tick_count", pa.int32(), nullable=False),
         pa.field("source", pa.string(), nullable=False),
+        # Which publisher convention produced `volume` — carried through from
+        # the source bars, last one in the bucket winning, exactly as
+        # storage.resampler does. Null when the source predates the column.
+        # Dropping it here instead would make this script a silent eraser of
+        # the one field that separates two volume conventions, and it writes
+        # into the same timeframe= directories the resampler does.
+        pa.field("publisher_version", pa.int32(), nullable=True),
     ]
 )
 
@@ -112,6 +119,11 @@ def _aggregate_day(src_path: Path, out_tf: str) -> pa.Table:
     close = table.column("close").to_pylist()
     volume = table.column("volume").to_pylist()
     tick_count = table.column("tick_count").to_pylist()
+    pubver = (
+        table.column("publisher_version").to_pylist()
+        if "publisher_version" in table.column_names
+        else [None] * table.num_rows
+    )
 
     out_bucket: list = []
     out_open: list = []
@@ -121,6 +133,7 @@ def _aggregate_day(src_path: Path, out_tf: str) -> pa.Table:
     out_volume: list = []
     out_tick: list = []
     out_source: list = []
+    out_pubver: list = []
 
     # `{input}/symbol=SYM/date=YYYY-MM-DD/bars.parquet` -> the input root.
     in_tf = _detect_input_timeframe(src_path.parents[2])
@@ -135,6 +148,7 @@ def _aggregate_day(src_path: Path, out_tf: str) -> pa.Table:
         out_volume.append(sum(volume[start:end]))
         out_tick.append(sum(tick_count[start:end]))
         out_source.append(derived_src)
+        out_pubver.append(pubver[end - 1])
 
     current_label: datetime | None = None
     chunk_start = 0
@@ -160,6 +174,7 @@ def _aggregate_day(src_path: Path, out_tf: str) -> pa.Table:
             "volume": out_volume,
             "tick_count": out_tick,
             "source": out_source,
+            "publisher_version": out_pubver,
         },
         schema=BAR_SCHEMA,
     )

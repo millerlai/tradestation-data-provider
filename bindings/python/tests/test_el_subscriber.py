@@ -638,6 +638,66 @@ def test_parse_payload_rejects_unsupported_version() -> None:
         provider._parse_payload("SPY", json.dumps({"v": 99, "px": 1.0}).encode())
 
 
+def _pv_payload(pv: int | None) -> bytes:
+    payload: dict[str, object] = {
+        "v": 4,
+        "kind": "tick",
+        "seq": 1,
+        "sid": 7,
+        "ts": 1_700_000_000.0,
+        "px": 1.0,
+        "vol": 0,
+        "tc": 0,
+    }
+    if pv is not None:
+        payload["pv"] = pv
+    return json.dumps(payload).encode()
+
+
+@pytest.mark.parametrize("pv", [0, None])
+def test_undeclared_publisher_convention_warns_but_keeps_the_frame(pv, caplog) -> None:
+    """compat.md: `pv` 0 or absent is a warning, never a refusal.
+
+    This is the only signal an operator who upgraded the binding but kept the
+    previously imported .ELD will ever get — the numbers themselves look
+    ordinary, they are just about half of what traded.
+    """
+    provider = TradeStationELProvider(endpoint="inproc://pv-undeclared")
+    with caplog.at_level("WARNING", logger="tradestation_data.wire.el_subscriber"):
+        tick = provider._parse_payload("SPY", _pv_payload(pv))
+    assert tick.symbol == "SPY"
+    assert any(r.message == "publisher_convention_undeclared" for r in caplog.records)
+
+
+def test_unknown_publisher_convention_is_logged_not_refused(caplog) -> None:
+    """Unlike an unknown `v`, an unknown `pv` must not drop data.
+
+    `v` unknown means we cannot tell where the fields are. `pv` unknown means
+    we can read them and one column was computed by a rule we do not know —
+    the frame is still real market data.
+    """
+    provider = TradeStationELProvider(endpoint="inproc://pv-unknown")
+    with caplog.at_level("WARNING", logger="tradestation_data.wire.el_subscriber"):
+        tick = provider._parse_payload("SPY", _pv_payload(99))
+    assert tick.symbol == "SPY"
+    assert any(r.message == "publisher_convention_unknown" for r in caplog.records)
+
+
+def test_publisher_convention_is_reported_once_per_distinct_value(caplog) -> None:
+    provider = TradeStationELProvider(endpoint="inproc://pv-once")
+    with caplog.at_level("INFO", logger="tradestation_data.wire.el_subscriber"):
+        for _ in range(3):
+            provider._parse_payload("SPY", _pv_payload(1))
+        provider._parse_payload("SPY", _pv_payload(0))
+
+    reported = [
+        r.message
+        for r in caplog.records
+        if r.message.startswith(("publisher_convention", "publisher_convention_"))
+    ]
+    assert reported == ["publisher_convention", "publisher_convention_undeclared"]
+
+
 def test_parse_tick_logs_drift_when_ts_utc_deviates_by_more_than_5s(caplog) -> None:
     """Line 177: ts_utc drift > 5s should emit a debug log (and not raise)."""
     provider = TradeStationELProvider(endpoint="inproc://drift")

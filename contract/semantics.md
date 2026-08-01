@@ -404,12 +404,32 @@ TradeStation 官方定義（股票商品，[EL 保留字文件][elvol]）：
 
 #### 規則
 
+0. **前提：圖表的 Volume 屬性必須設為 Trade Volume。** 上表是該設定下的定義；設成
+   Tick Count 時這兩個保留字改吐 tick 筆數而非股數，於是 `vol` 會裝進一個數量級完全
+   不同、卻同樣合理的數字。`BarType` 看不見這個設定，publisher 無從偵測，所以它是
+   **操作者的責任**：掛上指標前先確認 symbol 的 Volume 設定。
 1. **wire 的 `vol` 一律是總成交股數。** publisher 必須依圖表型態取值：intraday 取
    `Ticks`，daily 取 `Volume`。取錯的後果不是精度問題，是**系統性低估**。
-2. **wire 的 `tc` 只在 daily 上是成交筆數。** intraday 拿不到筆數 —— EL 沒有任何
-   保留字提供它 —— 所以 intraday 的 `tc` **不具意義**，binding 不得將它當筆數使用。
+2. **wire 的 `tc` 在 intraday 上不具意義，在 `1d` 上也不可信。** intraday 拿不到筆數
+   —— EL 沒有任何保留字提供它 —— 所以送 `0`，binding 不得將它當筆數使用。`1d` 依上表
+   應為筆數，但本 repo 實測不符，見本節末的「仍未決」；在證實之前一律不得當筆數用。
 3. **binding 不得自行推導或修正。** 這個對調發生在 publisher 那一側，wire 上看不出
    來；若 publisher 送錯，binding 無從分辨，這正是它必須寫在契約裡的原因。
+4. **publisher 必須宣告自己遵守哪一版。** wire v4 的 `pv` 就是這個宣告：`1` 表示
+   規則 1 與 2 已實作，`0`（或欄位缺席，即 v1–v3）表示未宣告，須依修正前的慣例
+   解讀 —— intraday 的 `vol` 是上漲量。indicator 裝在使用者的 TradeStation 上、
+   不隨 binding 更新，所以「binding 已修正」不蘊含「送進來的資料已修正」。見
+   [`v4/envelope.md`](v4/envelope.md)。
+
+**適用範圍：股票商品。** 上表與規則 0–2 取自 TradeStation 對股票的定義，本 repo 也
+只在股票上實測過。
+
+- **Market breadth 指數（`$TICK` `$ADD` `$VOLD` `$TRIN` `$PCVA`）不適用，也不需要**：
+  這類 symbol 根本沒有成交量，兩個保留字都是 0，取哪一個都一樣。`symbols.yaml` 的
+  `category: breadth` 已記錄 `volume=0, bid=null, ask=null`，§3.1 是同一件事的報價版本。
+- **期貨等其他商品未驗證。** publisher 目前只依 `BarType` 分流、不看商品類別，所以
+  在這些商品上會沿用股票的取值。要在期貨上使用前，先用 `LogPublish` 實測 `Volume` /
+  `Ticks` 的實際語意再決定是否需要分流。
 
 > **本 repo 實測（SPY 100-tick 圖，2026-07-24 收盤前後）**：`Ticks` 與 `Volume`
 > 同時輸出，`Ticks` 恆大於 `Volume`，比值散在 1.01–7.60、中位數約 1.6 —— 與「總量
@@ -530,8 +550,9 @@ binding 在收訊後**必須**以 topic 字串完全相等再過濾一次，不�
 `sid` 不同代表 publisher 重啟、所有計數器歸零。此時必須清空狀態，否則會把
 「重啟」誤報成數十億筆遺漏。
 
-`EL_Init` 的冪等路徑（重複呼叫回傳 `1`）**不會**更新 `sid`，所以在 TradeStation
-重新 Verify indicator 不會被誤判成重啟。
+init 的冪等路徑（重複呼叫回傳 `1`）**不會**更新 `sid`，所以在 TradeStation
+重新 Verify indicator 不會被誤判成重啟。`EL_Init` 與 `EL_Init2` 共用同一個守衛，
+交叉呼叫也一樣 —— 這也表示第二次呼叫**不會**改寫已宣告的 `pv`。
 
 `sid` 的解析度必須細到足以分辨**連續兩次重啟**。publisher 端若只取到秒，
 同一個 wall-clock 秒內重啟的兩個 session 會共用同一個 `sid`，subscriber 於是走

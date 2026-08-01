@@ -32,6 +32,12 @@ class Tick:
     ask: float | None
     tick_count: int
     source: str
+    # Which publisher convention produced `volume` — wire v4's `pv`. None
+    # when the wire did not say (v1/v2/v3), which is not the same as 0:
+    # 0 is a publisher that declared itself undeclared, None is a wire that
+    # had no field to declare with. Either way `volume` may be up-tick share
+    # volume rather than the total. contract/v4/envelope.md.
+    publisher_version: int | None = None
 
     @property
     def timestamp_et(self) -> datetime:

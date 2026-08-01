@@ -35,6 +35,11 @@ struct Options {
     int         threads = 4;
     int         per_thread = 5000;
     int         warmup_ms = 250;
+    // What to declare through EL_Init2, echoed on the wire as `pv`. The
+    // default matches the current exporter; -1 selects the plain EL_Init
+    // path instead, which is the only way to reproduce a payload from an
+    // indicator built before the convention was declarable.
+    int         publisher_version = 1;
 };
 
 Options parse_args(int argc, char** argv) {
@@ -55,6 +60,8 @@ Options parse_args(int argc, char** argv) {
         else if (a == "--threads")    o.threads    = std::atoi(next("--threads").c_str());
         else if (a == "--per-thread") o.per_thread = std::atoi(next("--per-thread").c_str());
         else if (a == "--warmup-ms")  o.warmup_ms  = std::atoi(next("--warmup-ms").c_str());
+        else if (a == "--publisher-version")
+            o.publisher_version = std::atoi(next("--publisher-version").c_str());
         else if (a == "-h" || a == "--help") {
             std::puts(
                 "TS2Python_TestHarness options:\n"
@@ -64,7 +71,10 @@ Options parse_args(int argc, char** argv) {
                 "  --seconds <N>             stress mode duration\n"
                 "  --threads <N>             multithread mode threads\n"
                 "  --per-thread <N>          multithread messages per thread\n"
-                "  --warmup-ms <N>           sleep after init (default 250ms)\n");
+                "  --warmup-ms <N>           sleep after init (default 250ms)\n"
+                "  --publisher-version <N>   value for EL_Init2 (default 1);\n"
+                "                            -1 uses plain EL_Init, which puts\n"
+                "                            pv=0 on the wire\n");
             std::exit(0);
         } else {
             std::fprintf(stderr, "unknown arg: %s\n", a.c_str());
@@ -298,15 +308,26 @@ int run_multithread(const Options& o) {
 int main(int argc, char** argv) {
     const Options o = parse_args(argc, argv);
 
+    const bool declare_version = o.publisher_version >= 0;
+
     std::printf("[harness] dll version = %d\n", EL_DllVersion());
-    std::printf("[harness] EL_Init(%s)\n", o.endpoint.c_str());
-    int rc = EL_Init(o.endpoint.c_str());
+    if (declare_version) {
+        std::printf("[harness] EL_Init2(%s, %d)\n", o.endpoint.c_str(), o.publisher_version);
+    } else {
+        std::printf("[harness] EL_Init(%s) — undeclared publisher, pv=0\n", o.endpoint.c_str());
+    }
+    int rc = declare_version ? EL_Init2(o.endpoint.c_str(), o.publisher_version)
+                             : EL_Init(o.endpoint.c_str());
     if (rc < 0) {
-        std::fprintf(stderr, "[harness] EL_Init failed rc=%d\n", rc);
+        std::fprintf(stderr, "[harness] init failed rc=%d\n", rc);
         return 1;
     }
-    // Idempotency check — second call returns 1.
-    const int rc2 = EL_Init(o.endpoint.c_str());
+    // Idempotency check — second call returns 1. Deliberately the other
+    // entry point when a version was declared: both must reach the same
+    // guard, or an indicator that retried through the wrong one would
+    // silently open a second socket.
+    const int rc2 = declare_version ? EL_Init(o.endpoint.c_str())
+                                    : EL_Init2(o.endpoint.c_str(), 1);
     if (rc2 != 1) {
         std::fprintf(stderr, "[harness] expected rc=1 on second init, got rc=%d\n", rc2);
         return 2;

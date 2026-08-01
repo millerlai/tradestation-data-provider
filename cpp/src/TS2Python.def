@@ -11,6 +11,7 @@
 LIBRARY TS2Python
 EXPORTS
     EL_Init
+    EL_Init2
     EL_PublishTick
     EL_PublishBar
     EL_PublishTickEx

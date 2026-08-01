@@ -65,9 +65,9 @@ schema 時不影響訂閱行為。
 | `ts_str` | string | EL 原始字串 `yyyy-MM/dd-HH:mm:ss`（24 小時制），逐字透傳。EL 未傳時為 `""`。對 `bar_1m` 而言這是**收盤**時間，binding 須依 `semantics.md` §2 減一個 `tf` 換成左標籤 |
 | `px` | float | 成交價（僅 `tick`） |
 | `o` `h` `l` `c` | float | OHLC（僅 `bar_1m`） |
-| `vol` | float | 成交量。**注意是 float 不是 int** |
+| `vol` | float | 成交量。**注意是 float 不是 int**。它裝的是總成交股數還是上漲量，由 publisher 選哪個 EL 保留字決定 —— 見 `../semantics.md` §3.4 |
 | `bid` `ask` | float | 買賣報價。**永遠是 float，從不為 `null`** —— 見 `../semantics.md` |
-| `tc` | float | tick count，以 `%.0f` 格式化（無小數點，但語意上是整數） |
+| `tc` | float | 以 `%.0f` 格式化（無小數點，但語意上是整數）。**不是 intraday 的成交筆數** —— 見 `../semantics.md` §3.4 |
 
 ### 所有數值欄位都是 double
 

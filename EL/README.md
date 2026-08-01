@@ -53,7 +53,8 @@ ready-made binaries. See [`../cpp/README.md`](../cpp/README.md) for the details.
 Prints the raw EasyLanguage words next to the values actually put on the wire:
 
 ```
-[TS2Python] tick 2026-07/24-15:59:00 bar_type=0.00 bar_interval=1.00 px=742.55
+[TS2Python] bar  2026-07/24-15:59:00 bar_type=1.00 bar_interval=1.00
+            o=742.31 h=742.60 l=742.28 c=742.55
             el_volume=13465 el_ticks=21152 wire_vol=21152 wire_tc=0
             bid=742.54 ask=742.56 rc=0
 ```
@@ -62,6 +63,18 @@ Prints the raw EasyLanguage words next to the values actually put on the wire:
 went out after the intraday/daily mapping. Having both on one line is the point
 — that pair is what flips meaning between chart types, and it is how the mapping
 gets checked on a chart type nobody has measured yet.
+
+On a **refused** chart the publish never runs, so a third line shape covers it:
+
+```
+[TS2Python] refused SPY bar_type=0.00 bar_interval=100.00
+            date=1260724.00 time=1600.00 el_volume=753328 el_ticks=760951
+```
+
+Only the EasyLanguage words appear — `wire_vol` / `wire_tc` / `rc` do not exist
+unless the publish ran. That is the half that matters when measuring a chart
+type for the first time, and without it the switch printed nothing at all on
+exactly the charts it is documented for.
 
 Leave it off in normal use. On a tick chart, or on any chart in "update every
 tick" mode, it prints once per print.
@@ -106,15 +119,18 @@ version bump and has not been done.
 
 A tick series is one print per call only when `BarInterval = 1`. On a 100-tick
 chart each call carries a finished bar: `Close` is the last of the hundred
-prints, `Volume` is their sum, `Ticks` is 100. `EL_PublishTick` has no field to
-express that, so Tier 1 would store it as **one trade priced at the last print
-and carrying a hundred prints' volume** — wrong by two orders of magnitude in
-the volume column, with nothing downstream able to notice.
+prints, and the volume words cover all hundred under the intraday rule above —
+`Ticks` their total share volume, `Volume` the up-tick part. Neither reports
+`100`; EL has no count intraday. `EL_PublishTick` has no field to say the call
+is a bar either, so Tier 1 would store it as **one trade priced at the last
+print and carrying a hundred prints' volume** — wrong by about two orders of
+magnitude in the volume column, with nothing downstream able to notice.
 
 Unlike the second-based case, the information needed to detect this survives:
 `BarInterval` says exactly how many prints went into the call. Measured on a
-live install — a 100-tick chart reports `bar_interval=100.00` at `EL_Init`, and
-a 1-tick chart reports `1.00` and calls `EL_PublishTick` once per print.
+live install — a 100-tick chart reports `bar_interval=100.00` at `EL_Init2` and
+`Ticks = 760951` (the hundred prints' share volume, not `100`), while a 1-tick
+chart reports `1.00` and calls `EL_PublishTick` once per print.
 
 Note this also means `TsStr` cannot separate the prints inside one minute: a
 1-tick chart happily emits eight calls all stamped `19:48:00`, because `Time`

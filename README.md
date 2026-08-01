@@ -22,7 +22,7 @@ flowchart TB
         direction TB
         TS["TradeStation Desktop"]
         EL["EL Exporter Indicator"]
-        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 8"]
+        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 9"]
         TS --> EL --> DLL
     end
     subgraph CON["Contract — the product"]

@@ -73,7 +73,7 @@ Variables:
 { -- DLL prototypes ---------------------------------------------------------
   Calling convention is __stdcall (TS default for DefineDLLFunc).
   Keep types in sync with cpp/include/ts2python.h. }
-DefineDLLFunc: "TS2Python.dll", int, "EL_Init", LPSTR;
+DefineDLLFunc: "TS2Python.dll", int, "EL_Init2", LPSTR, int;
 DefineDLLFunc: "TS2Python.dll", int, "EL_PublishTick",
     LPSTR, LPSTR, double, double, double, double, double;
 DefineDLLFunc: "TS2Python.dll", int, "EL_PublishBar",
@@ -82,20 +82,35 @@ DefineDLLFunc: "TS2Python.dll", int, "EL_PublishBar",
 DefineDLLFunc: "TS2Python.dll", int, "EL_Shutdown";
 DefineDLLFunc: "TS2Python.dll", int, "EL_DllVersion";
 
-{ -- One-shot init: first bar only. EL_Init is idempotent; return code 1
-     means "another chart already bound the socket" — still success. }
+{ -- One-shot init: first bar only. EL_Init2 is idempotent; return code 1
+     means "another chart already bound the socket" — still success.
+
+     The second argument declares which publisher convention this file
+     implements; the DLL echoes it on every payload as `pv`. It is 1 for
+     "contract/semantics.md §3.4": vol is total share volume on every
+     timeframe and intraday tc is 0. Bump it here and in the contract
+     together, never one alone — the number's whole job is to let a
+     subscriber tell which of two indistinguishable-looking numbers it
+     is holding.
+
+     EL_Init2 rather than EL_Init because the DLL cannot see the
+     convention: it is decided above, by which reserved word this file
+     reads, and this file lives in the user's TradeStation install where
+     nothing updates it when a binding does. Requires DLL ABI 9; an older
+     DLL has no such export and the call fails to resolve, which is the
+     visible failure the silent one is worth trading for. }
 If Enabled and InitDone = False Then Begin
-    InitRC = EL_Init(ZMQEndpoint);
+    InitRC = EL_Init2(ZMQEndpoint, 1);
     If InitRC < 0 Then Begin
         If LogErrors Then
-            Print("[TS2Python] EL_Init FAILED rc=", InitRC,
+            Print("[TS2Python] EL_Init2 FAILED rc=", InitRC,
                   " endpoint=", ZMQEndpoint,
                   " symbol=", GetSymbolName);
         { leave InitDone = False so we retry on the next tick }
     End Else Begin
         InitDone = True;
         If LogErrors Then
-            Print("[TS2Python] EL_Init ok rc=", InitRC,
+            Print("[TS2Python] EL_Init2 ok rc=", InitRC,
                   " dll_version=", EL_DllVersion,
                   " symbol=", GetSymbolName,
                   " bar_type=", BarType,
@@ -133,13 +148,17 @@ End;
 
      A tick series is only one print per call when BarInterval = 1. On an
      N-tick chart each call carries a whole bar — Close is the last print of
-     the N, Volume is their sum, Ticks is N — and EL_PublishTick has no field
-     to say so, so Tier 1 would record it as a single trade whose price is one
-     print and whose volume is a hundred. Nothing raises; the numbers are
-     simply wrong by two orders of magnitude in the volume column.
+     the N, and the volume words cover all N under the intraday rule below
+     (Ticks their total share volume, Volume the up-tick part). Neither word
+     reports N; EL exposes no count intraday at all. EL_PublishTick has no
+     field to say the call is a bar either, so Tier 1 would record it as a
+     single trade whose price is one print and whose volume is all hundred.
+     Nothing raises; the volume column is simply wrong by about two orders of
+     magnitude.
 
-     Measured on a live install: a 100-tick chart reports BarInterval = 100,
-     a 1-tick chart reports 1 and calls once per print. }
+     Measured on a live install: a 100-tick chart reports BarInterval = 100
+     and Ticks = 760951 — the share volume of the hundred prints, not 100 —
+     while a 1-tick chart reports BarInterval = 1 and calls once per print. }
 If Enabled and InitDone and AggregatedTickChart = False
    and BarType = 0 and BarInterval <> 1 Then Begin
     AggregatedTickChart = True;
@@ -152,6 +171,26 @@ If Enabled and InitDone and AggregatedTickChart = False
               " volume of ", BarInterval, ". Use a 1-tick chart, or a minute",
               " chart if you want bars.");
 End;
+
+{ -- Observation on a refused chart. LogPublish's other two Prints live inside
+     the publish block below, which both guards latch off on the very first
+     bar — so on exactly the chart types nobody has measured yet, the switch
+     documented for measuring them printed nothing at all.
+
+     Only the EasyLanguage words are available here: wire_vol / wire_tc / rc
+     do not exist unless the publish ran. That is enough, because the question
+     a refused chart raises is what Volume and Ticks return on it — §3.4's
+     rules were established from exactly this measurement.
+
+     Gated on the refusal so a supported chart's output is unchanged; it would
+     otherwise print twice per bar. LogPublish defaults False, so opting in is
+     what accepts one line per bar. }
+If Enabled and InitDone and LogPublish
+   and (SubMinuteChart or AggregatedTickChart) Then
+    Print("[TS2Python] refused ", GetSymbolName,
+          " bar_type=", BarType, " bar_interval=", BarInterval,
+          " date=", Date, " time=", Time,
+          " el_volume=", Volume, " el_ticks=", Ticks);
 
 { -- Per-bar publish. Dispatch on BarType *and* BarInterval: BarType alone
      cannot tell a 1-minute chart from a 5-minute one. }

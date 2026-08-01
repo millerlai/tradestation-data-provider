@@ -66,6 +66,10 @@ class Bar:
     tick_count: int
     source: str
     timeframe: str = "1m"
+    # Which publisher convention produced `volume` — wire v4's `pv`. See
+    # Tick.publisher_version for what None means. On a bar this binding
+    # computed it is carried over from the last tick in the bucket.
+    publisher_version: int | None = None
 
     @property
     def bucket_start_et(self) -> datetime:

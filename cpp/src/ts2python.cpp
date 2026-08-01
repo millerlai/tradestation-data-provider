@@ -22,7 +22,21 @@
 
 namespace {
 
-constexpr int kDllVersion = 8;
+constexpr int kDllVersion = 9;
+
+// The publisher convention the caller declared through EL_Init2, echoed on
+// every payload as `pv`. See ../../contract/v4/envelope.md.
+//
+// Zero means "not declared", which is the honest answer for a caller that
+// came in through plain EL_Init — an indicator built before the field
+// existed. That matters because the indicator lives in the user's
+// TradeStation install and does not update when a binding does: an
+// exporter older than the contract/semantics.md §3.4 fix puts EL's
+// `Volume` — up-tick share volume alone — into `vol` on every intraday
+// bar. Nothing about the number says so; it is simply about half of what
+// traded. `pv` is the only thing on the wire that separates the two, and
+// its absence is what says "assume the old convention".
+int              g_publisher_version = 0;
 
 std::mutex       g_mutex;
 // Raw pointers, never destroyed implicitly. See pin_self_module_once()
@@ -237,8 +251,11 @@ TS2P_API int TS2P_CALL EL_DllVersion(void) {
     return kDllVersion;
 }
 
-TS2P_API int TS2P_CALL EL_Init(const char* zmq_endpoint) {
+// Shared init. `publisher_version` is 0 for the EL_Init path, which is what
+// puts `"pv":0` on the wire — see g_publisher_version.
+static int init_impl(const char* zmq_endpoint, int publisher_version) {
     if (zmq_endpoint == nullptr) return -4;
+    if (publisher_version < 0) return -4;
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (g_sock) return 1;  // idempotent re-init
@@ -262,6 +279,7 @@ TS2P_API int TS2P_CALL EL_Init(const char* zmq_endpoint) {
         // not look like a restart to subscribers.
         g_sid = recv_unix_microseconds();
         g_seq.clear();
+        g_publisher_version = publisher_version;
         pin_self_module_once();  // stay resident for the life of the host
         return 0;
     } catch (const zmq::error_t&) {
@@ -269,6 +287,17 @@ TS2P_API int TS2P_CALL EL_Init(const char* zmq_endpoint) {
     } catch (...) {
         return -3;
     }
+}
+
+TS2P_API int TS2P_CALL EL_Init(const char* zmq_endpoint) {
+    // Kept for indicators compiled before EL_Init2 existed. Their `pv` is 0,
+    // which is not a defect in this path — it is the only true statement
+    // available about a caller that never declared a convention.
+    return init_impl(zmq_endpoint, 0);
+}
+
+TS2P_API int TS2P_CALL EL_Init2(const char* zmq_endpoint, int publisher_version) {
+    return init_impl(zmq_endpoint, publisher_version);
 }
 
 TS2P_API int TS2P_CALL EL_PublishTick(
@@ -296,13 +325,14 @@ TS2P_API int TS2P_CALL EL_PublishTick(
         format_quote(bid_s, sizeof(bid_s), bid);
         format_quote(ask_s, sizeof(ask_s), ask);
 
-        char payload[544];
+        char payload[576];
         const int n = std::snprintf(
             payload, sizeof(payload),
-            "{\"v\":3,\"kind\":\"tick\",\"seq\":%llu,\"sid\":%llu,"
+            "{\"v\":4,\"pv\":%d,\"kind\":\"tick\",\"seq\":%llu,\"sid\":%llu,"
             "\"ts\":%.6f,\"ts_utc\":%.6f,\"ts_str\":\"%s\","
             "\"px\":%.6f,\"vol\":%.6f,"
             "\"bid\":%s,\"ask\":%s,\"tc\":%.0f}",
+            g_publisher_version,
             static_cast<unsigned long long>(seq),
             static_cast<unsigned long long>(g_sid),
             recv_unix_seconds(), ts_utc_epoch, ts_str, price, volume,
@@ -354,14 +384,14 @@ static int publish_bar_impl(
         format_quote(bid_s, sizeof(bid_s), bid);
         format_quote(ask_s, sizeof(ask_s), ask);
 
-        char payload[640];
+        char payload[672];
         const int n = std::snprintf(
             payload, sizeof(payload),
-            "{\"v\":3,\"kind\":\"bar\",\"tf\":\"%s\",\"seq\":%llu,\"sid\":%llu,"
+            "{\"v\":4,\"pv\":%d,\"kind\":\"bar\",\"tf\":\"%s\",\"seq\":%llu,\"sid\":%llu,"
             "\"ts\":%.6f,\"ts_utc\":%.6f,\"ts_str\":\"%s\","
             "\"o\":%.6f,\"h\":%.6f,\"l\":%.6f,\"c\":%.6f,"
             "\"vol\":%.6f,\"bid\":%s,\"ask\":%s,\"tc\":%.0f}",
-            tf,
+            g_publisher_version, tf,
             static_cast<unsigned long long>(seq),
             static_cast<unsigned long long>(g_sid),
             recv_unix_seconds(), ts_utc_epoch, ts_str,
@@ -440,6 +470,7 @@ TS2P_API int TS2P_CALL EL_Shutdown(void) {
     delete g_ctx;  g_ctx  = nullptr;
     g_seq.clear();
     g_sid = 0;
+    g_publisher_version = 0;
     return 0;
 }
 

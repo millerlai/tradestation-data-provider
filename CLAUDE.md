@@ -22,8 +22,13 @@ implementation — this repo has already had a spec drift into describing fields
 no longer emitted, unnoticed, because nothing checked. Anything a second binding would
 have to guess belongs in `contract/semantics.md`, with a fixture.
 
-- Wire v3 / DLL ABI 8 is current; v1 and v2 are superseded but **still supported** — the DLL sits
-  in the user's TradeStation install and does not update when a binding does.
+- Wire v4 / DLL ABI 9 is current; v1, v2 and v3 are superseded but **still supported** — the DLL
+  sits in the user's TradeStation install and does not update when a binding does. v4 added `pv`,
+  which says *which convention produced the numbers* as opposed to `v`, which says where the
+  fields are: the indicator is a third independently-versioned piece, and an exporter older than
+  the §3.4 volume fix puts up-tick volume in `vol` with nothing in the number to say so.
+  Upgrading is therefore directional — **binding first, then DLL + `.ELD`** — because a binding
+  that does not know v4 refuses the frames outright.
 - Python 3.12–3.14, managed with **uv**; all three are in the CI matrix. 3.11 was
   dropped so the Windows event loop can be selected with
   `asyncio.run(loop_factory=...)` (3.12+) instead of the policy API, which 3.14
@@ -164,7 +169,21 @@ Hive-partitioned Parquet under `data/`. `ParquetBarSink` / `ParquetTickSink` pro
 
 **Bars written before this fix have an understated intraday `vol`** — it holds up-tick volume — while `tick_count` holds the total. On the data in `bindings/python/data/`, `tick_count / volume` sits at 1.85–2.25 across 1m and 5m. Old partitions are recoverable without re-collecting: the total is already there under the wrong name. There is deliberately no migration script — swapping two columns in place is the kind of edit that is unrecoverable if the store is half-old and half-new, and nothing on disk records which convention a partition was written under.
 
-`HistoryStore` is the read-side facade — DuckDB + Polars over the Parquet glob; `load_bars` falls through to `Resampler` and persists the result. `BAR_SCHEMA` / `TICK_SCHEMA` carry both `*_utc` (`UTC`) and `*_et` (`America/New_York`) timestamps — both are persisted so downstream tooling never has to convert at query time. Tier 3 caches are derived; `clear_bar_cache.py` deletes them safely and `audit_bar_cache.py` cross-checks them against a Tier-1 rebuild. **Native bars are not only 1m** — a 5-minute chart publishes native 5m bars into the Tier-3 directory, which is why the provenance guard (`source` = `derived:*`) is what decides deletion, never the path.
+`HistoryStore` is the read-side facade — DuckDB + Polars over the Parquet glob; `load_bars` falls through to `Resampler` and persists the result. `BAR_SCHEMA` / `TICK_SCHEMA` carry both `*_utc` (`UTC`) and `*_et` (`America/New_York`) timestamps — both are persisted so downstream tooling never has to convert at query time.
+
+**Both schemas end with a nullable `publisher_version`** — wire v4's `pv`, recording which
+convention produced `volume`. `NULL` means the row predates the column and is *unknown*, which is
+not the same as `0` ("the publisher declared itself undeclared"); do not collapse them. Two rules
+follow from the store being permanently mixed:
+
+- **Every `read_parquet` over a glob needs `union_by_name = true`.** Without it DuckDB takes the
+  *first* file's schema and silently drops any column the others add — one legacy partition in
+  range erases `publisher_version` for the whole query, no error. Measured on duckdb 1.5.3;
+  `tests/test_publisher_version.py` pins it.
+- **Anything that reads a partition back and `.cast(BAR_SCHEMA)`s it must pad first** — the cast
+  compares field lists and raises, and both rewrite paths read that as "not our file, leave it
+  alone". `bar_writer.with_publisher_version` is the pad; without it a legacy partition silently
+  stops accepting new rows. Tier 3 caches are derived; `clear_bar_cache.py` deletes them safely and `audit_bar_cache.py` cross-checks them against a Tier-1 rebuild. **Native bars are not only 1m** — a 5-minute chart publishes native 5m bars into the Tier-3 directory, which is why the provenance guard (`source` = `derived:*`) is what decides deletion, never the path.
 
 `--data-root` is now only a fallback path used when `--sinks-config` is missing — the YAML's per-sink `root` parameter wins otherwise. When you need to redirect output, edit `sinks.yaml`, not the CLI flag.
 
