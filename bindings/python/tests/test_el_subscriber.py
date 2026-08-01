@@ -824,3 +824,50 @@ async def test_history_replay_tick_has_no_quotes(zmq_inproc_bus) -> None:
 
     await gen.aclose()
     await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_null_quantity_drops_the_frame_instead_of_killing_the_stream(
+    zmq_inproc_bus, caplog
+) -> None:
+    """A JSON null in a quantity raises TypeError, which was not caught.
+
+    `_quantities` does `int(data[name])`. Before this, the TypeError left
+    `events()`, killed the ingest task, and `IngestionRuntime.run()` never
+    noticed because it sits on `_stop.wait()` and only awaits the tasks after
+    stop is set. The process stayed up, the heartbeat kept logging, and
+    nothing was ever ingested again. One frame must not be able to do that.
+    """
+    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
+    await _publish(pub, "SPY", _tick_frame(el_volume=None))
+    await _publish(pub, "SPY", _tick_frame(seq=2, px=452.0))
+
+    gen = provider.events()
+    with caplog.at_level("ERROR", logger="tradestation_data.wire.el_subscriber"):
+        event = await asyncio.wait_for(anext(gen), timeout=1.0)
+
+    assert event.price == pytest.approx(452.0), "the stream did not survive the bad frame"
+    assert any("Dropping unparseable message" in r.message for r in caplog.records)
+
+    await gen.aclose()
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_non_object_payload_drops_the_frame_instead_of_killing_the_stream(
+    zmq_inproc_bus, caplog
+) -> None:
+    """A payload that decodes to a list makes `data.get` raise AttributeError."""
+    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
+    await pub.send_multipart([b"SPY", b"[]"])
+    await _publish(pub, "SPY", _tick_frame(seq=2, px=453.0))
+
+    gen = provider.events()
+    with caplog.at_level("ERROR", logger="tradestation_data.wire.el_subscriber"):
+        event = await asyncio.wait_for(anext(gen), timeout=1.0)
+
+    assert event.price == pytest.approx(453.0)
+    assert any("Dropping unparseable message" in r.message for r in caplog.records)
+
+    await gen.aclose()
+    await provider.close()

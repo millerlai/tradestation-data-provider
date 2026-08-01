@@ -310,11 +310,37 @@ class TradeStationELProvider:
             try:
                 event = self._parse_payload(symbol, payload_bytes)
             except (ValueError, KeyError, json.JSONDecodeError) as exc:
+                # The expected shape of a bad frame: a refused proto, a
+                # missing quantity, malformed JSON.
                 log.warning(
                     "Dropping malformed message for symbol=%s: %s (payload=%r)",
                     symbol,
                     exc,
                     payload_bytes[:200],
+                )
+                continue
+            except Exception as exc:
+                # Anything else is either an input shape nobody predicted or a
+                # bug in the parser, and both used to be fatal in the worst
+                # way: the exception left this generator, killed the ingest
+                # task, and `run()` never noticed because it sits on
+                # `self._stop.wait()` and only awaits the tasks after stop is
+                # set. The process kept running, the heartbeat kept logging,
+                # and nothing was ingested again until somebody noticed the
+                # silence. `int(data[name])` on a JSON null raises TypeError;
+                # a payload decoding to a non-object makes `data.get("seq")`
+                # raise AttributeError. Neither was caught.
+                #
+                # One frame must never be able to end the stream. ERROR with
+                # a traceback rather than the WARNING above, because unlike a
+                # malformed frame this may well be our own defect and should
+                # not read as routine.
+                log.error(
+                    "Dropping unparseable message for symbol=%s: %s (payload=%r)",
+                    symbol,
+                    exc,
+                    payload_bytes[:200],
+                    exc_info=True,
                 )
                 continue
             yield event
