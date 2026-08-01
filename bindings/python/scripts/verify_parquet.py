@@ -10,6 +10,20 @@ incomplete, and the specific gaps within each day.
 ``<root>/timeframe=<tf>/symbol=*/`` is verified and a cross-symbol
 summary table is printed at the end.
 
+TWO CAVEATS, BOTH DELIBERATE.
+
+This is an operator's completeness check, not a guarantee about the data.
+It answers "did every bar the session should have produced arrive", which
+is a question about the collection run — nothing it reports changes what
+is on disk, and it never writes.
+
+It does NOT know about half days. The session window comes from
+``--start-time`` / ``--end-time`` and applies to every day in range, so an
+early close (the day after Thanksgiving, Christmas Eve) is reported
+INCOMPLETE every time. ``--holidays`` only skips a day entirely; there is
+no way to shorten one. Pass a matching ``--end-time`` for those dates, or
+read the INCOMPLETE as expected.
+
 Usage:
   # Single symbol, verbose per-day output
   python scripts/verify_parquet.py --symbol SPY \\

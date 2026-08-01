@@ -9,13 +9,17 @@ writes synthetic replacements using the chosen method:
   bfill       — use next bar's open for o/h/l/c (flat, zero volume).
   interpolate — linear interp between prev.close and next.open.
 
-Imputed rows are marked in the ``source`` column (default tag
-``imputed_<method>``) so downstream code can filter them out.
+Output goes to a SEPARATE root and carries an extra non-null ``imputed``
+boolean column. Both are deliberate. The store under the ingest root is
+what TradeStation actually said, and an imputed bar is a guess that looks
+exactly like a real one once written; keeping it in a different tree
+under a different schema means the two can never be confused, and a
+reader that expects BAR_SCHEMA fails loudly rather than silently
+consuming invented rows.
 
 ``--symbol`` is optional: when omitted, every symbol discovered under
-``<root>/timeframe=<tf>/symbol=*/`` is processed. Imputation is
-**destructive** (in-place overwrite via atomic .tmp swap) — STRONGLY
-recommended to ``--dry-run`` first when running across all symbols.
+``<root>/timeframe=<tf>/symbol=*/`` is processed. Nothing under ``--root``
+is ever modified.
 
 Usage:
   # Single symbol
@@ -63,20 +67,21 @@ METHODS = ("ffill", "bfill", "interpolate")
 
 _ET_TZ = ZoneInfo("America/New_York")
 
+# The output schema: whatever the source file had, plus a non-null `imputed`
+# flag. Deliberately NOT BAR_SCHEMA — a reader casting to BAR_SCHEMA must
+# fail on this file rather than quietly accept invented rows, and the extra
+# column is what guarantees that.
+_IMPUTED_FIELD = pa.field("imputed", pa.bool_(), nullable=False)
 
-def _build_imputed_row(
-    bucket_start: datetime,
-    value: float,
-    source_tag: str,
-) -> dict:
-    # bucket_start_et mirrors BAR_SCHEMA in bar_writer.py — it's non-nullable
-    # in newer parquet files, so we must populate it on imputed rows or
-    # pa.Table.from_pylist will fail when re-writing.
-    #
-    # `publisher_version` is deliberately absent: it is nullable, so
-    # from_pylist fills null, and null is the truthful value — no publisher
-    # produced this row, this script invented it. Filling it in from a
-    # neighbour would claim a provenance the bar does not have.
+
+def _output_schema(source: pa.Schema) -> pa.Schema:
+    return source.append(_IMPUTED_FIELD)
+
+
+def _build_imputed_row(bucket_start: datetime, value: float) -> dict:
+    # Every quantity is 0: this bar records no trading, because none was
+    # observed. Carrying a neighbour's volume forward would invent activity
+    # on top of inventing a price.
     return {
         "bucket_start": bucket_start,
         "bucket_start_et": bucket_start.astimezone(_ET_TZ),
@@ -84,9 +89,12 @@ def _build_imputed_row(
         "high": value,
         "low": value,
         "close": value,
-        "volume": 0,
-        "tick_count": 0,
-        "source": source_tag,
+        "el_volume": 0,
+        "el_ticks": 0,
+        "el_upticks": 0,
+        "el_downticks": 0,
+        "el_open_interest": 0,
+        "imputed": True,
     }
 
 
@@ -127,7 +135,6 @@ def impute_day(
     path: Path,
     expected_utc: list[datetime],
     method: str,
-    source_tag: str,
     tf_sec: int,
     display_tz: ZoneInfo,
 ) -> tuple[int, int, list[tuple[datetime, str]], pa.Table | None]:
@@ -143,6 +150,9 @@ def impute_day(
             r["bucket_start"] = ts.replace(tzinfo=UTC)
         else:
             r["bucket_start"] = ts.astimezone(UTC)
+        # Rows that came off the wire. Flagged explicitly rather than left
+        # null so "real" and "invented" are never a missing-value question.
+        r["imputed"] = False
 
     by_ts = {r["bucket_start"]: r for r in rows}
     missing = [t for t in expected_utc if t not in by_ts]
@@ -163,7 +173,7 @@ def impute_day(
             log.append((t, "SKIP_no_reference"))
             continue
         value, fallback = result
-        new_rows.append(_build_imputed_row(t, value, source_tag))
+        new_rows.append(_build_imputed_row(t, value))
         log.append((t, fallback or method))
 
     if not new_rows:
@@ -171,7 +181,7 @@ def impute_day(
 
     all_rows = rows + new_rows
     all_rows.sort(key=lambda r: r["bucket_start"])
-    new_table = pa.Table.from_pylist(all_rows, schema=table.schema)
+    new_table = pa.Table.from_pylist(all_rows, schema=_output_schema(table.schema))
     return len(rows), len(new_rows), log, new_table
 
 
@@ -215,9 +225,15 @@ def main() -> int:
     )
     ap.add_argument("--include-weekends", action="store_true")
     ap.add_argument(
-        "--source-tag",
-        default=None,
-        help="Value for 'source' column on imputed rows (default: imputed_<method>).",
+        "--output",
+        required=True,
+        type=Path,
+        help=(
+            "Destination root for the imputed copy. REQUIRED, and must not be "
+            "--root: imputed bars are guesses that look exactly like real ones "
+            "once written, so they are kept in a separate tree under a schema "
+            "with an extra `imputed` column."
+        ),
     )
     ap.add_argument(
         "--dry-run",
@@ -254,7 +270,9 @@ def main() -> int:
             print(f"error: bad holiday date: {h!r}", file=sys.stderr)
             return 2
 
-    source_tag = args.source_tag or f"imputed_{args.method}"
+    if args.output.resolve() == args.root.resolve():
+        print("error: --output must differ from --root", file=sys.stderr)
+        return 2
     per_day_expected = len(_expected_bars(args.start_date, start_time, end_time, tf_sec, tz))
 
     if args.symbol is not None:
@@ -274,7 +292,8 @@ def main() -> int:
         f"method={args.method}  expected/day={per_day_expected}"
     )
     print(
-        f"root={args.root}  source_tag={source_tag}  dry_run={args.dry_run}  symbols={len(symbols)}"
+        f"root={args.root}  output={args.output}  "
+        f"dry_run={args.dry_run}  symbols={len(symbols)}"
     )
     print()
 
@@ -296,8 +315,8 @@ def main() -> int:
             tz=tz,
             tz_label=args.tz,
             method=args.method,
-            source_tag=source_tag,
             root=args.root,
+            output=args.output,
             holidays=holidays,
             include_weekends=args.include_weekends,
             dry_run=args.dry_run,
@@ -332,8 +351,8 @@ def _impute_one_symbol(
     tz: ZoneInfo,
     tz_label: str,
     method: str,
-    source_tag: str,
     root: Path,
+    output: Path,
     holidays: set[date],
     include_weekends: bool,
     dry_run: bool,
@@ -377,7 +396,7 @@ def _impute_one_symbol(
 
         try:
             before, added, log, new_table = impute_day(
-                path, expected, method, source_tag, tf_sec, tz
+                path, expected, method, tf_sec, tz
             )
         except Exception as e:
             print(f"{d.isoformat():<11}  {'ERROR':<14}  -     -     -     {e}")
@@ -396,7 +415,9 @@ def _impute_one_symbol(
         gaps = _fmt_range(runs, tz, max_gap_runs)
 
         if not dry_run:
-            _write_atomic(path, new_table)
+            out_path = output / path.relative_to(root)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            _write_atomic(out_path, new_table)
             status = "WRITTEN"
         else:
             status = "WOULD_IMPUTE"

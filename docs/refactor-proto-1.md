@@ -20,7 +20,7 @@
 | 5 domain + wire | ✅ | 五個 `el_*` 必填讀取；`proto` 閘門；fixture 逐欄比對通過 |
 | 6 storage | ✅ | resampler / bar_coverage 刪除；history_store 753 → 156 行，改 polars |
 | 7 runtime | ✅ | bar_aggregator 刪除；IngestionRuntime 不再有 aggregator 參數 |
-| 8 scripts/examples | ⬜ | |
+| 8 scripts/examples | ✅ | imputation 改非破壞性 + `imputed` 欄；examples/03 重寫；04 移除 legacy fixture |
 | 9 測試 | ⬜ | **第一個該全綠的檢查點** |
 | 10 文件 | ⬜ | |
 
@@ -37,6 +37,7 @@
 | D-5 | T-3.11 的「手動驗證墓碑」改成 **harness 每次啟動都自動驗證** | 手動檢查是不會被重複執行的檢查。`test_harness.cpp` 現在在任何 init 之前先斷言 `EL_DllVersion() == 1` 且 `EL_Init` / `EL_Init2` 都回 `-6`，任何 mode 跑起來都會驗一次 |
 | D-6 | 計畫未列：**更新 `cpp/prebuilt/` 的兩顆 DLL** | 那兩顆是 committed 的 ABI 9 binary，而 README 教使用者直接拿來用。不更新的話，新 `.ELD` 會在 `DefineDLLFunc` 找不到 `EL_Init3` —— 雖然是可讀的失敗，但對照著文件走的人會撞上它。已用本次 x86/x64 Release 產物覆蓋 |
 | D-8 | Phase 5 / 6 / 7 **合併成一個 commit** | 三者是一次不可分割的變更：domain 移除 `source` / `publisher_version` 後，`resampler`、`bar_aggregator`、`history_store` 立刻 import 失敗。單獨 commit Phase 5 會留下一個無法 import 的 tree，正是計畫「每個 Phase 結束就 commit」要避免的狀態 |
+| D-9 | 計畫未列：examples 的 print 輸出改為純 ASCII | `—` / `…` / `§` 在 Windows console（cp950）印成亂碼。examples 是給人跑的，輸出讀不懂就失去意義。只改 print 字串，docstring 與註解不動 |
 | D-7 | 計畫未列：`cpp/README.md` / `README.zh-TW.md` 的 ABI 敘述 | 兩份都寫著過時的 `EL_DllVersion() == 6`（`issues.md` E-01 已記錄過一次）。計畫的 Phase 10 文件清單漏掉這兩份，已補進 T-10.11 |
 
 ---

@@ -47,7 +47,6 @@ from dataclasses import dataclass
 
 import _compat
 
-from tradestation_data.aggregation.bar_aggregator import BarAggregator
 from tradestation_data.aggregation.snapshot import MarketSnapshot
 from tradestation_data.domain.bar import Bar
 from tradestation_data.domain.tick import Tick
@@ -141,15 +140,11 @@ async def main() -> int:
         provider=TradeStationELProvider(endpoint=args.endpoint),
         symbols=args.symbols,
         snapshot=snapshot,
-        # The aggregator builds 1-minute bars out of ticks. Bars the EL
-        # indicator sends whole bypass it — running a single close price
-        # through it would collapse OHLC to O=H=L=C.
-        aggregator=BarAggregator(),
         sinks=SinkPipeline([SessionStatsSink()]),
         heartbeat_interval=3600,  # quiet for a short demo run
     )
 
-    print(f"running for {args.seconds:g}s on {args.endpoint} …")
+    print(f"running for {args.seconds:g}s on {args.endpoint} ...")
     task = asyncio.create_task(runtime.run())
     try:
         await asyncio.sleep(args.seconds)
