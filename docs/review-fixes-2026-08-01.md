@@ -13,16 +13,18 @@ This file is the source of truth for progress. If a session is interrupted:
 
 1. Read the status table below. The first row that is not ✅ is where to resume.
 2. `git log --oneline 4717f92..HEAD` shows what has actually landed.
-3. Each finished row names its commit, so the table and the history can be
-   cross-checked against each other. Trust the history over the table.
-4. After each fix: run `uv run pytest` from `bindings/python/`, update the row,
-   commit. One commit per fix, so an interruption never leaves a half-fix.
+3. Each finished row names its commit **by subject, not by SHA** — a SHA cannot
+   be written into the commit that carries it, and an amend invalidates it
+   anyway. Match the subject against the log. Trust the history over the table.
+4. After each fix: run the verification gate below, update the row, then commit
+   the code and the row together. One commit per fix, so an interruption never
+   leaves a half-fix.
 
 ## Status
 
-| # | Severity | File | Defect | Status | Commit |
+| # | Severity | File | Defect | Status | Commit subject |
 |---|---|---|---|---|---|
-| F1 | data loss | `storage/bar_writer.py:226` | One legacy-schema partition aborts every flush for the whole run | ✅ | `e5a8097` |
+| F1 | data loss | `storage/bar_writer.py:226` | One legacy-schema partition aborts every flush for the whole run | ✅ | `fix(storage): confine an unwritable partition to its own series` |
 | F2 | data loss | `wire/el_subscriber.py:305` | `TypeError` from a bad frame kills the ingest task; process still reports healthy | ⬜ | |
 | F3 | blocks reads | `storage/history_store.py:147` | Still-open footerless partition makes every read of that symbol raise | ⬜ | |
 | F4 | data loss | `wire/el_subscriber.py:410` | 1h RTH stub bar collides with, and overwrites, the preceding hour | ⬜ | |
