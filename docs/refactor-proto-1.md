@@ -16,7 +16,7 @@
 | 1 Contract | ✅ | v1–v4 + compat.md 刪除；`wire.md` + 兩份 schema 新建；semantics 601 → 430 行 |
 | 2 EL indicator | ✅ | 五個量值原樣送；`EL_Init3` + `EL_DllVersion` latch；原型/呼叫端參數數已自動核對 |
 | 3 C++ DLL | ✅ | ABI 1；x86+x64 建置通過；匯出修飾 `_EL_PublishTick@72` / `_EL_PublishBar@88` 與 EL 端逐位元組吻合；墓碑驗證已自動化 |
-| 4 重錄 fixtures | ⬜ | 需關閉 TradeStation 釋放 5555 |
+| 4 重錄 fixtures | ✅ | 4 份重錄（6/3/6/2）；expected 手工推導後逐欄核對 wire；17 frame 全數通過 JSON Schema |
 | 5 domain + wire | ⬜ | |
 | 6 storage | ⬜ | |
 | 7 runtime | ⬜ | |

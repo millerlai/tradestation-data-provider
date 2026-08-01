@@ -5,24 +5,25 @@
 
 ## 檔案配對
 
-**無前綴的是目前的 wire 版本，有 `vN_` 前綴的是已淘汰但仍須支援的版本。** DLL 裝在
-使用者的 TradeStation 上、不受 binding 升級控制，所以舊版本的 fixture 不是歷史紀錄，
-是現役測試 —— 見 [`../compat.md`](../compat.md)。
+**只有一組，沒有版本前綴。** 這個協定沒有需要相容的舊版本 —— 舊 DLL 送出的 payload
+不帶 `proto` 欄位，binding 一律拒收，所以不存在「舊 fixture 仍是現役測試」的情形。
+理由見 [`../wire.md`](../wire.md)。
 
 | fixture | expected | 涵蓋 |
 | --- | --- | --- |
-| `smoke.jsonl` | `expected/smoke.json` | wire v4 · tick + bar · per-symbol `seq` · index symbol 的 bid/ask 無效化（§3.2）· bucket 向下取整到分鐘（§2.1）· `pv` 宣告（§3.4 規則 4） |
+| `smoke.jsonl` | `expected/smoke.json` | tick + bar · per-symbol `seq` · index symbol 的 bid/ask 無效化（§3.2）· bucket 向下取整到分鐘（§2.1）· 右標籤→左標籤（§2） |
 | `noquote.jsonl` | `expected/noquote.json` | 無報價 → wire 上為 `null`（§3.1）。含 **非 index symbol**（SPY）的無報價 tick —— `$TICK` 單獨無法區分 §3.1 與 §3.2 |
-| `bars.jsonl` | `expected/bars.json` | 每一個非 1m 的 `tf`（`5m`/`15m`/`30m`/`1h`/`1d`）· `1d` 錨在 04:00 ET（§2.2）· `1d` 出現兩次，對應 `BarInterval` 的 `0`（TradeStation 10 實測值）與 `1`，wire 上必須無從分辨 · legacy `EL_PublishTickEx` 只能是 `1m` · **無法對應的間隔回 `-5` 且不送出**（該 mode 另發了 3 筆被拒） |
+| `bars.jsonl` | `expected/bars.json` | 每一個非 1m 的 `tf`（`5m`/`15m`/`30m`/`1h`/`1d`）· `1d` 錨在 04:00 ET 且**不做**左標籤位移（§2.2）· `1d` 出現兩次，對應 `BarInterval` 的 `0`（TradeStation 10 實測值）與 `1`，wire 上必須無從分辨 · **無法對應的間隔回 `-5` 且不送出**（該 mode 另發了 3 筆被拒，所以 9 次呼叫只有 6 個 frame） |
 | `session.jsonl` | `expected/session.json` | session 首尾兩根 bar，釘住左標籤（§2）。**wire 送 EL 的收盤時間 `09:31` / `16:00`，期望值是左標籤的 `09:30` / `15:59`** —— 右標籤→左標籤的轉換就靠這兩根把關 |
-| `v3_*.jsonl` | `expected/v3_*.json` | 上面四份的 wire v3 版本，逐 frame 只差 `v` 與**沒有 `pv`**。缺席即「未宣告慣例」，binding 必須照修正前的語意讀而不是拒收 |
-| `v1_legacy.jsonl` | `expected/v1_legacy.json` | wire v1 向下相容 · 無 `seq` 時降級為「無從得知」（§6.6） |
-| `v1_noquote.jsonl` | `expected/v1_noquote.json` | v1 用 `"bid":0.000000` 表示無報價（§3.1）—— binding 必須自行判 `<= 0` 無效 |
+
+四份都涵蓋五個 `el_*` 量值原樣落地（§3.4）。harness 用的是內部一致的 intraday 形狀：
+`el_volume == el_upticks`、`el_ticks == el_upticks + el_downticks` —— 那是真實 intraday
+資料的關係，binding 不得「修正」它。
 
 `*.jsonl` 每行一個 frame：
 
 ```json
-{"topic": "SPY", "payload": "{\"v\":2,\"kind\":\"tick\",...}"}
+{"topic": "SPY", "payload": "{\"proto\":1,\"kind\":\"tick\",...}"}
 ```
 
 `payload` 是**收到當下的原文**，未經解析或正規化。無法以 UTF-8 解碼的 frame 改記在
@@ -36,11 +37,10 @@
 TradeStation 就能驅動 DLL）：
 
 ```bash
-# 終端機 A —— 留足夠暖機時間讓 subscriber 接上
-cpp/build/x86-release/Release/TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
-
-# 終端機 B
+# 同一個 shell 呼叫，一前一後 —— PUB 會丟棄還沒有訂閱者時送出的訊息
+cpp/Release/TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000 &
 python contract/tools/record.py --count 6 --quiet --record contract/fixtures/smoke.jsonl
+wait
 ```
 
 各 fixture 對應的 harness mode 與 frame 數：
@@ -49,27 +49,17 @@ python contract/tools/record.py --count 6 --quiet --record contract/fixtures/smo
 | --- | --- | ---: |
 | `smoke.jsonl` | `smoke` | 6 |
 | `noquote.jsonl` | `noquote` | 3 |
-| `bars.jsonl` | `bars` | 7 |
+| `bars.jsonl` | `bars` | 6 |
 | `session.jsonl` | `session` | 2 |
 
-> `bars` 是 7 不是 6：第 7 筆是 legacy `EL_PublishTickEx` 送出的 `1m` bar，發在另一個
-> topic 上。本表原本寫 6，而既有的 fixture 檔實際有 7 行 —— 照 6 重錄會少一筆。
+> `bars` 的 6 是 **9 次呼叫**的結果：6 個可對應的間隔各送出一個 frame，另外 3 次
+> （2 分鐘、週線、2 日線）回 `-5` 且不送出。
 
-harness 預設走 `EL_Init2` 並宣告 `pv=1`。要錄一份**未宣告慣例**的 payload（`pv=0`，
-即修正前的 indicator）加 `--publisher-version -1`，它會改走 `EL_Init`。
-
-> TradeStation 執行中時它已經佔用預設的 `tcp://127.0.0.1:5555`，`EL_Init` 會回 `-3`。
-> 不必關掉 TradeStation，兩邊都指定同一個別的 port 即可。另外 PUB 會丟棄「還沒有
-> 訂閱者時」送出的訊息，所以 harness 與 `record.py` 要在**同一個 shell 呼叫**裡一前
-> 一後啟動，並留足 `--warmup-ms`。
+> TradeStation 執行中時它已經佔用預設的 `tcp://127.0.0.1:5555`，init 會回 `-3`。
+> 不必關掉 TradeStation，兩邊都指定同一個別的 port 即可。
 
 手寫的 fixture 只是把「我們以為 wire 長怎樣」寫第二遍，抓不到實作與規格的落差 ——
 而那正是 fixture 存在的理由。
-
-> v1 的兩份也照此原則：v1 的 DLL 原始碼從 git 取出（`67c5618^`）另行建置後錄製。
-> `v1_legacy.jsonl` 用當時的 harness `--mode smoke`；`v1_noquote.jsonl` 用
-> `cpp/build/v1-ref/record_v1_noquote.cpp`（連結同一顆 v1 DLL 的一次性錄製程式，
-> 建置與錄製指令寫在該檔頂端）。兩者都不是依 v1 規格手寫的。
 
 ### 2. `expected/` 不得由任何 binding 產生
 
