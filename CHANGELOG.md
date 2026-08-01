@@ -9,42 +9,112 @@ changes; patch releases (`0.x.Y`) will not.
 
 ## [Unreleased]
 
+### Changed — BREAKING: one protocol, `proto` 1, and no derived data
+
+- **BREAKING (wire): the version key is now `proto`, and its only value is `1`.**
+  Everything older is refused, not read. The key changed name on purpose: the
+  superseded wire used `v` and counted to 4, so restarting the numbering at 1 under
+  the same key would have made `{"v":1}` a legal opening for two different protocols
+  — and the mismatch would have surfaced as plausible-looking wrong numbers rather
+  than an error. A frame without `proto` simply is not this protocol.
+
+  **Upgrade the DLL and the `.ELD` together.** They are separate install steps and
+  every incompatible combination is caught before anything is published:
+
+  | Deployment | Caught by | What you see |
+  | --- | --- | --- |
+  | new `.ELD` + old DLL | old DLL has no `EL_Init3` export | `DefineDLLFunc` fails at Verify (F3), naming the missing export |
+  | old `.ELD` + new DLL | tombstone `EL_Init` / `EL_Init2` return `-6` | `EL_Init FAILED rc=-6` in the Print Log; the chart never publishes |
+  | new `.ELD` + a future DLL | the indicator's `EL_DllVersion()` latch | one Print Log line, then publishing latches off |
+  | new binding + old DLL | the `proto` gate in `_parse_payload` | every frame dropped with a message naming `TS2Python.dll` and the `.ELD` |
+
+- **BREAKING (wire): the five quantity fields are EasyLanguage's reserved words,
+  verbatim, under `el_*` names.** `vol` and `tc` are replaced by `el_volume`,
+  `el_ticks`, `el_upticks`, `el_downticks` and `el_open_interest`, all int64. The
+  publisher no longer selects between them.
+
+  It used to. `Volume` and `Ticks` mean opposite things on an intraday chart and a
+  daily one, and the indicator swapped fields so `vol` would mean "total shares"
+  everywhere. That swap happened off-wire, where no number could reveal it, which is
+  the entire reason `pv` / `publisher_version` had to exist. Both are gone. A consumer
+  wanting "how much traded" now reads the field `contract/semantics.md` §3.4 names for
+  its timeframe — and the `el_` prefix is there so nobody assumes instead of looking.
+
+- **BREAKING (wire): `ts_utc` is removed, and bars no longer carry `bid` / `ask`.**
+  Dropping `ts_utc` is a trade, not a redundancy cleanup: it was the DLL's own reading
+  of `ts_str`, and the >5s drift warning was the only signal that the two ends
+  disagreed about a timezone database. **The DLL also no longer parses `ts_str` at
+  all**, so an unparseable time string now travels intact and fails one layer later.
+  Both are recorded in `contract/wire.md`. Bar quotes are removed because a live-quote
+  function describes the moment of the call, which on a bar is its last print.
+
+- **BREAKING (ABI): `EL_DllVersion()` returns 1. `EL_Init3` is the init export.**
+  `EL_Init` and `EL_Init2` remain as **tombstones** returning `-6` — three lines each,
+  and they must stay in `TS2Python.def`. `EL_PublishTick` and `EL_PublishBar` kept
+  their names while changing signature, and under `__stdcall` a mismatched call
+  corrupts the stack rather than returning an error; init is the only interception
+  point, because the indicator guards every publish on `InitDone`. `EL_PublishTickEx`
+  is deleted.
+
+- **BREAKING (behaviour): nothing in this binding computes a bar.** `BarAggregator`,
+  `Resampler`, `bar_coverage`, the Tier-3 cache, the `source = derived:*` provenance
+  mechanism and `publisher_version` are all removed, along with
+  `aggregate_parquet.py`, `audit_bar_cache.py`, `clear_bar_cache.py` and
+  `src/tradestation_data/tools/`. `HistoryStore` reads and only reads: a query with
+  nothing behind it returns zero rows and never writes.
+
+  A computed bar is indistinguishable from a published one the moment it is
+  persisted, which is what made the provenance machinery necessary in the first
+  place. Removing the computation removes the need for it. Consumers wanting derived
+  intervals either chart them in TradeStation — a 5-minute chart publishes native 5m
+  bars — or build them from what is stored, on their own terms.
+
+- **BREAKING (storage): `BAR_SCHEMA` and `TICK_SCHEMA` changed.** `volume`,
+  `tick_count`, `source` and `publisher_version` are gone; the five `el_*` int64
+  columns take their place. `union_by_name` and `with_publisher_version` disappear with
+  them — the schema no longer evolves, so there is nothing to pad.
+
+  **Partitions written by an earlier version cannot be read by this one, and there is
+  deliberately no migration script.** The old intraday `volume` holds up-tick volume
+  while `tick_count` holds the total; swapping two columns in place is unrecoverable if
+  a run is interrupted, and nothing on disk records which convention a partition was
+  written under. Keep old data under a separate root and read it with an older release.
+
+- **`imputation_parquet.py` is non-destructive.** `--output` is now required and the
+  result is written to a separate root under its own schema, with an extra
+  `imputed: bool` column. `HistoryStore` refuses that directory rather than reading
+  invented bars as raw data.
+
 ### Added
 - **Multiple timeframes: tick · 1m · 5m · 15m · 30m · 1h · 1d.** Bars previously could
   only be 1-minute, because the wire had no field to say otherwise — `kind: "bar_1m"`
-  bound the shape and the interval into one string. Wire v3 splits them into `kind`
-  (tick/bar) and `tf`, so adding an interval is a new value rather than a change to every
-  binding's dispatch. `Bar` gains a `timeframe` field and `BarWriter` partitions on it,
-  not on its own constructor argument.
-- **Daily bars are taken natively rather than derived.** TradeStation's daily bar carries
-  the exchange's official OHLC and is split/dividend adjusted; summing ticks reproduces
-  neither, so a derived daily is an approximation wearing the same shape. Intraday runs
-  the other way — tick aggregation is reproducible and auditable, and needs one chart.
-- **Bar provenance.** Computed bars are stamped `derived:<origin>`; `Resampler` used to
-  copy the source through with `first(source)`, leaving native and derived
-  indistinguishable on disk. `HistoryStore` now refuses to overwrite a partition holding
-  native bars, and treats an unreadable partition as native.
+  bound the shape and the interval into one string. `kind` (tick/bar) and `tf` are now
+  separate, so adding an interval is a new value rather than a change to every binding's
+  dispatch. `Bar` gains a `timeframe` field and `BarWriter` partitions on it, not on its
+  own constructor argument. A `tf` the binding cannot place is refused, never defaulted.
+- **Daily bars are taken natively.** TradeStation's daily bar carries the exchange's
+  official OHLC and is split/dividend adjusted; nothing reproduces that, and nothing here
+  tries to.
 - New DLL export `EL_PublishBar(symbol, ts, bar_type, bar_interval, ...)`, mapping
   EasyLanguage's `BarType`/`BarInterval` to a wire timeframe in `wire_timeframe()`. It
   returns the new code `-5` rather than guessing at an interval it cannot name.
-  `EL_PublishTickEx` stays, publishing as 1m: under `__stdcall` a `DefineDLLFunc` whose
-  argument count stops matching corrupts the stack, so it could not simply grow two
-  parameters, and scripts written against an older DLL keep working.
 - **`contract/` — a language-neutral wire specification, now the source of truth for this
-  repo.** Holds `v1/` and `v2/` JSON Schemas, `semantics.md` (the rules a schema cannot
-  express: timestamp authority, left-labelled and minute-floored `bucket_start`, quote
-  availability, session policy, sequence handling), `error_codes.md`, `compat.md`, and
-  recorded conformance fixtures. Python is now one binding against this spec rather than
-  the definition of it.
-- **Wire v2 / DLL ABI 7 — gap detection.** The payload carries `seq` (per-symbol,
-  monotonic) and `sid` (publisher session id). PUB/SUB drops silently at both high-water
-  marks, so before this a subscriber could not distinguish a quiet market from a lost one.
-  `TradeStationELProvider.messages_lost` reports the count.
+  repo.** Holds `wire.md`, `bar.schema.json` / `tick.schema.json`, `semantics.md` (the
+  rules a schema cannot express: timestamp authority, left-labelled and minute-floored
+  `bucket_start`, quote availability, session policy, sequence handling),
+  `error_codes.md`, and recorded conformance fixtures. Python is now one binding against
+  this spec rather than the definition of it.
+- **Gap detection.** Every frame carries `seq` (per-symbol, monotonic) and `sid`
+  (publisher session id). PUB/SUB drops silently at both high-water marks, so before this
+  a subscriber could not distinguish a quiet market from a lost one.
+  `TradeStationELProvider.messages_lost` reports the count. A frame the protocol gate
+  refuses is still counted against the sequence, so a refusal never fabricates a gap.
 - `EL/` — the EasyLanguage exporter indicator, previously kept in the consuming project.
   It is the upstream origin of the feed and belongs with the provider.
-- `contract/fixtures/` with `smoke`, `noquote`, and `v1_legacy` cases, all recorded from
-  real DLL output (the v1 case from a DLL built out of git history, not hand-written).
-  `bindings/python/tests/conformance/` replays them against this binding.
+- `contract/fixtures/` with `smoke`, `noquote`, `bars` and `session` cases, all recorded
+  from real DLL output. `bindings/python/tests/conformance/` replays them against this
+  binding; the expectations are derived from `semantics.md` by hand, never generated from
+  the code under test.
 - `contract/tools/record.py` — wire inspector and fixture recorder, promoted from
   `scripts/simple_sub.py`. It depends on no binding, which is what qualifies it to record
   the files every binding is checked against.
@@ -53,35 +123,20 @@ changes; patch releases (`0.x.Y`) will not.
 - CMake presets for Visual Studio 2026 alongside 2022.
 
 ### Changed
-- **BREAKING (data): resampled buckets are anchored to the trading session, not
-  the Unix epoch.** `Resampler` used a bare `time_bucket`, which is epoch-aligned.
-  That happens to be correct for 5m/15m/30m — the ET offset is a whole number of
-  hours and 09:30 is a multiple of 30 minutes — but not for the longer frames:
-  `1h` produced 09:00 ET buckets, so the first regular-session bar held only
-  09:30–10:00 while carrying a full bar's timestamp, and `1d` split on UTC
-  midnight, which is 20:00 ET — the end of the extended session, so post-market
-  prints landed on the following day. `1d` also disagreed with
-  `aggregation.session`'s 04:00 ET rule about which day a bar belonged to.
-
-  The grid is now laid out in `America/New_York` wall-clock time, anchored at
-  09:30 for intraday and 04:00 for daily, so it does not drift against the
-  session when the offset changes twice a year. Neither anchor sits in the DST
-  fold. Specified in `contract/semantics.md` §2.2.
-
-  **Any cached 1h or 1d bars on disk were produced by the old alignment and are
-  wrong.** Clear them and let them rebuild:
-
-  ```
-  python scripts/clear_bar_cache.py --data-root ./data --timeframes 1h 1d --confirm
-  ```
-
-  5m/15m/30m caches are unaffected.
-- **BREAKING (wire): `bid` / `ask` may now be `null`.** EL's `InsideBid` / `InsideAsk`
-  return 0 whenever there is no quote — historical replay, any non-live bar, and symbols
-  that never carry one. The DLL previously forwarded that 0 verbatim, putting what reads
-  as a $0.00 quote on the wire and leaving every binding to remember that 0 means absent.
-  It now emits `null`. Wire v1 cannot do this, so bindings reading v1 must treat a
-  non-positive quote as absent.
+- **The bucket grid is laid out in `America/New_York` wall-clock time**, anchored at
+  09:30 for intraday and 04:00 for daily, so it does not drift against the session when
+  the offset changes twice a year. Neither anchor sits in the DST fold. An epoch-aligned
+  grid is correct for 5m/15m/30m by coincidence — the ET offset is a whole number of
+  hours and 09:30 is a multiple of 30 minutes — but not for the longer frames: `1h`
+  produced 09:00 ET buckets, and `1d` split on UTC midnight, which is 20:00 ET, so
+  post-market prints landed on the following day. Specified in
+  `contract/semantics.md` §2.2 and implemented once, in `domain/timeframe.py`.
+- **BREAKING (wire): `bid` / `ask` are `null` when there is no quote.** EL's `InsideBid`
+  / `InsideAsk` return 0 whenever there is none — historical replay, any non-live bar,
+  and symbols that never carry one. The DLL previously forwarded that 0 verbatim, putting
+  what reads as a $0.00 quote on the wire and leaving every binding to remember that 0
+  means absent. It now emits `null`, and the binding additionally blanks index/breadth
+  symbols whose live numbers mean nothing.
 - **BREAKING (layout): the Python package moved to `bindings/python/`.** A second binding
   is now a sibling directory rather than a restructure. `config/` and a `LICENSE` copy
   moved with it, because packaging back-ends resolve paths relative to `pyproject.toml`
@@ -101,14 +156,6 @@ changes; patch releases (`0.x.Y`) will not.
   fell back to building from source. Unpinning it (24.0.0) fixes that at the source; 3.14
   joins the CI matrix and the classifiers.
 
-### Changed
-- **`1d` is published data, not a cache tier.** `contract/semantics.md` §2.3 gains rule 4:
-  a binding must not compute a daily bar at all, even into an empty partition. A derived
-  daily is byte-for-byte as plausible as the real one and carries neither the exchange's
-  official close nor the split/dividend adjustment, so the only safe rule is not to make
-  one. `HistoryStore.load_bars` returns empty instead of building it, `rebuild_bar_cache`
-  and `aggregate_parquet.py` refuse it, `clear_bar_cache.py` drops it from the default
-  sweep and refuses it when named, and it is out of `TIER3_TIMEFRAMES`.
 - **`1d` moves to one file per symbol**: `bars/timeframe=1d/symbol={SYM}/bars.parquet`,
   no `date=` level, rewritten whole on every flush (merging what is already on disk, later
   wins on a repeated `bucket_start`, replaced atomically). A day partition of daily bars is

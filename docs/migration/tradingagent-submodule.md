@@ -5,6 +5,19 @@
 >
 > 架構原則見 [`../architecture.md` §7](../architecture.md)。
 
+> ### ⚠ 2026-08-01 更新：dp 已完成 proto-1 重構，本文部分盤點已過時
+>
+> §1 的盤點做於 dp 還在 wire v2 / ABI 7 的時候。此後 dp 做了一次不相容的重寫：
+> wire 版本欄位改為 `proto`（唯一值 1）、DLL ABI 歸 1，並且**刪除了所有衍生運算**
+> —— `BarAggregator`、`Resampler`、`bar_coverage`、Tier-3 快取、`source` provenance
+> 與 `publisher_version` 全部不再存在。dp 現在只做接收、標記時間、寫入。
+>
+> 受影響的段落已就地更正並標註。**§2 的遷移步驟與 §3 的待決策本身仍然成立**，
+> 只是其中列舉的檔案清單要以 dp 現況為準。D3 已完成，改列為紀錄。
+>
+> 對 TA 最重要的一件事：**dp 不再從 tick 聚出 bar。** TA 若依賴那個行為，
+> 遷移時必須自己實作，或改用 EL indicator 直接發布該間隔的 bar。
+
 ---
 
 ## 1. 現況盤點
@@ -28,7 +41,7 @@ src/TS2Python.def    CMakeLists.txt         vcpkg.json
 | --- | --- |
 | `runtime/config.py` | 2 行，純 import 路徑 |
 | `providers/base.py` | 4 行，純 import 路徑 |
-| `aggregation/bar_aggregator.py` | 4 行，純 import 路徑 |
+| ~~`aggregation/bar_aggregator.py`~~ | 4 行，純 import 路徑。**dp 已刪除此模組**，TA 那份若還需要就變成 TA 自己的程式碼 |
 
 ### 1.3 dp 領先，尚未回流 TA
 
@@ -54,8 +67,8 @@ TA 的 `IngestionRuntime` 多出 3 個方法：`_run_strategy_cycle`、`_call_on
 
 | 項目 | 處置 |
 | --- | --- |
-| `TA/EL/TS2Python_Exporter.el` | **搬到 dp**（architecture.md 提案 A）。TA 那份撤除。 |
-| `TA/docs/design.md` §3.1–3.4 / §5 · `error_codes.md` | provider 相關段落搬到 dp。`dp/cpp/README.md:31,170` 目前引用 `../docs/design.md`、`../docs/error_codes.md`，兩者在 dp 中**不存在，是斷鏈**。 |
+| `TA/EL/TS2Python_Exporter.el` | **搬到 dp**（architecture.md 提案 A）。TA 那份撤除。**已完成** —— dp 的 `EL/` 就是那份，且已隨 proto 1 改寫。 |
+| `TA/docs/design.md` §3.1–3.4 / §5 · `error_codes.md` | provider 相關段落搬到 dp。**已完成** —— 現在是 `dp/contract/{wire,semantics,error_codes}.md`；`cpp/README.md` 的斷鏈也已修掉。 |
 | `TA/providers/tradestation_webapi.py` | 36 行 `NotImplementedError` stub。搬到 dp（屬 TradeStation 的第二種接入方式）。 |
 | `TA/EL/monarch`（submodule） | **留在 TA**，是策略相關。 |
 
@@ -110,13 +123,17 @@ cpp/                                      ← 全刪（改用 submodule 的 cpp/
 EL/TS2Python_Exporter.el                  ← 刪（已搬 dp）；EL/monarch 保留
 ```
 
-`scripts/` 下與 dp 同名的 10 支刪除，改呼叫 submodule 內的：
+`scripts/` 下與 dp 同名的刪除，改呼叫 submodule 內的。dp 現在只剩 6 支：
 
 ```
-_common.py  aggregate_parquet.py  audit_bar_cache.py  clear_bar_cache.py
-dedupe_bars.py  dump_parquet.py  imputation_parquet.py  run_ingestion.py
-simple_sub.py  verify_parquet.py
+_common.py  dedupe_bars.py  dump_parquet.py
+imputation_parquet.py  run_ingestion.py  verify_parquet.py
 ```
+
+> `aggregate_parquet.py` / `audit_bar_cache.py` / `clear_bar_cache.py` 已從 dp 刪除
+> —— 它們全都在做衍生運算。TA 若仍需要那些功能，那是 TA 自己的程式碼。
+> `imputation_parquet.py` 的語意也變了：`--output` 現在必填，寫到另一個 root、
+> 用多一欄 `imputed: bool` 的獨立 schema，不再就地改寫。
 
 TA 獨有的 6 支保留：`advisor_ui.py` `decision_inspector.py` `deploy_dll.py`
 `llm_cost_report.py` `paper_daily_report.py` `r2_replay_compare.py`。
@@ -202,17 +219,24 @@ providers,runtime}`，統計範圍含 `src/`、`tests/`、`scripts/`）。
 | (b) shim 轉發 | TA 保留 `trading_agent/domain/__init__.py` 等薄殼 re-export | 改動極小，但多一層間接，mypy/IDE 跳轉停在 shim |
 | (c) 分階段 | 先 shim 讓測試綠燈，再分批改名，最後拆 shim | 每步可獨立驗證與回滾，總工時最長 |
 
-### D3 — sequence number（dp 側已決議實作）
+### D3 — sequence number（**已完成**，改列為紀錄）
 
-dp 將於 **wire v2** 加入 `seq`（per-symbol 單調遞增）與 `sid`（publisher session id），
-`EL_DllVersion()` 同步升至 **7**。見 [`../architecture.md` §4.3](../architecture.md)。
+`seq`（per-symbol 單調遞增）與 `sid`（publisher session id）已是 wire 的必備欄位。
+原本寫的是「將於 wire v2 加入、ABI 升至 7」，那個版本序列後來被 proto-1 重寫取代：
+現在是 **wire `proto` 1 / DLL ABI 1**，兩者都只有一個版本，更舊的一律拒收。
 
 TA 側需配合的事項：
 
-- 部署的 `TS2Python.dll` 需為 ABI 7，否則 subscriber 降級為不偵測缺漏（不會失敗，
-  但會記錄警告）。`scripts/deploy_dll.py` 的部署驗證應檢查 `EL_DllVersion()`。
-- TA 的 observability 層可消費 dp 暴露的 `messages_lost` 指標。
-- 既有錄製的 Parquet 資料為 v1 產出、無序號，回測時無法回溯判斷當時是否有缺漏。
+- 部署的 `TS2Python.dll` 需為 **ABI 1**，且 **`.ELD` 必須同時更新** —— indicator 綁
+  `EL_Init3`，舊 DLL 沒有這個匯出。`scripts/deploy_dll.py` 的部署驗證應檢查
+  `EL_DllVersion() == 1`。
+- 不相容的組合不會降級，而是**明確拒收**：舊 payload 沒有 `proto` 欄位，binding 直接
+  丟棄並記錄一則指名該重裝什麼的訊息。這與原本「降級為不偵測缺漏」的預期相反。
+- 每個 proto-1 frame 都帶 `seq`，所以 `messages_lost` 不再有「無法判斷」這個狀態。
+  TA 的 observability 層可以直接消費。
+- 既有錄製的 Parquet 資料是舊 schema（`volume` / `tick_count` / `source` /
+  `publisher_version`），與現在的 `el_*` 欄位**不相容**，且 intraday 的 `volume` 存的
+  其實是上漲量。dp 刻意不提供 migration script —— 原因見 `CHANGELOG.md`。
 
 ---
 

@@ -351,8 +351,12 @@ if not "%COPY_FAILED%"=="0" (
 echo === INSTALLED - %COPIED% file^(s^) ===
 echo   %DEST%
 echo.
-echo Next: open the EasyLanguage editor, and Verify ^(F3^) the indicator that
-echo imports the DLL. TradeStation loads it on the next chart that uses it.
+echo NEXT - RE-IMPORT THE .ELD TOO. The DLL and the indicator are one unit:
+echo   the indicator binds EL_Init3 and checks EL_DllVersion, so a chart still
+echo   running the previously imported .ELD stops publishing rather than
+echo   sending anything wrong. Import EL\TS2Python_Exporter.eld, then Verify
+echo   ^(F3^) in the EasyLanguage editor. TradeStation loads the DLL on the
+echo   next chart that uses the indicator.
 echo.
 endlocal
 exit /b 0

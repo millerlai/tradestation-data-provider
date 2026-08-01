@@ -22,7 +22,7 @@
 | 7 runtime | ✅ | bar_aggregator 刪除；IngestionRuntime 不再有 aggregator 參數 |
 | 8 scripts/examples | ✅ | imputation 改非破壞性 + `imputed` 欄；examples/03 重寫；04 移除 legacy fixture |
 | 9 測試 | ✅ | **第一個全綠的檢查點**：298 passed；`ruff check` / `ruff format --check` / `mypy` 全過 |
-| 10 文件 | ⬜ | |
+| 10 文件 | ✅ | 11 項全數完成；`issues.md` 歸檔為 `docs/archive/review-1eda23b.md` |
 
 ### 執行中的計畫偏離
 
@@ -46,6 +46,7 @@
 | D-14 | `test_el_subscriber.py` 收在 801 行（計畫目標 800）、`test_history_store.py` 242 行（目標 150） | 前者剛好落在目標上。後者超出，是因為新增了 `test_load_bars_never_derives_from_ticks`（這次重構的核心行為，計畫的保留清單沒列）與兩個 helper factory。行數是估計值 |
 | D-15 | 計畫未列：`examples/02_custom_sink.py` 讀 `bar.source` | T-8.8 只寫「確認 01 / 02 不受影響」——實際受影響。該欄位已刪，使用者一跑範例就 `AttributeError`。範例不在測試覆蓋內，是這次唯一沒有測試會抓到的真錯 |
 | D-16 | 計畫未列：清掉 `src/` 內三處指向已刪程式的註解 | `snapshot.py` 的 "closed by BarAggregator"、`ingestion.py` 的 "(EL_PublishTickEx)" 與 "volume / tick_count"。屬於「跨 Phase 一致性檢查」grep 掃出來的殘留，本專案已漂移過不只一次，順手修掉 |
+| D-18 | **T-3.11「舊 `.ELD` + 新 DLL」的實機驗證取消**（使用者決定） | 這個 repo 只有一位使用者，且升級時一律同時換 DLL 與 `.ELD`，所以「掛著舊 `.ELD`」不是會發生的狀態。**墓碑不移除**：`EL_Init` / `EL_Init2` 仍留在 `.def` 與 DLL 裡回 `-6`，`test_harness.cpp` 每次啟動仍自動斷言（D-5）。取消的只是實機測那一步——保留的程式碼成本是三行，驗證的成本是一次完整的 TradeStation 佈署 |
 | D-17 | pytest 一律加 `--timeout=30`（透過 `uv run --with pytest-timeout`，**未**寫進 `pyproject.toml`） | `test_events_logs_and_continues_on_transient_zmq_error` 的 stub socket 固定回同一個 payload；proto 閘門拒收後 `events()` 會重試，於是變成無限迴圈而不是測試失敗。整個 suite 會卡死。stub 已改回合法 payload，但 timeout 保留為執行慣例——相依不入 `pyproject` 是因為它是本地診斷工具，不是專案需求 |
 
 ---
@@ -305,64 +306,64 @@ class HistoryStore:
 
 ### Phase 0 — 準備
 
-- [ ] **T-0.1** 從目前的 `fix/tc-count-and-doc-consistency`（HEAD `79d4845`）開新分支 `refactor/proto-1-raw-el-fields`。**不從 `main` 開**：計畫裡所有行號都基於 HEAD；`main` 還停在 wire v3 / ABI 8。`refactoring` 分支（`47e8006`）依指示忽略
-- [ ] **T-0.2** `git rm --cached` 掉 `bindings/python/data/` 的 8 個 parquet（工作區已刪，仍被追蹤）
-- [ ] **T-0.3** `pyproject.toml`：版本 `0.2.0` → `0.3.0`；移除 `duckdb` 與 `pydantic`（已確認 `duckdb` 只在 `history_store.py` / `resampler.py`，`pydantic` 在 `src/` 完全沒被 import）；重新產生 `uv.lock`
+- [x] **T-0.1** 從目前的 `fix/tc-count-and-doc-consistency`（HEAD `79d4845`）開新分支 `refactor/proto-1-raw-el-fields`。**不從 `main` 開**：計畫裡所有行號都基於 HEAD；`main` 還停在 wire v3 / ABI 8。`refactoring` 分支（`47e8006`）依指示忽略
+- [x] **T-0.2** `git rm --cached` 掉 `bindings/python/data/` 的 8 個 parquet（工作區已刪，仍被追蹤）
+- [x] **T-0.3** `pyproject.toml`：版本 `0.2.0` → `0.3.0`；移除 `duckdb` 與 `pydantic`（已確認 `duckdb` 只在 `history_store.py` / `resampler.py`，`pydantic` 在 `src/` 完全沒被 import）；重新產生 `uv.lock`
 
 ### Phase 1 — Contract（規格先行）
 
-- [ ] **T-1.1** 刪除 `contract/v1/` `v2/` `v3/` `v4/` 與 `contract/compat.md`
-- [ ] **T-1.2** 新增 `contract/wire.md`（規格 §1）+ `contract/bar.schema.json` + `contract/tick.schema.json`。**wire.md 必須明寫**：(a) `proto` 取代 `v` 的理由；(b) 刪 `ts_utc` 的兩個取捨；(c) 新舊部署互不相容的四種情境與各自的攔截點
-- [ ] **T-1.3** 刪減 `contract/semantics.md`（600 → 目標 250 行）：
+- [x] **T-1.1** 刪除 `contract/v1/` `v2/` `v3/` `v4/` 與 `contract/compat.md`
+- [x] **T-1.2** 新增 `contract/wire.md`（規格 §1）+ `contract/bar.schema.json` + `contract/tick.schema.json`。**wire.md 必須明寫**：(a) `proto` 取代 `v` 的理由；(b) 刪 `ts_utc` 的兩個取捨；(c) 新舊部署互不相容的四種情境與各自的攔截點
+- [x] **T-1.3** 刪減 `contract/semantics.md`（600 → 目標 250 行）：
   - 保留：§1 時間權威（移除 `ts_utc`）、§2.1 分鐘 floor、§2.2 bucket 對齊與 DST、§2.4 ET 讀取語意、§3.1–3.3 bid/ask、§4 session、§5 topic 完全相等過濾、§6 seq/sid、§7 新規則準則
   - **刪除**：§2.3 native vs derived、§2.5 空區間讀取語意、§2.6 分區重算視窗、§2.7 快取覆蓋率、§3.5 bar 的 bid/ask
   - **改寫**：§3.4 → 「EL 量值欄位對照表 + 各欄原樣透傳 + 為何欄位名帶 `el_` 前綴」
   - §6.6 簡化——不再有無 `seq` 的舊 wire
-- [ ] **T-1.4** `contract/error_codes.md`：新增 **`-6` ABI mismatch**（墓碑 init 回傳）；`EL_PublishBar` 補進 -1/-2 列；移除 `EL_Init2` 的正常語意（改列為墓碑）
-- [ ] **T-1.5** 更新 `contract/README.md`（移除多版本敘述）
+- [x] **T-1.4** `contract/error_codes.md`：新增 **`-6` ABI mismatch**（墓碑 init 回傳）；`EL_PublishBar` 補進 -1/-2 列；移除 `EL_Init2` 的正常語意（改列為墓碑）
+- [x] **T-1.5** 更新 `contract/README.md`（移除多版本敘述）
 
 ### Phase 2 — EasyLanguage indicator
 
-- [ ] **T-2.1** 刪除 `BarVol`/`BarTc` 交換區塊（`:219-247`）與相關註解
-- [ ] **T-2.2** `DefineDLLFunc` 改綁 **`EL_Init3`**（單一 endpoint 參數）
-- [ ] **T-2.3** **新增 `EL_DllVersion()` latch**：init 成功後檢查回值，`<> 1` 就印訊息並 latch 停止發布。`EL_DllVersion` 是 0 參數，簽章永不變，呼叫絕對安全——這是第二道防線（第一道是舊 DLL 沒有 `EL_Init3` 匯出，`DefineDLLFunc` 會解析失敗）
-- [ ] **T-2.4** 新簽章：
+- [x] **T-2.1** 刪除 `BarVol`/`BarTc` 交換區塊（`:219-247`）與相關註解
+- [x] **T-2.2** `DefineDLLFunc` 改綁 **`EL_Init3`**（單一 endpoint 參數）
+- [x] **T-2.3** **新增 `EL_DllVersion()` latch**：init 成功後檢查回值，`<> 1` 就印訊息並 latch 停止發布。`EL_DllVersion` 是 0 參數，簽章永不變，呼叫絕對安全——這是第二道防線（第一道是舊 DLL 沒有 `EL_Init3` 匯出，`DefineDLLFunc` 會解析失敗）
+- [x] **T-2.4** 新簽章：
   - `EL_PublishTick(Sym, TsStr, Close, Volume, Ticks, UpTicks, DownTicks, OpenInt, InsideBid, InsideAsk)` — 10 參數
   - `EL_PublishBar(Sym, TsStr, BarType, BarInterval, Open, High, Low, Close, Volume, Ticks, UpTicks, DownTicks, OpenInt)` — 13 參數（bid/ask 移除）
-- [ ] **T-2.5** `LogPublish` 改印五個原始量值，移除 `wire_vol` / `wire_tc` 對照
-- [ ] **T-2.6** 保留兩個 latch guard（秒級圖表 `:133-143`、聚合 tick 圖 `:162-173`）——它們防的是「錯誤資料進到正確分區」，屬於接收正確性
-- [ ] **T-2.7** 更新 `EL/README.md` 與 `EL/README.zh-TW.md`
+- [x] **T-2.5** `LogPublish` 改印五個原始量值，移除 `wire_vol` / `wire_tc` 對照
+- [x] **T-2.6** 保留兩個 latch guard（秒級圖表 `:133-143`、聚合 tick 圖 `:162-173`）——它們防的是「錯誤資料進到正確分區」，屬於接收正確性
+- [x] **T-2.7** 更新 `EL/README.md` 與 `EL/README.zh-TW.md`
 
 ### Phase 3 — C++ DLL
 
-- [ ] **T-3.1** `kDllVersion = 1`；刪除 `g_publisher_version`
-- [ ] **T-3.2** **`EL_Init3(const char* endpoint)`** 為真正的 init；**`EL_Init` / `EL_Init2` 改成墓碑**——函式體只有 `return -6;`，兩者都**留在 `.def` 裡**
-- [ ] **T-3.3** 刪除 `EL_PublishTickEx`（legacy 1m 路徑，EL indicator 從未綁定它）
-- [ ] **T-3.4** 改寫兩個 `snprintf` format string（`:331`、`:390`）：`"v":4,"pv":%d` → `"proto":1`、移除 `ts_utc` 與 `tc`、量值改 `%lld` 並改名為 `el_*`、bar 移除 bid/ask。**`ts` 維持 `%.6f` 秒不動**
-- [ ] **T-3.5** 量值參數在 C 側仍收 `double`（EL 限制），寫入前 `static_cast<long long>`；重算 payload buffer（tick 576 → 640、bar 672 → 768）
-- [ ] **T-3.6** `parse_el_timestamp_to_utc` 不再有輸出用途 → 刪除；同時把「DLL 不再驗證 `ts_str`」寫進 `contract/wire.md`（T-1.2 已列）
-- [ ] **T-3.7** `cpp/src/TS2Python.def`：新增 `EL_Init3`；**保留** `EL_Init` / `EL_Init2`（墓碑）；移除 `EL_PublishTickEx`
-- [ ] **T-3.8** `cpp/include/ts2python.h`：更新全部簽章與註解（含 `:75-79` 過時的 `bar_1m` 敘述、`:126-129` 的版本配對）；為墓碑寫明用途
-- [ ] **T-3.9** `cpp/src/test_harness.cpp`：改用 `EL_Init3` 與新 publish 簽章；移除 `--publisher-version`；`bars` mode 移除 legacy `EL_PublishTickEx` 那一筆（7 → 6 frame）
-- [ ] **T-3.10** `verify-build-env.bat` 先確認環境，再 `.\build.bat` 重建 x86 + x64
-- [ ] **T-3.11** **手動驗證墓碑**：用舊的 `.ELD`（或一支呼叫 `EL_Init` 的小程式）打新 DLL，確認拿到 `-6` 而不是崩潰
+- [x] **T-3.1** `kDllVersion = 1`；刪除 `g_publisher_version`
+- [x] **T-3.2** **`EL_Init3(const char* endpoint)`** 為真正的 init；**`EL_Init` / `EL_Init2` 改成墓碑**——函式體只有 `return -6;`，兩者都**留在 `.def` 裡**
+- [x] **T-3.3** 刪除 `EL_PublishTickEx`（legacy 1m 路徑，EL indicator 從未綁定它）
+- [x] **T-3.4** 改寫兩個 `snprintf` format string（`:331`、`:390`）：`"v":4,"pv":%d` → `"proto":1`、移除 `ts_utc` 與 `tc`、量值改 `%lld` 並改名為 `el_*`、bar 移除 bid/ask。**`ts` 維持 `%.6f` 秒不動**
+- [x] **T-3.5** 量值參數在 C 側仍收 `double`（EL 限制），寫入前 `static_cast<long long>`；重算 payload buffer（tick 576 → 640、bar 672 → 768）
+- [x] **T-3.6** `parse_el_timestamp_to_utc` 不再有輸出用途 → 刪除；同時把「DLL 不再驗證 `ts_str`」寫進 `contract/wire.md`（T-1.2 已列）
+- [x] **T-3.7** `cpp/src/TS2Python.def`：新增 `EL_Init3`；**保留** `EL_Init` / `EL_Init2`（墓碑）；移除 `EL_PublishTickEx`
+- [x] **T-3.8** `cpp/include/ts2python.h`：更新全部簽章與註解（含 `:75-79` 過時的 `bar_1m` 敘述、`:126-129` 的版本配對）；為墓碑寫明用途
+- [x] **T-3.9** `cpp/src/test_harness.cpp`：改用 `EL_Init3` 與新 publish 簽章；移除 `--publisher-version`；`bars` mode 移除 legacy `EL_PublishTickEx` 那一筆（7 → 6 frame）
+- [x] **T-3.10** `verify-build-env.bat` 先確認環境，再 `.\build.bat` 重建 x86 + x64
+- [x] **T-3.11** ~~**手動驗證墓碑**：用舊的 `.ELD`（或一支呼叫 `EL_Init` 的小程式）打新 DLL，確認拿到 `-6` 而不是崩潰~~ — **descope，見 D-18**。墓碑程式碼與 harness 的自動斷言（D-5）保留
 
 ### Phase 4 — 重錄 fixtures
 
-- [ ] **T-4.1** 刪除 `contract/fixtures/v1_*.jsonl`、`v3_*.jsonl` 與對應 `expected/`（6 組）
-- [ ] **T-4.2** 用新 harness 重錄 `smoke`(6) / `noquote`(3) / `bars`(6) / `session`(2)
+- [x] **T-4.1** 刪除 `contract/fixtures/v1_*.jsonl`、`v3_*.jsonl` 與對應 `expected/`（6 組）
+- [x] **T-4.2** 用新 harness 重錄 `smoke`(6) / `noquote`(3) / `bars`(6) / `session`(2)
   - TradeStation 開著會佔 5555，init 回 -3。先關掉（見 memory `cpp-harness-port-conflict`）
   - `--warmup-ms 8000` 讓 subscriber 先掛上，PUB 沒有 subscriber 會直接丟棄
-- [ ] **T-4.3** **手工推導**四份 `expected/*.json`——依 `semantics.md` 的規則，**不得**用 binding 產生。每份保留 `derivation` 欄位
-- [ ] **T-4.4** 更新 `contract/fixtures/README.md`（移除 legacy 段落、`--publisher-version`、`bars` 的 7-frame 註解）
-- [ ] **T-4.5** `contract/tools/record.py`：`--latency` 讀 `doc["ts"]`，**因為 `ts` 沒改所以不用動**；只需更新自述中指向 `contract/v2/envelope.md` 的那行
+- [x] **T-4.3** **手工推導**四份 `expected/*.json`——依 `semantics.md` 的規則，**不得**用 binding 產生。每份保留 `derivation` 欄位
+- [x] **T-4.4** 更新 `contract/fixtures/README.md`（移除 legacy 段落、`--publisher-version`、`bars` 的 7-frame 註解）
+- [x] **T-4.5** `contract/tools/record.py`：`--latency` 讀 `doc["ts"]`，**因為 `ts` 沒改所以不用動**；只需更新自述中指向 `contract/v2/envelope.md` 的那行
 
 ### Phase 5 — Python domain + wire
 
-- [ ] **T-5.1** `domain/bar.py` 改為新欄位（規格 §3）；刪除 provenance 三件套
-- [ ] **T-5.2** `domain/tick.py` 改為新欄位
-- [ ] **T-5.3** `domain/timeframe.py`：刪 `NATIVE_ONLY_TIMEFRAMES` / `TIER3_TIMEFRAMES`；修正 `align_bucket_start` docstring
-- [ ] **T-5.4** `wire/el_subscriber.py`：
+- [x] **T-5.1** `domain/bar.py` 改為新欄位（規格 §3）；刪除 provenance 三件套
+- [x] **T-5.2** `domain/tick.py` 改為新欄位
+- [x] **T-5.3** `domain/timeframe.py`：刪 `NATIVE_ONLY_TIMEFRAMES` / `TIER3_TIMEFRAMES`；修正 `align_bucket_start` docstring
+- [x] **T-5.4** `wire/el_subscriber.py`：
   - 版本閘門改讀 **`proto`**；`SUPPORTED_WIRE_VERSIONS` → `{1}`。**缺 `proto` 欄位時的錯誤訊息要明說「這可能是 proto-1 之前的 DLL，請重裝 `TS2Python.dll` 與 `.ELD`」**
   - 五個 `el_*` 量值一律用 `data["el_volume"]` 這種**必填讀法**，不得用 `.get(..., 0)`——缺欄位要炸，不能靜默寫 0
   - 刪除 v1/v2/v3 欄位位置分歧、`tf` 預設值邏輯（現在一律必填）
@@ -373,32 +374,32 @@ class HistoryStore:
 
 ### Phase 6 — Python storage
 
-- [ ] **T-6.1** **刪除** `storage/resampler.py`
-- [ ] **T-6.2** **刪除** `storage/bar_coverage.py`
-- [ ] **T-6.3** `storage/bar_writer.py`：新 `BAR_SCHEMA`；刪除 `with_publisher_version`；`_bars_to_table` 改 11 欄。保留 `SINGLE_FILE_TIMEFRAMES` 的 `_rewrite` 整檔合併與 `_seal_earlier_days`
-- [ ] **T-6.4** `storage/tick_writer.py`：新 `TICK_SCHEMA`；`_ticks_to_table` 改 10 欄
-- [ ] **T-6.5** `storage/history_store.py` 重寫成純讀取（規格 §4），改用 polars
-- [ ] **T-6.6** `storage/__init__.py`：移除 `Resampler` re-export
+- [x] **T-6.1** **刪除** `storage/resampler.py`
+- [x] **T-6.2** **刪除** `storage/bar_coverage.py`
+- [x] **T-6.3** `storage/bar_writer.py`：新 `BAR_SCHEMA`；刪除 `with_publisher_version`；`_bars_to_table` 改 11 欄。保留 `SINGLE_FILE_TIMEFRAMES` 的 `_rewrite` 整檔合併與 `_seal_earlier_days`
+- [x] **T-6.4** `storage/tick_writer.py`：新 `TICK_SCHEMA`；`_ticks_to_table` 改 10 欄
+- [x] **T-6.5** `storage/history_store.py` 重寫成純讀取（規格 §4），改用 polars
+- [x] **T-6.6** `storage/__init__.py`：移除 `Resampler` re-export
 
 ### Phase 7 — Python runtime
 
-- [ ] **T-7.1** **刪除** `aggregation/bar_aggregator.py`
-- [ ] **T-7.2** `aggregation/__init__.py` 移除 `BarAggregator` re-export。`session.py` 與 `snapshot.py` **不動**
-- [ ] **T-7.3** `runtime/ingestion.py`：`__init__` 移除 `aggregator` 參數；`_handle_tick` 只做 snapshot + sink 廣播；`_shutdown` 移除 aggregator drain（direct-bar drain 保留）；`_advance_loop` 只推進 direct bar
-- [ ] **T-7.4** `runtime/main.py`：移除 `BarAggregator` 建構；`_PrintingBarSink` 配合新 schema
-- [ ] **T-7.5** `runtime/config.py` **不動**
-- [ ] **T-7.6** `sinks/` **不動**——只是 writer 的 adapter
+- [x] **T-7.1** **刪除** `aggregation/bar_aggregator.py`
+- [x] **T-7.2** `aggregation/__init__.py` 移除 `BarAggregator` re-export。`session.py` 與 `snapshot.py` **不動**
+- [x] **T-7.3** `runtime/ingestion.py`：`__init__` 移除 `aggregator` 參數；`_handle_tick` 只做 snapshot + sink 廣播；`_shutdown` 移除 aggregator drain（direct-bar drain 保留）；`_advance_loop` 只推進 direct bar
+- [x] **T-7.4** `runtime/main.py`：移除 `BarAggregator` 建構；`_PrintingBarSink` 配合新 schema
+- [x] **T-7.5** `runtime/config.py` **不動**
+- [x] **T-7.6** `sinks/` **不動**——只是 writer 的 adapter
 
 ### Phase 8 — scripts / tools / examples
 
-- [ ] **T-8.1** **刪除** `scripts/aggregate_parquet.py`、`audit_bar_cache.py`、`clear_bar_cache.py`
-- [ ] **T-8.2** **刪除** `src/tradestation_data/tools/` 整個目錄
-- [ ] **T-8.3** `scripts/verify_parquet.py`：移除 `source` / `publisher_version` 參照。**在 `--help` 與 README 標註兩件事**：(a) 它是 operator 的完整性檢查工具，不是資料保證；(b) **不處理半日市**（感恩節隔天、聖誕夜 13:00 收），那些日子會固定誤報 INCOMPLETE，用 `--holidays` 也蓋不掉。既有缺陷，這次不修，但要說出來
-- [ ] **T-8.4** `scripts/imputation_parquet.py`：`--output <root>` 改必填、不再就地改寫；輸出用 `BAR_SCHEMA + imputed: bool` 這個**獨立 schema**（不是側錄 json）
-- [ ] **T-8.5** `scripts/dump_parquet.py`、`dedupe_bars.py`：確認新 schema 下仍可用
-- [ ] **T-8.6** `examples/03_read_history.py` 重寫：改成「寫入幾根 bar → `load_bars` 讀回」，自己造資料，維持「不需要 publisher」
-- [ ] **T-8.7** `examples/04_replay_fixtures.py`：移除 legacy fixture 選項
-- [ ] **T-8.8** 確認 `01` / `02` / `_compat.py` 不受影響；更新 `examples/README.md`
+- [x] **T-8.1** **刪除** `scripts/aggregate_parquet.py`、`audit_bar_cache.py`、`clear_bar_cache.py`
+- [x] **T-8.2** **刪除** `src/tradestation_data/tools/` 整個目錄
+- [x] **T-8.3** `scripts/verify_parquet.py`：移除 `source` / `publisher_version` 參照。**在 `--help` 與 README 標註兩件事**：(a) 它是 operator 的完整性檢查工具，不是資料保證；(b) **不處理半日市**（感恩節隔天、聖誕夜 13:00 收），那些日子會固定誤報 INCOMPLETE，用 `--holidays` 也蓋不掉。既有缺陷，這次不修，但要說出來。**⚠ 只做了一半**：兩段文字寫在 module docstring（經 `description=__doc__` 進到 `--help`），README 那半未做 → 併入 T-10.4
+- [x] **T-8.4** `scripts/imputation_parquet.py`：`--output <root>` 改必填、不再就地改寫；輸出用 `BAR_SCHEMA + imputed: bool` 這個**獨立 schema**（不是側錄 json）
+- [x] **T-8.5** `scripts/dump_parquet.py`、`dedupe_bars.py`：確認新 schema 下仍可用
+- [x] **T-8.6** `examples/03_read_history.py` 重寫：改成「寫入幾根 bar → `load_bars` 讀回」，自己造資料，維持「不需要 publisher」
+- [x] **T-8.7** `examples/04_replay_fixtures.py`：移除 legacy fixture 選項
+- [x] **T-8.8** 確認 `01` / `02` / `_compat.py` 不受影響；更新 `examples/README.md`
 
 ### Phase 9 — 測試
 
@@ -424,16 +425,17 @@ class HistoryStore:
 
 ### Phase 10 — 文件
 
-- [ ] **T-10.1** `CLAUDE.md`：wire 版本段落、Storage tiers 表（刪 Tier-3 與 derived）、`publisher_version` 兩條規則、EasyLanguage Volume/Ticks 段落、時間戳段落。**這份每個 session 都會載入，錯了會持續誤導**
-- [ ] **T-10.2** `docs/architecture.md`（535 行）：§2 表格與 §3 目錄樹的版本敘述、§4 整章重寫、§4.4 版本矩陣簡化、§5.1 移除 aggregation fallback。順手修 §3 重複的 `§3.1` 標題與亂序小節編號
-- [ ] **T-10.3** `README.md` + `README.zh-TW.md`：版本表（現在寫 wire 3 / ABI 8，本來就已過時）、Mermaid 圖
-- [ ] **T-10.4** `bindings/python/README.md` + `README.zh-TW.md`：開頭「ticks and 1-minute bars」、Why-use-it 的 "Aggregate, verify, audit..." 那條、Architecture Mermaid（移除 Aggregator）、offline tools 清單、**整段移除「Sample data」**並改寫成「examples/03 會自行產生範例資料」、修正 `filterwarnings` 的錯誤描述
-- [ ] **T-10.5** `config/symbols.yaml`：移除指向不存在的 `docs/design.md` 的註解
-- [ ] **T-10.6** `config/sinks.yaml`：確認 `--sinks-empty` vs `--no-storage` 命名一致
-- [ ] **T-10.7** `CHANGELOG.md`：breaking change 條目，**明列升級必須同時換 DLL 與 `.ELD`**，以及四種不相容情境各自的錯誤表現
-- [ ] **T-10.8** `cpp/install-to-tradestation.bat`：安裝完印一行提醒「請一併重新匯入 `.ELD`」
-- [ ] **T-10.9** `docs/migration/tradingagent-submodule.md`：wire v2 / ABI 7 敘述已過時兩輪，更新或標註為歷史紀錄
-- [ ] **T-10.10** `issues.md`：整份是針對 `1eda23b` 的舊 review，多數項目所指的程式碼已刪除。移除或歸檔
+- [x] **T-10.1** `CLAUDE.md`：wire 版本段落、Storage tiers 表（刪 Tier-3 與 derived）、`publisher_version` 兩條規則、EasyLanguage Volume/Ticks 段落、時間戳段落。**這份每個 session 都會載入，錯了會持續誤導**
+- [x] **T-10.2** `docs/architecture.md`（535 行）：§2 表格與 §3 目錄樹的版本敘述、§4 整章重寫、§4.4 版本矩陣簡化、§5.1 移除 aggregation fallback。順手修 §3 重複的 `§3.1` 標題與亂序小節編號
+- [x] **T-10.3** `README.md` + `README.zh-TW.md`：版本表（現在寫 wire 3 / ABI 8，本來就已過時）、Mermaid 圖
+- [x] **T-10.4** `bindings/python/README.md` + `README.zh-TW.md`：開頭「ticks and 1-minute bars」、Why-use-it 的 "Aggregate, verify, audit..." 那條、Architecture Mermaid（移除 Aggregator）、offline tools 清單、**整段移除「Sample data」**並改寫成「examples/03 會自行產生範例資料」、修正 `filterwarnings` 的錯誤描述。**併入 T-8.3 未完成的那半**：`verify_parquet.py` 是 operator 的完整性檢查工具而非資料保證、且不處理半日市
+- [x] **T-10.5** `config/symbols.yaml`：移除指向不存在的 `docs/design.md` 的註解
+- [x] **T-10.6** `config/sinks.yaml`：確認 `--sinks-empty` vs `--no-storage` 命名一致
+- [x] **T-10.7** `CHANGELOG.md`：breaking change 條目，**明列升級必須同時換 DLL 與 `.ELD`**，以及四種不相容情境各自的錯誤表現
+- [x] **T-10.8** `cpp/install-to-tradestation.bat`：安裝完印一行提醒「請一併重新匯入 `.ELD`」
+- [x] **T-10.9** `docs/migration/tradingagent-submodule.md`：wire v2 / ABI 7 敘述已過時兩輪，更新或標註為歷史紀錄
+- [x] **T-10.10** `issues.md`：整份是針對 `1eda23b` 的舊 review，多數項目所指的程式碼已刪除。**已 `git mv` 到 `docs/archive/review-1eda23b.md`** 並加上「描述已被取代的程式碼、不可對照現況」的標頭。選歸檔而非刪除：34 項當時已全數處理完畢，留下的價值是決策理由，不是待辦
+- [x] **T-10.11** `cpp/README.md` + `cpp/README.zh-TW.md`：兩份都寫著過時的 `EL_DllVersion() == 6`（D-7 記錄過，但當時沒真的把這一項加進清單）
 
 ---
 
@@ -466,7 +468,7 @@ uv build
 **端對端驗證**（需要 TradeStation + 重建的 DLL/`.ELD`）：
 
 1. 匯入新 `.ELD`、安裝新 DLL（`cpp\install-to-tradestation.bat`）
-2. **先驗墓碑**：暫時保留舊 `.ELD` 掛在另一張圖上，確認 Print Log 出現 `EL_Init2 FAILED rc=-6` 而非 TradeStation 異常
+2. ~~**先驗墓碑**：暫時保留舊 `.ELD` 掛在另一張圖上，確認 Print Log 出現 `EL_Init2 FAILED rc=-6`~~ — **已 descope，見 D-18**
 3. 開一張 SPY 1 分鐘圖，`LogPublish = True`，確認 Print Log 的五個量值與 wire 逐字一致
 4. `python scripts\run_ingestion.py --print-bars 5`，確認落地 bar 的 `el_volume` 與 EL log 的 `Volume` **逐字相等**（不再有交換）
 5. `python scripts\dump_parquet.py data\bars\timeframe=1m\symbol=SPY\date=<今天>\bars.parquet --schema-only` 確認 11 欄與型別
@@ -489,7 +491,7 @@ grep -rn "EL_Init2\?\b" --exclude-dir=.git
 
 ## 風險
 
-1. **`__stdcall` 堆疊損毀——已由 init 墓碑封死。** 見上方「為什麼 publish 函式不改名也是安全的」。**T-3.11 的手動驗證不可省略**，這是整份計畫唯一會讓使用者的 TradeStation 崩潰的失效模式。
+1. **`__stdcall` 堆疊損毀——已由 init 墓碑封死。** 見上方「為什麼 publish 函式不改名也是安全的」。墓碑本身留在 DLL 與 `.def` 裡，harness 每次啟動自動驗（D-5）；**實機驗證已 descope（D-18）**。
 2. **`.get(..., 0)` 是這份重構最危險的一行程式碼。** 五個 `el_*` 欄位若用預設值讀取，缺欄位時會靜默寫 0——一個看起來完全合理的數字。T-5.4 與 T-9.8 明確要求必填讀法 + 對應測試。
 3. **fixture 必須從真 DLL 錄。** Phase 4 卡在 Phase 3 建置成功。C++ 環境有問題就停下來修，**不要手寫 fixture**。
 4. **`expected/*.json` 不得由 binding 產生。** repo 既有硬規則，也是這次最容易偷懶的地方——用改過的 binding 產生期望值，只能證明它跟自己一致。
