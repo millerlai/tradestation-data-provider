@@ -7,25 +7,49 @@
 | Code | 意義 | 由誰回傳 | 處理方式 |
 |-----:|---|---|---|
 | `0` | 成功 | 全部 | — |
-| `1` | 在 DLL 已綁定後再次呼叫 init。沿用既有 socket，第二次為 no-op。兩個 init 匯出共用同一個守衛，混用也一樣 | `EL_Init` `EL_Init2` | 不需處理。Indicator 可選擇不重複輸出 "init ok" |
-| `-1` | 未初始化 —— 在成功的 init 之前呼叫了 publish | `EL_PublishTick` `EL_PublishBar` `EL_PublishTickEx` | 先跑 `Once` 區塊 / 呼叫 `EL_Init2` |
-| `-2` | ZeroMQ 送出失敗。可能是觸及 high-water mark 導致 `send()` 回傳 `EAGAIN`，或非預期的 `zmq::error_t` | `EL_PublishTick` `EL_PublishBar` `EL_PublishTickEx` | 記錄後繼續，下一筆會重試。若持續發生，檢查 SUB 端是否存在 |
-| `-3` | init 的 bind / socket 建立失敗 —— 最常見是 TCP endpoint 已被其他 process 佔用（或前一個 TradeStation session 殘留的 DLL handle） | `EL_Init` `EL_Init2` | 檢查 `netstat -ano \| findstr :5555`，結束佔用者後重新 Verify indicator |
-| `-4` | 參數無效。`zmq_endpoint` 或 `symbol` 為 null；`publisher_version` 為負；**或 payload `snprintf` 被截斷**（代表數值輸入異常超出範圍） | `EL_Init` `EL_Init2` `EL_PublishTick` `EL_PublishBar` `EL_PublishTickEx` | 上游資料問題，確認 EL indicator 傳入的型別 |
+| `1` | 在 DLL 已綁定後再次呼叫 init。沿用既有 socket，第二次為 no-op | `EL_Init3` | 不需處理。Indicator 可選擇不重複輸出 "init ok" |
+| `-1` | 未初始化 —— 在成功的 init 之前呼叫了 publish | `EL_PublishTick` `EL_PublishBar` | 先呼叫 `EL_Init3` |
+| `-2` | ZeroMQ 送出失敗。可能是觸及 high-water mark 導致 `send()` 回傳 `EAGAIN`，或非預期的 `zmq::error_t` | `EL_PublishTick` `EL_PublishBar` | 記錄後繼續，下一筆會重試。若持續發生，檢查 SUB 端是否存在 |
+| `-3` | init 的 bind / socket 建立失敗 —— 最常見是 TCP endpoint 已被其他 process 佔用（或前一個 TradeStation session 殘留的 DLL handle） | `EL_Init3` | 檢查 `netstat -ano \| findstr :5555`，結束佔用者後重新 Verify indicator |
+| `-4` | 參數無效。`zmq_endpoint` 或 `symbol` 為 null；**或 payload `snprintf` 被截斷**（代表數值輸入異常超出範圍） | `EL_Init3` `EL_PublishTick` `EL_PublishBar` | 上游資料問題，確認 EL indicator 傳入的型別 |
 | `-5` | `bar_type` / `bar_interval` 無法對應到任何 wire timeframe | `EL_PublishBar` | **不是錯誤處理問題，是設定問題**：把 indicator 掛到支援的圖表間隔上（1/5/15/30/60 分或日線）。DLL 刻意不猜 —— 猜錯會把某區間的 bar 歸進另一區間的分區，下游偵測不到 |
+| `-6` | **ABI 不符 —— 呼叫端是早於本協定的 `.ELD`** | `EL_Init` `EL_Init2`（兩者皆為墓碑） | 重新匯入隨這顆 DLL 一起發布的 `.ELD`。見下節 |
+
+## `-6` 與墓碑匯出
+
+`EL_Init` 與 `EL_Init2` 是前一代協定的 init 匯出。它們**仍然存在於 `.def` 裡**，但函式體
+只有 `return -6;`。
+
+理由是 `__stdcall`：`EL_PublishTick` 與 `EL_PublishBar` 沿用了前一代的名字但**簽章不同**，
+而 `__stdcall` 由被呼叫端清堆疊，所以簽章不符的呼叫會**損毀堆疊** —— 不是回傳錯誤碼，是
+TradeStation 崩潰或隨機行為。
+
+擋住它的是 init，不是名字：EasyLanguage 端的每一個 publish 呼叫都在「init 成功」的守衛
+之內，init 失敗時 indicator 永遠走不到 publish。所以只要舊 `.ELD` 呼叫的那兩個 init 名字
+回傳負值，改過簽章的 publish 函式就一次都碰不到。
+
+把匯出直接刪掉也能達到目的（`DefineDLLFunc` 會解析失敗），但回 `-6` 能讓 operator 在
+Print Log 看到一句 `EL_Init2 FAILED rc=-6`，而不是一個沒有上下文的解析錯誤。
+
+反方向 —— 新 `.ELD` 配舊 DLL —— 由 `EL_Init3` 這個新名字擋住：舊 DLL 沒有這個匯出，
+`DefineDLLFunc` 在 verify 階段就失敗。四種不相容組合的完整對照見
+[`wire.md`](wire.md) 的〈新舊部署不相容時會發生什麼〉。
 
 ## `-2` 與靜默丟包的差別
 
 `-2` 是**回報得出來**的送出失敗。真正危險的是 ZMQ PUB 在超過 `SNDHWM` 時的**靜默
 丟棄** —— 那不會回傳錯誤碼，publisher 完全不知情。
 
-錯誤碼涵蓋不到這個情況，這正是 wire v2 加入 `seq` 的原因。見
-[`v1/envelope.md` 的「傳輸保證」](v1/envelope.md) 與 [`compat.md`](compat.md)。
+錯誤碼涵蓋不到這個情況，這正是 payload 帶 `seq` 的原因。見
+[`wire.md`](wire.md) 的〈傳輸保證〉與 [`semantics.md`](semantics.md) §6。
 
 ## 版本識別
 
-`EL_DllVersion()` 回傳目前 DLL 建置版本（整數）。它**獨立於 wire protocol 版本**
-（payload 的 `v` 欄位）遞增。兩者的對應關係見 [`compat.md`](compat.md)。
+`EL_DllVersion()` 回傳目前 DLL 的 ABI 版本（整數），本協定為 **1**。
+
+indicator **應該**在 init 成功後檢查它：`EL_DllVersion` 是 0 參數的匯出，簽章永遠不會
+變，所以呼叫它在任何 DLL 版本上都是安全的 —— 它是唯一可以無條件先問一句「你是誰」的
+進入點。回值不符時 indicator 應停止發布並記錄，而不是繼續呼叫其他匯出。
 
 ## 新增錯誤碼的規範
 

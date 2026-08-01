@@ -13,15 +13,25 @@
 
 | 檔案 | 內容 |
 | --- | --- |
-| [`v4/envelope.md`](v4/envelope.md) | **目前版本** —— frame 結構與 payload 格式，含 `pv`（publisher 語意慣例版本） |
-| [`v4/tick.schema.json`](v4/tick.schema.json) | `EL_PublishTick` payload |
-| [`v4/bar.schema.json`](v4/bar.schema.json) | `EL_PublishBar` payload（含 `tf`） |
-| [`v3/`](v3/) [`v2/`](v2/) [`v1/`](v1/) | 舊版。**仍須支援** —— 舊 DLL 可能留在使用者機器上 |
+| [`wire.md`](wire.md) | frame 結構與 payload 格式、匯出清單、新舊部署不相容時的行為 |
+| [`tick.schema.json`](tick.schema.json) | `EL_PublishTick` payload |
+| [`bar.schema.json`](bar.schema.json) | `EL_PublishBar` payload（含 `tf`） |
 | [`semantics.md`](semantics.md) | **schema 管不到但 binding 必須一致的規則** |
 | [`error_codes.md`](error_codes.md) | DLL C ABI 回傳碼 |
-| [`compat.md`](compat.md) | DLL ABI × wire version 相容矩陣 |
 | [`fixtures/`](fixtures/) | 錄自真實 DLL 的 frame + 語言中立期望解析結果 |
 | [`tools/`](tools/) | fixture 錄製工具 |
+
+## 只有一個版本
+
+payload 的版本欄位是 `proto`，目前恆為 `1`，**沒有需要相容的舊版本**。
+
+前一代的 wire 用 `v` 並演進到 `4`，同時維護四份 envelope 與一份相容矩陣。那套機制存在的
+理由是 publisher 會在 wire 之外對數值做語意加工（依圖表型態在 EasyLanguage 的 `Volume`
+與 `Ticks` 之間挑一個填進 `vol`），於是需要一個版本號來宣告「這批數字是照哪一版規則算
+的」。本協定讓 publisher 原樣透傳五個 EL 保留字，那個宣告就沒有存在的必要了。
+
+版本欄位改名為 `proto` 而不是把 `v` 重設為 1，是為了讓舊 payload 在結構上就無法被誤讀 ——
+理由見 [`wire.md`](wire.md)。
 
 ## 最重要的一件事
 

@@ -10,12 +10,11 @@
 
 ## 1. 時間權威
 
-wire 上有三個時間戳，用途**不可互換**：
+wire 上有兩個時間戳，用途**不可互換**：
 
 | 欄位 | 來源 | 正確用途 | 錯誤用途 |
 | --- | --- | --- | --- |
-| `ts` | DLL 收訊端 wall clock（UTC epoch） | **Tick 的事件時間**；延遲量測 | ❌ Bar 邊界 |
-| `ts_utc` | `ts_str` 經 `zoned_time`（America/New_York）轉出 | **僅作交叉稽核** | ❌ 任何權威用途 |
+| `ts` | DLL 收訊端 wall clock（UTC epoch 秒） | **Tick 的事件時間**；延遲量測 | ❌ Bar 邊界 |
 | `ts_str` | EL 原始字串，逐字透傳 | **Bar `bucket_start` 的唯一權威來源** | ❌ Tick 時間 |
 
 ### 1.1 規則
@@ -28,18 +27,20 @@ wire 上有三個時間戳，用途**不可互換**：
   - 解析出來的是 bar 的**收盤**時間（EL 的 `Time`），**還不是** `bucket_start`：
     必須再依 §2 減去一個 `tf` 換成左標籤，然後依 §2.2 對齊格線。只做到解析就寫入，
     整條序列會靜默偏移一格。
-- `ts_utc` 僅用於交叉檢查：與 `ts` 差距 > **5 秒**時記錄警告，**不得拋錯或丟棄資料**。
-  這種漂移幾乎都是 DST 表差異造成。
-- `ts_str` 為 `""`（EL 未傳）或解析失敗時，`ts_utc` 為 `0.0`；binding 需有明確的
-  降級行為並記錄。
+- `ts_str` 為 `""`（EL 未傳）或解析失敗時，binding 需有明確的降級行為並記錄。
+  **publisher 不再驗證這個字串** —— 舊協定的 DLL 會順手把它解析成 `ts_utc`，等於做了
+  一次格式檢查；那個欄位已移除，所以格式錯誤現在一路到 binding 才會被發現。
 
-> **為何 `ts_str` 而非 `ts_utc`？** `ts_utc` 是 DLL 主機算出來的；若該主機的 tz
-> database 過期，DST 轉換日會算錯。`ts_str` 是原始事實，讓每個 binding 用自己的 tz
-> database 解析，可驗證、可重算。
+> **為何是 `ts_str` 而不是一個由 publisher 算好的 UTC 值？** 那種值是 DLL 主機算出來的；
+> 若該主機的 tz database 過期，DST 轉換日會算錯，而且錯得沒有痕跡。`ts_str` 是原始事實，
+> 讓每個 binding 用自己的 tz database 解析，可驗證、可重算。
+>
+> 代價是失去一個偵測面：舊協定用 `ts_utc` 與 `ts` 的差距（> 5 秒就警告）來發現「兩端
+> tz database 不一致」。這個取捨記在 [`wire.md`](wire.md)。
 
 ### 1.2 為何這條必須是契約級
 
-若某個 binding 改用 `ts_utc` 作 bar 邊界，它與其他 binding 在 **DST 轉換日**會算出
+若某個 binding 改用收訊時間作 bar 邊界，它與其他 binding 在 **DST 轉換日**會算出
 不同的 bucket。平常看不出來，一年錯兩天。
 
 ---
@@ -72,16 +73,15 @@ bucket_start:  09:30, 09:31, …, 15:58, 15:59
 
 解析 `ts_str` 得到 UTC 時間後，**秒與微秒一律歸零**。
 
-`bar_1m` 的 bucket 依定義是 `[分鐘邊界, +1min)`。若原樣保留秒數，`17:30:45` 起算的
+1 分鐘 bar 的 bucket 依定義是 `[分鐘邊界, +1min)`。若原樣保留秒數，`17:30:45` 起算的
 bucket 涵蓋 `[17:30:45, 17:31:45)`，那不是分鐘 bar，也無法與其他 bar 對齊。
 
 EL 正常情況下送出的就是分鐘對齊的時間，所以取整通常是 no-op —— 但 **`test_harness`
-的 `--mode smoke` 會把 tick 的 `13:30:45` 直接沿用給 `EL_PublishTickEx`**，
+的 `--mode smoke` 會把 tick 的 `13:30:45` 直接沿用給 `EL_PublishBar`**，
 `smoke.jsonl` 因此正好涵蓋這個情境。
 
-> 這條規則原本只存在於 reference binding 的實作裡（`_parse_el_str_as_et` 的
-> `replace(second=0, microsecond=0)`），本文件漏寫。是 conformance 測試比對
-> 手寫期望值時抓出來的 —— 照當時的規格實作，新 binding 會產出 `17:30:45Z`
+> 這條規則原本只存在於 reference binding 的實作裡，本文件漏寫。是 conformance 測試
+> 比對手寫期望值時抓出來的 —— 照當時的規格實作，新 binding 會產出 `17:30:45Z`
 > 而非 `17:30:00Z`，與 reference binding 不一致。
 
 ### 2.2 bucket 錨定於 session
@@ -125,94 +125,45 @@ EL 正常情況下送出的就是分鐘對齊的時間，所以取整通常是 n
 `1d` 因此在 ET 空間分桶；這是安全的，因為 **04:00 ET 落在折疊區之外**
 （轉換發生於 02:00 ET），邊界轉回 UTC 時不存在模糊。
 
-#### native 的非 1m bar 由誰對齊 —— **binding**
+#### bar 的對齊由 binding 負責
 
 wire 的 `ts_str` 是 EL 圖表自己的 `Date`/`Time`，**不保證落在上述格線上**
 （日線圖尤其不會是 04:00 ET）。因此：
 
-> **binding 必須把每一根 bar 的 `bucket_start` 向下取整到該 `tf` 的格線**，
-> native 與 derived 一視同仁。
+> **binding 必須把每一根 bar 的 `bucket_start` 向下取整到該 `tf` 的格線。**
 
-不這麼做，同一個交易日會在 `timeframe=1d` 分區裡出現兩列 —— 一列來自 EL 的時間戳、
-一列來自重採樣的 04:00 ET 錨點 —— 違反 §2.3 rule 2，且任何 `bucket_start` 上的
-join 都會重複計數。
+不這麼做，同一個交易日可能在 `timeframe=1d` 分區裡出現兩列不同時間戳的同一根日線，
+而任何 `bucket_start` 上的 join 都會重複計數。
 
 > **已確認（2026-07-26，live TradeStation）**：EasyLanguage 的 `Time` 是 bar 的
-> **收盤**時間，`TsStr` 又由它逐字組成，所以 wire 上的 `ts_str` 一律是**右標籤**。
+> **收盤**時間，`ts_str` 又由它逐字組成，所以 wire 上的 `ts_str` 一律是**右標籤**。
 >
-> 這裡原本寫著「1m 不受影響（取整後兩者相同）」——**那句是錯的**。偏移是整整一格，
-> 不是能被向下取整吸收的秒數差：一份 live 採集的 1m SPY 檔案落地成 09:31…16:00
-> 共 390 根，恰好是 §2 明令禁止的那個序列。根數相同、數值合理，所以沒有任何一層
-> 報錯。
+> 偏移是整整一格，不是能被向下取整吸收的秒數差：一份 live 採集的 1m SPY 檔案落地成
+> 09:31…16:00 共 390 根，恰好是 §2 明令禁止的那個序列。根數相同、數值合理，所以沒有
+> 任何一層報錯。
 >
-> 因此 **binding 必須在對齊前先減去一個 `tf`**，native 與 derived 一視同仁。
-> `1d` 這類 session 錨定的 interval 例外，而且必須例外：對齊本身已經丟棄時分秒
-> 改用 04:00 ET，若先減一天，只會把 bar 記到前一個交易日。
+> 因此 **binding 必須在對齊前先減去一個 `tf`**。`1d` 這類 session 錨定的 interval
+> 例外，而且必須例外：對齊本身已經丟棄時分秒改用 04:00 ET，若先減一天，只會把 bar
+> 記到前一個交易日。
 
-> 這條也是被實作與規格不一致逼出來的：reference binding 的 `Resampler` 原本用
-> epoch 錨定，而 `1h` / `1d` 的行為從未被測試涵蓋；改成 ET 牆鐘之後又引入了上述
-> DST 折疊錯誤，且錯誤的理由被寫進了本節。兩者現已修正並由
-> `bindings/python/tests/test_timeframe_grid.py` 逐點比對 SQL 與程式碼兩套實作。
+### 2.3 讀取端的時區語意：對外一律 ET，UTC 只是內部絕對時間
 
-### 2.3 native 與 derived 的 bar 不可互換
-
-同一個區間的 bar 有兩種來源：
-
-| 來源 | 產生方式 | 特性 |
-| --- | --- | --- |
-| **native** | TradeStation 自己聚合，經 wire 送達 | 聚合規則不透明；**日線含交易所官方 OHLC 與除權息調整** |
-| **derived** | binding 由 tick 或 1m bar 算出 | 規則在我們手上、可重現、可稽核 |
-
-#### 規則
-
-1. **binding 必須讓兩者在儲存上可辨識。** reference binding 把 derived bar 的
-   provenance 欄位標為 `derived:<來源>`（例如 `derived:ticks`、`derived:1m`），
-   native 則保留 provider id。
-2. **同一個區間分區內不得混有兩種來源。**
-3. **native 優先。** derived 的結果**不得覆寫** native bar。
-4. **`1d` 不得由計算產生。** 不只是「不得覆寫」—— binding **不得**用 tick 或 1m
-   推導出日線並持久化，即使該分區本來是空的。查不到就回空，由使用者去 TradeStation
-   把日線圖掛上匯出。理由見下：一根算出來的日線在磁碟上跟真的一模一樣，下游沒有
-   任何辦法分辨，所以唯一安全的規則是根本不產生它。
-
-#### 為何日線特別重要
-
-`1d` 是唯一「native 明確較優」的區間 —— TradeStation 的日線帶有**交易所官方收盤價
-與除權息調整**，這兩樣都**無法**由 tick 加總還原。derived 的日線是個長得一模一樣的
-近似值，換掉 native 之後看起來完全合理，卻是錯的。
-
-日線的 `vol` 同樣是交易所的官方彙總量，與 intraday 加總分屬兩種口徑，**不可互相
-驗證或回填**（§3.4）。發現兩者對不上時，那通常不是 bug。
-
-> 注意規則 1 到 3 適用於**每一個**區間，不是只有 `1d`：5 分鐘圖送出的是 native 的
-> 5m bar，跟 resampler 寫進同一個 `timeframe=5m/` 目錄。判斷依據永遠是 provenance
-> 欄位，不是路徑。
-
-> reference binding 的實作曾有這個洞：`Resampler` 用 `first(source)` 把來源原樣
-> 複製，於是 derived 與 native 在磁碟上**完全無法區分**；而快取寫入是直接覆寫，
-> 只要範圍內有一天缺資料，整段就會重算並把旁邊的 native 日線一併蓋掉。
-
-intraday 則相反：由 tick 聚合是可重現、可驗證的，且只需掛一張圖。
-
-### 2.4 讀取端的時區語意：對外一律 ET，UTC 只是內部絕對時間
-
-儲存層兩份都留（`bucket_start` UTC + `bucket_start_et` ET，§3.6），但那是**儲存**的事。
+儲存層兩份都留（`bucket_start` UTC + `bucket_start_et` ET），但那是**儲存**的事。
 對呼叫端而言，這是一個美股的 API：規則時段、假日、盤前盤後、`date=` 分區全都以
 `America/New_York` 定義，沒有人在做美股時心裡換算 UTC。
 
 1. **讀取 API 收到的 naive datetime 一律解讀為 `America/New_York`。**
    帶時區的輸入照它自己的時區處理 —— 那沒有歧義，不需要預設值。
-2. **UTC 只用於內部：** 絕對時間的儲存、查詢引擎的決定性、以及 §2.2 的 bucket 格線。
-   這些都不該外洩成呼叫端必須自己換算的負擔。
+2. **UTC 只用於內部：** 絕對時間的儲存與 §2.2 的 bucket 格線。這些都不該外洩成呼叫端
+   必須自己換算的負擔。
 3. **以「日」為單位的參數（CLI 的 `--start-date` 之類）指的是 ET 日曆日**，不是 UTC 午夜。
 
 > 這條規則是補寫的，因為 reference binding 原本把 naive 當 UTC —— 純粹是查詢引擎
 > session 設成 `UTC` 的副作用洩漏到 API 上，沒有人決定過。後果是
 > `load_bars(sym, datetime(2026,4,20,9,30), ...)` 看起來像在問開盤，實際問的是
-> 05:30 ET。同一個洩漏也讓 `audit_bar_cache --start-date D` 實際從 `D-1 20:00 ET`
-> 開始。查詢引擎要用什麼 session 時區是實作自由，**但不得因此改變 API 的語意**。
+> 05:30 ET。查詢引擎要用什麼 session 時區是實作自由，**但不得因此改變 API 的語意**。
 
-### 2.5 空區間的讀取語意
+### 2.4 空區間的讀取語意
 
 「這個 symbol 在這段時間沒有交易」是一個**正常的答案**，不是錯誤。休市日、盤中暫停、
 冷門標的的盤前時段都會落在這裡。讀取面因此有兩條規則：
@@ -226,72 +177,17 @@ intraday 則相反：由 tick 聚合是可重現、可驗證的，且只需掛�
    `timeframe`，`date=` 佈局另帶 `date`），所以此處要求的是**與自己的非空答案一致**，
    而不是一份跨路徑的固定欄位表。
 
-> reference binding 曾在這裡踩過兩次。第一次是 DuckDB 1.5 把 `.arrow()` 的回傳改成
-> `RecordBatchReader`，空結果的 reader 既無 batch 也無 schema，`pl.from_arrow` 直接
-> 拋 `ValueError`；回測問到一個沒動靜的日子就會中斷整個 run。第二次是修掉它之後，
-> 空答案與非空答案的欄位數不同（少了 `bucket_start_et`），`pl.concat` 換成拋
-> `ShapeError` —— 崩潰的位置換了，呼叫端一樣沒辦法統一處理。
-
-### 2.6 分區是一整個 ET 交易日，重算視窗不得吃掉同日其他資料
-
-Tier-3 的一個 `date=` 分區代表**一整個 ET 交易日**，但一次重算只涵蓋被查詢的視窗。
-寫入若是整檔覆寫，先建好盤前、之後再重算 RTH，就會把盤前那幾根一併刪掉：磁碟列數
-下降、沒有任何錯誤，而且 Tier-1 的 tick 一旦被清掉就再也救不回來。
-
-因此重算既有 derived 分區時**必須與檔內既有資料合併**：重算視窗內的 bucket 以新算
-結果為準，視窗外的既有 bucket 必須保留。native 分區不適用 —— 它在更前面就已經被
-§2.3 規則 3 擋掉，根本不會走到合併。
-
-### 2.7 快取覆蓋率必須另外記錄，不能用「檔案存不存在」推論
-
-Tier-3 的快取需要回答一個問題：**這一天算過了嗎？** 直覺的答案是看
-`date=<D>/bars.parquet` 在不在，但那是錯的，而且錯得很安靜。
-
-同一條路徑有**多個寫入者**，各自的語意不同：
-
-| 寫入者 | 寫出來的東西 |
-|---|---|
-| lazy resampler | 被查詢視窗涵蓋的 bucket，**不是整天** |
-| `BarWriter`（live ingest） | 當天到目前為止的 bar，盤中持續長大 |
-| 批次聚合工具 | 該工具自己的欄位集（可能沒有 `bucket_start_et`） |
-| 舊版本的 binding | 以當時規則寫的任何子集 |
-
-所以「檔案存在」只代表**有人寫過東西**，不代表**這一天完整**。把它當成完整性訊號，
-盤中那天會在第一次查詢後凍結、既有快取裡每一個部分分區會被永久當成完整、而任何
-事後補進的資料都不會被撿起來 —— 全部沒有錯誤、沒有 log。
-
-> reference binding 實作過這條錯路並實測到後果：盤中先查早盤、下午再查同一天，
-> 下午的視窗回 0 列，整天查詢只回早上那 6 根。
-
-#### 規則
-
-1. **覆蓋率記錄必須由「建置者」獨佔寫入**，與 bar 檔本身分開存放。其他寫入者不碰它，
-   於是「有記錄」就確實代表「這個建置者算完過這一天」。
-
-2. **每筆記錄必須帶上當時來源的指紋**（Tier-1 該日 tick 分區、或索引類 symbol 的 1m
-   bar 分區）。讀取時比對指紋：
-   - 相同 → 命中，直接讀 bar 檔，不重掃來源。
-   - 不同或來源已出現／消失 → 記錄作廢，重建整天。
-
-   指紋是這條規則的重點。有了它，「盤中長大」「事後補資料」「當天原本沒資料後來有了」
-   三種情形都會自動失效重建，**不需要**任何「假日 vs 未 ingest」的猜測 —— 而那種猜測
-   是猜不準的：市場休市與 ingestion 中斷在資料上長得一模一樣。
-
-3. **沒有資料的一天也要能被記錄**，而且**不得**用 0 列的 bar 檔充當記錄。理由是 0 列檔
-   會落進 native tier 的目錄（`1m`），而清快取工具依設計不會碰 native tier，等於留下
-   一個清不掉的錯誤答案。空的那天記在覆蓋率記錄裡即可。
-
-4. **記錄是可丟棄的**。刪掉它只會讓下一次查詢重算，不得改變任何答案的正確性。不認得
-   這份記錄的 binding 必須仍然能正確讀取整個資料目錄 —— 它只是拿不到快取效益。
-
-5. **`NATIVE_ONLY_TIMEFRAMES`（`1d`）不適用**：那一層從不由本地計算產生，沒有覆蓋率
-   的概念。
+> reference binding 曾在這裡踩過兩次，兩次都是「空結果走了另一條程式路徑」：一次是
+> 查詢引擎對空結果回傳無 schema 的 reader 而直接拋例外，回測問到一個沒動靜的日子就
+> 中斷整個 run；修掉之後變成空答案比非空答案少一個欄位，崩潰的位置換了，呼叫端一樣
+> 沒辦法統一處理。
 
 ---
 
 ## 3. bid / ask 何時無效
 
-報價有**兩種**無效情形，來源不同，處理方式也不同。
+報價有**兩種**無效情形，來源不同，處理方式也不同。**兩者都只適用於 tick** ——
+bar 不帶報價（見 [`wire.md`](wire.md)）。
 
 ### 3.1 沒有報價可報 → wire 上是 `null`（publisher 負責）
 
@@ -302,13 +198,9 @@ EL 傳的是 `InsideBid` / `InsideAsk`，那是**即時報價函式**。以下�
 | **歷史回放** | 圖表載入、任何非即時 bar。TradeStation 不在 live mode 時就沒有報價 |
 | **本身無報價的 symbol** | breadth 指數（`$TICK`、`$ADD` …）從來就沒有買賣盤 |
 
-wire v2 起，**DLL 會把非正值報價正規化為 JSON `null`**（`format_quote()`，
-`!(v > 0.0)` 因此也涵蓋 NaN）。wire 自己說出「沒有報價」，binding 不需要記得
-「`0` 代表無效」這種只活在文件裡、遲早被漏掉的規則。
-
-> **wire v1 沒有這個保護。** v1 的 payload 一律是 `%.6f`，歷史回放會送出
-> `"bid":0.000000`。讀 v1 的 binding **必須**自行把 `<= 0` 視為無效，否則會把
-> `$0.00` 當成真實報價。`v1_legacy.jsonl` 就是為此存在。
+**DLL 會把非正值報價正規化為 JSON `null`**（`format_quote()`，`!(v > 0.0)` 因此也涵蓋
+NaN）。wire 自己說出「沒有報價」，binding 不需要記得「`0` 代表無效」這種只活在文件裡、
+遲早被漏掉的規則。
 
 正規化刻意放在 C++ 而非 EL：C ABI 只有一個實作，所有 EL 呼叫端自動一致；
 放在 EL 則每支 script 都要各自記得。
@@ -326,67 +218,22 @@ $TICK   $ADD   $VOLD   $TRIN   $PCVA   VXX
 `TradeStationELProvider(index_symbols=...)`）。
 
 DLL 不做這一層，是因為它不持有 symbol 分類知識（那是 binding 的設定，
-例如 `bindings/python/config/symbols.yaml`）。代價就是**這條規則必須寫在契約裡** ——
-現況即為如此：reference binding 把清單硬編在
-`bindings/python/src/tradestation_data/wire/el_subscriber.py` 的
-`DEFAULT_INDEX_SYMBOLS`，本文件將其升格為契約。
+例如 `bindings/python/config/symbols.yaml`）。代價就是**這條規則必須寫在契約裡**。
 
 ### 3.3 綜合判定
 
 binding 應把 `bid` / `ask` 視為無效，若**任一**成立：
 
-1. 值為 `null`（v2 publisher 已判定沒有報價）
-2. 值 `<= 0`（v1 相容，或任何未來的異常值）
+1. 值為 `null`（publisher 已判定沒有報價）
+2. 值 `<= 0`（任何未來的異常值）
 3. symbol 在 index / breadth 清單中（§3.2）
 
-### 3.4 成交量
+### 3.4 五個 `el_*` 量值欄位
 
-`vol` 對 index / breadth symbol 同樣不具意義。`vol == 0` 時衍生的 VWAP 應為 null
-而非除以零。
+wire 帶五個量值，**每一個都是 EasyLanguage 同名保留字的原值**：`el_volume`、
+`el_ticks`、`el_upticks`、`el_downticks`、`el_open_interest`。
 
-#### `1d` 的 volume 與 intraday 加總對不上，而且本來就不該相等
-
-把一天的 1m（或 5m）bar 的 `vol` 加總，**不會**等於同一天 `1d` bar 的 `vol`。兩者
-是不同口徑的兩份事實，不是任一方算錯：
-
-| 來源 | 口徑 |
-| --- | --- |
-| `1d` | 交易所結算後發布的**官方彙總成交量**（consolidated daily volume）|
-| intraday | 盤中即時串流（SIP tick data）當下組出來的連續撮合量 |
-
-差異來自四個層面：
-
-1. **盤後延遲申報與大宗交易** —— block trades、OTC、dark pool 撮合、late prints
-   （Form T）。這些不會落進盤中任何一根 intraday bar，有些在收盤數小時後才申報，
-   但全部計入官方日線總量。
-2. **資料源涵蓋範圍** —— 日線彙整全美所有交易所（consolidated tape：NYSE、NASDAQ、
-   ARCA、BATS…）；盤中串流可能受訂閱層級或過濾規則限制，涵蓋較窄，加總自然偏小。
-3. **收盤集合競價**（closing cross / MOC）—— 16:00 的集合競價量體很大，日線必然
-   包含；intraday 若以 `[15:55, 16:00)` 為最後一根，那一刻的成交可能落在邊界外，
-   或被單獨記成一筆 16:00 的 tick 而未計入。
-4. **Session 設定** —— intraday 圖表的 session template 由使用者決定，涵蓋範圍
-   隨設定改變；`1d` 由 TradeStation 的日線伺服器獨立提供，**完全不受本地圖表設定
-   影響**。
-
-因此：**不要用 intraday 加總去「驗證」`1d`，也不要反過來用 `1d` 回填 intraday。**
-這是 §2.3 規定 `1d` 只能取 native、不得由 rollup 產生的另一個理由。
-
-> **本 repo 實測（SPY 2026-07-23）**：`1d` 的 OHLC 是 **RTH 口徑**。`high` / `low`
-> 與 09:30–15:55 的 intraday 極值**完全相同**，而當天最高價其實出現在盤前
-> （盤前 746.21，日線 742.56）—— 日線並未納入盤前盤後的價格極值。`open` / `close`
-> 差 0.02–0.03，是官方開收盤價與「該分鐘第一／最後一筆成交」之間的正常差距。
->
-> **但 volume 的落差遠超過上述四個原因所能解釋的範圍。** 即使把盤前盤後全部加進來
-> （06:00–19:55，168 根 5m bar），intraday 的 `vol` 合計仍只有日線的三分之一：
-> 18,505,973 對 55,437,545。late prints 與 closing cross 一般是個位數到十幾個
-> 百分比，不是三倍。
->
-> **所以這一節不足以解釋任意大的差距。** 看到三倍量級時，先懷疑 `vol` / `tc` 兩個
-> 欄位裝的到底是什麼，而不是急著用上面四點合理化 —— 見下節。
-
-#### EasyLanguage 的 `Volume` / `Ticks` 在 intraday 與 daily 上語意相反
-
-這是 wire 上 `vol` / `tc` 的來源，也是本節前面那個「落差過大」的主因。
+#### publisher 不做任何選擇 —— 這是刻意的
 
 TradeStation 官方定義（股票商品，[EL 保留字文件][elvol]）：
 
@@ -399,93 +246,83 @@ TradeStation 官方定義（股票商品，[EL 保留字文件][elvol]）：
 
 [elvol]: https://help.tradestation.com/10_00/eng/tsdevhelp/elword/el_definitions/easylanguage_words_related_to_ticks,_volume_&_open_interest.htm
 
-**兩者在 intraday 與 daily 之間是對調的。** 直覺的「`Volume` 是量、`Ticks` 是筆數」
-只在日線成立；在 intraday 上 `Volume` 少算了下跌 tick 的成交，而真正的總量在 `Ticks`。
+**`Volume` 與 `Ticks` 在 intraday 與 daily 之間是對調的。** 直覺的「`Volume` 是量、
+`Ticks` 是筆數」只在日線成立；在 intraday 上 `Volume` 少算了下跌 tick 的成交，而真正的
+總量在 `Ticks`。
+
+前一代的 wire 只有一個 `vol` 欄位，由 publisher 依 `BarType` 決定要填 `Volume` 還是
+`Ticks`。那個選擇發生在 wire 之外，產出的數字**永遠看起來合理**，所以需要額外一個版本
+欄位來宣告「這批數字是照哪一版規則算的」—— 而那個宣告本身又是另一個會不同步的東西
+（indicator 裝在使用者的 TradeStation 上，不隨 DLL 或 binding 更新）。
+
+**五個保留字各給一欄，整個問題就消失了。** 語意反轉仍然是事實，但它現在是 consumer
+查上表就能解決的事。
 
 #### 規則
 
 0. **前提：圖表的 Volume 屬性必須設為 Trade Volume。** 上表是該設定下的定義；設成
-   Tick Count 時這兩個保留字改吐 tick 筆數而非股數，於是 `vol` 會裝進一個數量級完全
+   Tick Count 時這些保留字改吐 tick 筆數而非股數，於是欄位裡會裝進一個數量級完全
    不同、卻同樣合理的數字。`BarType` 看不見這個設定，publisher 無從偵測，所以它是
    **操作者的責任**：掛上指標前先確認 symbol 的 Volume 設定。
-1. **wire 的 `vol` 一律是總成交股數。** publisher 必須依圖表型態取值：intraday 取
-   `Ticks`，daily 取 `Volume`。取錯的後果不是精度問題，是**系統性低估**。
-2. **wire 的 `tc` 在 intraday 上不具意義，在 `1d` 上也不可信。** intraday 拿不到筆數
-   —— EL 沒有任何保留字提供它 —— 所以送 `0`，binding 不得將它當筆數使用。`1d` 依上表
-   應為筆數，但本 repo 實測不符，見本節末的「仍未決」；在證實之前一律不得當筆數用。
-3. **binding 不得自行推導或修正。** 這個對調發生在 publisher 那一側，wire 上看不出
-   來；若 publisher 送錯，binding 無從分辨，這正是它必須寫在契約裡的原因。
-4. **publisher 必須宣告自己遵守哪一版。** wire v4 的 `pv` 就是這個宣告：`1` 表示
-   規則 1 與 2 已實作，`0`（或欄位缺席，即 v1–v3）表示未宣告，須依修正前的慣例
-   解讀 —— intraday 的 `vol` 是上漲量。indicator 裝在使用者的 TradeStation 上、
-   不隨 binding 更新，所以「binding 已修正」不蘊含「送進來的資料已修正」。見
-   [`v4/envelope.md`](v4/envelope.md)。
+1. **publisher 原樣透傳，不得選擇、換算或修正。**
+2. **binding 原樣落地，不得選擇、換算或修正。** 想要「總成交量」的 consumer 自己依
+   上表取用：intraday 取 `el_ticks`，daily 取 `el_volume`。
+3. **欄位名的 `el_` 前綴是規範的一部分，不得省略。** 看到 `el_volume` 的人會去查
+   EasyLanguage 的定義；看到 `volume` 的人不會 —— 而在 intraday 上它並不是成交量。
+   這個坑本 repo 踩過一次，代價是一份系統性低估約一半的成交量資料。
+4. **index / breadth symbol 的量值不具意義。** 這類 symbol 根本沒有成交量，五個欄位
+   都是 0。衍生的 VWAP 之類應回 null 而非除以零。
 
-**適用範圍：股票商品。** 上表與規則 0–2 取自 TradeStation 對股票的定義，本 repo 也
-只在股票上實測過。
+**適用範圍：股票商品。** 上表取自 TradeStation 對股票的定義，本 repo 也只在股票上實測過。
+**期貨等其他商品未驗證** —— publisher 原樣透傳，所以在這些商品上不會出錯，但上表的
+intraday/daily 對照是否成立需要用 `LogPublish` 自行實測。
 
-- **Market breadth 指數（`$TICK` `$ADD` `$VOLD` `$TRIN` `$PCVA`）不適用，也不需要**：
-  這類 symbol 根本沒有成交量，兩個保留字都是 0，取哪一個都一樣。`symbols.yaml` 的
-  `category: breadth` 已記錄 `volume=0, bid=null, ask=null`，§3.1 是同一件事的報價版本。
-- **期貨等其他商品未驗證。** publisher 目前只依 `BarType` 分流、不看商品類別，所以
-  在這些商品上會沿用股票的取值。要在期貨上使用前，先用 `LogPublish` 實測 `Volume` /
-  `Ticks` 的實際語意再決定是否需要分流。
-
-> **本 repo 實測（SPY 100-tick 圖，2026-07-24 收盤前後）**：`Ticks` 與 `Volume`
-> 同時輸出，`Ticks` 恆大於 `Volume`，比值散在 1.01–7.60、中位數約 1.6 —— 與「總量
-> vs 上漲量」相符（上漲量通常占總量四到六成）。最有力的一筆是 16:00:00 的收盤集合
-> 競價：`Ticks=760951` / `Volume=753328`，比值 1.01。單一大額成交整筆被歸為上漲
-> tick，於是上漲量幾乎等於總量。文件與實測互證。
+> **本 repo 實測（SPY 100-tick 圖，2026-07-24 收盤前後）**：`Ticks` 恆大於 `Volume`，
+> 比值散在 1.01–7.60、中位數約 1.6 —— 與「總量 vs 上漲量」相符（上漲量通常占總量四到
+> 六成）。最有力的一筆是 16:00:00 的收盤集合競價：`Ticks=760951` / `Volume=753328`，
+> 比值 1.01：單一大額成交整筆被歸為上漲 tick，於是上漲量幾乎等於總量。文件與實測互證。
 >
-> **這解釋了前面那個落差的絕大部分。** 以本 repo 已收的 SPY 2026-07-23 實測：
+> 已收資料的 `Ticks`/`Volume` 比值穩定在 **1.85–2.25**（1m 與 5m、五個交易日）。
+
+> **`1d` 的 `el_ticks` 存疑。** 依上表它應是筆數、不該等於 `el_volume`，但本 repo 的
+> SPY 日線 499 筆中兩者逐位元組相同。推測是 TradeStation 的日線來源未提供 tick count
+> 而以總量填充，尚未證實。在證實之前，`1d` 的 `el_ticks` 不應被當成筆數使用。
+
+#### `1d` 的量與 intraday 加總對不上，而且本來就不該相等
+
+把一天的 intraday bar 加總，**不會**等於同一天 `1d` bar 的量。兩者是不同口徑的兩份
+事實，不是任一方算錯：
+
+| 來源 | 口徑 |
+| --- | --- |
+| `1d` | 交易所結算後發布的**官方彙總成交量**（consolidated daily volume）|
+| intraday | 盤中即時串流（SIP tick data）當下組出來的連續撮合量 |
+
+差異來自四個層面：
+
+1. **盤後延遲申報與大宗交易** —— block trades、OTC、dark pool 撮合、late prints
+   （Form T）。這些不會落進盤中任何一根 intraday bar，有些在收盤數小時後才申報，
+   但全部計入官方日線總量。
+2. **資料源涵蓋範圍** —— 日線彙整全美所有交易所（consolidated tape）；盤中串流可能受
+   訂閱層級或過濾規則限制，涵蓋較窄，加總自然偏小。
+3. **收盤集合競價**（closing cross / MOC）—— 16:00 的集合競價量體很大，日線必然包含；
+   intraday 那一刻的成交可能落在最後一根 bar 的邊界外。
+4. **Session 設定** —— intraday 圖表的 session template 由使用者決定；`1d` 由
+   TradeStation 的日線伺服器獨立提供，**完全不受本地圖表設定影響**。
+
+**不要用 intraday 加總去「驗證」`1d`，也不要反過來用 `1d` 回填 intraday。**
+
+> **本 repo 實測（SPY 2026-07-23）**：`1d` 的 OHLC 是 **RTH 口徑** —— `high`/`low`
+> 與 09:30–15:55 的 intraday 極值完全相同，而當天最高價其實出現在盤前（盤前 746.21，
+> 日線 742.56）。量的部分，即使把盤前盤後全部加進來（06:00–19:55，168 根 5m bar）：
 >
 > | | 值 | 對日線 55,437,545 的落差 |
 > | --- | --- | --- |
-> | intraday `vol` 加總（取自 `Volume`，即上漲量） | 18,505,973 | **3.00×** |
-> | intraday `tc` 加總（取自 `Ticks`，即總量） | 41,552,075 | **1.33×** |
+> | intraday `Volume` 加總（上漲量） | 18,505,973 | **3.00×** |
+> | intraday `Ticks` 加總（總量） | 41,552,075 | **1.33×** |
 >
-> 也就是說那個「遠超過四個原因所能解釋」的 3 倍，主要是讀錯欄位。改用正確欄位後
-> 剩下 1.33 倍，落在 late prints、consolidated tape 涵蓋範圍、收盤集合競價與
-> session 設定這四項的合理範圍內。**兩者本來就不該相等，但也不該差三倍。**
->
-> 已收資料的 intraday `tc`/`vol` 比值穩定在 **1.85–2.25**（1m 與 5m、五個交易日），
-> 與「上漲量約占總量一半」相符。
-
-#### `tc` 沒有 provenance，同一欄混著三種來源 —— 已知限制
-
-修正上述對調之後，`tc` 在同一個 `timeframe=` 目錄裡可能來自三個不同的地方，而
-**欄位本身沒有任何東西能區分它們**：
-
-| bar 從哪來 | `tc` 的值 | 是筆數嗎 |
-| --- | --- | --- |
-| native intraday（EL 直接送） | `0` | 否 —— intraday 拿不到筆數 |
-| native `1d` | `Ticks` | 存疑（見下） |
-| derived from ticks（binding 自己數 `count(*)`） | 該 bucket 的 tick 列數 | **是**，而且可信 |
-| derived from 1m bars（`sum(tc)`） | 上游是 0 → `0` | 否 |
-
-所以讀到 `tc = 0` 的呼叫端無法判斷那是「沒有筆數可給」還是「真的沒有成交」，讀到
-`tc = 12` 也無法判斷那是 binding 自己數的、還是 publisher 給的。
-
-這不是新問題 —— 修正前 native 給的是股數、derived 給的是列數，一樣不同源 —— 但
-修正後從「兩者都錯」變成「一者為 0、一者可信」，混在一起反而更容易被誤讀。
-
-> 正解是讓 `tc` 像 `source` 一樣帶 provenance，或乾脆拆成兩個欄位（publisher 給的
-> 筆數 vs binding 數出來的筆數）。兩者都要升 wire 版本，尚未進行。
->
-> **在那之前**：binding 不得依賴 `tc` 做任何跨來源的比較或聚合。它在 derived-
-> from-ticks 的 bar 上是可信的成交筆數，其餘一律視為無資訊。
-
-> **仍未決**：依上表，daily 的 `Ticks` 應是筆數、不該等於 `Volume`，但本 repo 的
-> SPY 日線 499 筆中兩者逐位元組相同。推測是 TradeStation 的日線來源未提供 tick
-> count 而以總量填充，尚未證實。在證實之前，`1d` 的 `tc` 同樣不應被當成筆數。
-
-### 3.5 `Bar` 是否保留 bid / ask 由 binding 決定
-
-wire 的 `bar_1m` 帶有 bar 收盤當下的 `bid` / `ask`。reference Python binding 的
-`Bar` 型別**不保留**這兩個欄位，資料在此丟棄。
-
-這是建模選擇而非解析錯誤 —— 保留的 binding 不算違規，丟棄的也不算。但 fixture 的
-`expected/*.json` 一律記錄 wire 上的原值，讓選擇保留的 binding 有東西可比對。
+> 取錯欄位會得到 3 倍落差，取對欄位剩 1.33 倍 —— 後者落在上述四項的合理範圍內。
+> **兩者本來就不該相等，但也不該差三倍。** 看到三倍量級時，先確認自己取的是哪個欄位。
 
 ---
 
@@ -520,20 +357,20 @@ binding 在收訊後**必須**以 topic 字串完全相等再過濾一次，不�
 
 ---
 
-## 6. 序號與缺漏偵測（wire v2 起）
+## 6. 序號與缺漏偵測
 
 `seq` 只有在 binding 正確詮釋下才有意義。以下各條皆為**強制行為**。
 
 ### 6.1 per-symbol，且 tick 與 bar 共用
 
-`seq` 的計數單位是 **symbol**，不是 (symbol, kind)。同一個 symbol 的 `tick` 與
-`bar_1m` 交錯在同一條 topic 串流上，共用一個計數器才能偵測該串流的遺漏。
+`seq` 的計數單位是 **symbol**，不是 (symbol, kind)。同一個 symbol 的 `tick` 與 `bar`
+交錯在同一條 topic 串流上，共用一個計數器才能偵測該串流的遺漏。
 
 實測範例（`test_harness --mode smoke`，5 筆 tick 輪流三個 symbol + 1 根 SPY bar）：
 
 | symbol | seq |
 | --- | --- |
-| SPY | 1, 2, **3**（第 3 筆是 `bar_1m`） |
+| SPY | 1, 2, **3**（第 3 筆是 `bar`） |
 | QQQ | 1, 2 |
 | VXX | 1 |
 
@@ -551,8 +388,7 @@ binding 在收訊後**必須**以 topic 字串完全相等再過濾一次，不�
 「重啟」誤報成數十億筆遺漏。
 
 init 的冪等路徑（重複呼叫回傳 `1`）**不會**更新 `sid`，所以在 TradeStation
-重新 Verify indicator 不會被誤判成重啟。`EL_Init` 與 `EL_Init2` 共用同一個守衛，
-交叉呼叫也一樣 —— 這也表示第二次呼叫**不會**改寫已宣告的 `pv`。
+重新 Verify indicator 不會被誤判成重啟。
 
 `sid` 的解析度必須細到足以分辨**連續兩次重啟**。publisher 端若只取到秒，
 同一個 wall-clock 秒內重啟的兩個 session 會共用同一個 `sid`，subscriber 於是走
@@ -570,20 +406,14 @@ TCP 保證單一 publisher 的順序，所以較小的序號是重複或重播�
 publisher 在組裝 payload 前取號；後續截斷或送出失敗時該號不會上線。
 **這是刻意的** —— 那筆資料確實遺失，顯示為 gap 才誠實。
 
-### 6.6 `messages_lost` 為 0 的兩種含義
+### 6.6 `messages_lost` 的語意
 
-對 v1 publisher（無 `seq`），計數恆為 0。binding 必須讓使用者能區分：
+本協定的每一筆 payload 都帶 `seq`，所以 `messages_lost == 0` 就是「沒有遺失」，
+沒有第二種含義。
 
-- **「沒有遺失」**（v2，有偵測能力）
-- **「無從得知」**（v1，沒有偵測能力）
-
-這個差別在用該數字判斷某天的資料可不可信時是關鍵。
-
-**必須是公開 API 上的差別**，不能只是一行 log 或某個私有屬性 ——
-消費端要能在程式裡判斷，否則「讀到 0」與「偵測從未啟動」在程式眼中一模一樣。
-reference binding 的作法：`messages_lost` 回傳 `int | None`（`None` = 無從得知），
-另外提供布林的 `gap_detection_available`。任何等效的判別面都可以，
-但**不得只提供一個永遠是整數的計數器**。
+唯一的例外是 §6.2：在某個 symbol 的第一筆訊息到達之前，該 symbol 沒有任何判斷依據。
+binding 應讓呼叫端能看出「這條流已經開始計數了嗎」，而不是把「還沒開始」與「已確認
+乾淨」都顯示成 0。
 
 ---
 
