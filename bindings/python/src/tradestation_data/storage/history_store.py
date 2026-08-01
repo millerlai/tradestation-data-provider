@@ -29,10 +29,15 @@ def _as_utc(value: datetime) -> datetime:
     all defined in America/New_York, so a bare ``datetime(2026, 4, 20, 9, 30)``
     means the open. It once meant 05:30 ET, which nobody chose: the query
     engine ran its session in UTC for determinism and that leaked out into the
-    API. An aware input is unambiguous and is left alone.
+    API. An aware input already says which instant it means, so only its zone
+    is normalised — polars compares a timestamp column against a literal of
+    the same time unit AND zone or it refuses the filter outright, so handing
+    an ET-aware bound straight through raises instead of answering.
     See contract/semantics.md §2.3.
     """
-    return value.replace(tzinfo=_ET_TZ).astimezone(UTC) if value.tzinfo is None else value
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=_ET_TZ)
+    return value.astimezone(UTC)
 
 
 def _empty(schema: pa.Schema, hive: dict[str, _Dtype]) -> pl.DataFrame:
@@ -96,7 +101,9 @@ class HistoryStore:
     ) -> pl.DataFrame:
         tf = str(timeframe)
         if tf not in SUPPORTED_TIMEFRAMES:
-            raise ValueError(f"Unsupported timeframe: {tf!r}. Valid: {sorted(SUPPORTED_TIMEFRAMES)}")
+            raise ValueError(
+                f"Unsupported timeframe: {tf!r}. Valid: {sorted(SUPPORTED_TIMEFRAMES)}"
+            )
 
         base = self._bars_root / f"timeframe={tf}" / f"symbol={symbol}"
         hive: dict[str, _Dtype] = {"timeframe": pl.String, "symbol": pl.String}

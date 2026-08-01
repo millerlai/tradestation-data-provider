@@ -92,17 +92,14 @@ class SessionStatsSink(BaseSink):
         st.low = min(st.low, tick.price)
 
     def on_bar(self, bar: Bar) -> None:
-        # Bars arrive here already closed — either aggregated from ticks or
-        # shipped whole by the EL indicator. `bar.source` says which:
-        # "derived:*" is one this binding computed, anything else came off
-        # the wire (contract/semantics.md §2.3).
+        # Every bar arriving here was shipped whole by the EL indicator and
+        # is already closed. There is no other kind: nothing in this binding
+        # builds a bar, so there is no provenance to check before using one.
         st = self._stats(bar.symbol)
         st.bars += 1
         st.high = max(st.high, bar.high)
         st.low = min(st.low, bar.low)
-        print(
-            f"  bar closed  {bar.symbol:<6} {bar.timeframe:>3}  C={bar.close:.2f}  [{bar.source}]"
-        )
+        print(f"  bar closed  {bar.symbol:<6} {bar.timeframe:>3}  C={bar.close:.2f}")
 
     def close(self) -> None:
         # The Sink protocol requires close() to be idempotent (sinks/base.py).

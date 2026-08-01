@@ -291,10 +291,7 @@ def main() -> int:
         f"session={args.start_time}-{args.end_time} {args.tz}  "
         f"method={args.method}  expected/day={per_day_expected}"
     )
-    print(
-        f"root={args.root}  output={args.output}  "
-        f"dry_run={args.dry_run}  symbols={len(symbols)}"
-    )
+    print(f"root={args.root}  output={args.output}  dry_run={args.dry_run}  symbols={len(symbols)}")
     print()
 
     multi = len(symbols) > 1
@@ -395,9 +392,7 @@ def _impute_one_symbol(
             continue
 
         try:
-            before, added, log, new_table = impute_day(
-                path, expected, method, tf_sec, tz
-            )
+            before, added, log, new_table = impute_day(path, expected, method, tf_sec, tz)
         except Exception as e:
             print(f"{d.isoformat():<11}  {'ERROR':<14}  -     -     -     {e}")
             d += timedelta(days=1)

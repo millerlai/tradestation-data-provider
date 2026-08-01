@@ -16,11 +16,13 @@ def _tick(symbol: str = "SPY") -> Tick:
         symbol=symbol,
         timestamp=datetime(2026, 4, 20, 13, 30, tzinfo=UTC),
         price=450.0,
-        volume=100,
+        el_volume=100,
+        el_ticks=200,
+        el_upticks=100,
+        el_downticks=100,
+        el_open_interest=0,
         bid=None,
         ask=None,
-        tick_count=1,
-        source="test",
     )
 
 
@@ -32,9 +34,11 @@ def _bar(symbol: str = "SPY") -> Bar:
         high=451.0,
         low=449.5,
         close=450.5,
-        volume=1000,
-        tick_count=20,
-        source="test",
+        el_volume=1000,
+        el_ticks=2000,
+        el_upticks=1000,
+        el_downticks=1000,
+        el_open_interest=0,
     )
 
 

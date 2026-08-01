@@ -21,7 +21,7 @@
 | 6 storage | ✅ | resampler / bar_coverage 刪除；history_store 753 → 156 行，改 polars |
 | 7 runtime | ✅ | bar_aggregator 刪除；IngestionRuntime 不再有 aggregator 參數 |
 | 8 scripts/examples | ✅ | imputation 改非破壞性 + `imputed` 欄；examples/03 重寫；04 移除 legacy fixture |
-| 9 測試 | ⬜ | **第一個該全綠的檢查點** |
+| 9 測試 | ✅ | **第一個全綠的檢查點**：298 passed；`ruff check` / `ruff format --check` / `mypy` 全過 |
 | 10 文件 | ⬜ | |
 
 ### 執行中的計畫偏離
@@ -39,6 +39,14 @@
 | D-8 | Phase 5 / 6 / 7 **合併成一個 commit** | 三者是一次不可分割的變更：domain 移除 `source` / `publisher_version` 後，`resampler`、`bar_aggregator`、`history_store` 立刻 import 失敗。單獨 commit Phase 5 會留下一個無法 import 的 tree，正是計畫「每個 Phase 結束就 commit」要避免的狀態 |
 | D-9 | 計畫未列：examples 的 print 輸出改為純 ASCII | `—` / `…` / `§` 在 Windows console（cp950）印成亂碼。examples 是給人跑的，輸出讀不懂就失去意義。只改 print 字串，docstring 與註解不動 |
 | D-7 | 計畫未列：`cpp/README.md` / `README.zh-TW.md` 的 ABI 敘述 | 兩份都寫著過時的 `EL_DllVersion() == 6`（`issues.md` E-01 已記錄過一次）。計畫的 Phase 10 文件清單漏掉這兩份，已補進 T-10.11 |
+| D-10 | **修 `history_store._as_utc`（src 改動，不在 Phase 9 範圍）** | Phase 6 引進的真 bug：aware 輸入原樣回傳、不轉 UTC。DuckDB 會自動處理跨時區比較，polars 不會——ET-aware 的 bound 直接讓 `is_between` 拋 `SchemaError`。函式名為 `_as_utc` 卻不回 UTC，是名實不符。`test_read_timezone.py` 三個測試抓到 |
+| D-11 | T-9.10 漏列的檔案：`test_market_snapshot.py`、`test_read_timezone.py`、`test_sinks_{callback,memory,parquet,pipeline,registry}.py` | 計畫把這些列在「不動」，但它們都建構 `Bar` / `Tick`，欄位一改就全紅（共 28 個失敗）。改動限於 helper factory |
+| D-12 | `test_read_timezone.py` 改為直接寫 bar，不再只寫 tick | 原本靠 `Resampler` 從 tick 衍生 5m 來驗時區。衍生已刪，`load_bars` 會回空 DataFrame，三個斷言會**假性通過**（在空表上問時區問不出東西）。改成用 `BarWriter` 寫入真 bar |
+| D-13 | `test_runtime_pipes_ticks_to_snapshot_and_storage` 語意反轉 | 原測試證明「tick 聚成 bar」。aggregator 已刪，改為證明**反面**：tick 進 snapshot 與 tick sink，且 `bars/` 底下不得出現任何檔案。刻意留著 `ParquetBarSink` 讓「沒有衍生」被斷言而非被假設 |
+| D-14 | `test_el_subscriber.py` 收在 801 行（計畫目標 800）、`test_history_store.py` 242 行（目標 150） | 前者剛好落在目標上。後者超出，是因為新增了 `test_load_bars_never_derives_from_ticks`（這次重構的核心行為，計畫的保留清單沒列）與兩個 helper factory。行數是估計值 |
+| D-15 | 計畫未列：`examples/02_custom_sink.py` 讀 `bar.source` | T-8.8 只寫「確認 01 / 02 不受影響」——實際受影響。該欄位已刪，使用者一跑範例就 `AttributeError`。範例不在測試覆蓋內，是這次唯一沒有測試會抓到的真錯 |
+| D-16 | 計畫未列：清掉 `src/` 內三處指向已刪程式的註解 | `snapshot.py` 的 "closed by BarAggregator"、`ingestion.py` 的 "(EL_PublishTickEx)" 與 "volume / tick_count"。屬於「跨 Phase 一致性檢查」grep 掃出來的殘留，本專案已漂移過不只一次，順手修掉 |
+| D-17 | pytest 一律加 `--timeout=30`（透過 `uv run --with pytest-timeout`，**未**寫進 `pyproject.toml`） | `test_events_logs_and_continues_on_transient_zmq_error` 的 stub socket 固定回同一個 payload；proto 閘門拒收後 `events()` 會重試，於是變成無限迴圈而不是測試失敗。整個 suite 會卡死。stub 已改回合法 payload，但 timeout 保留為執行慣例——相依不入 `pyproject` 是因為它是本地診斷工具，不是專案需求 |
 
 ---
 
@@ -396,21 +404,21 @@ class HistoryStore:
 
 **刪除**（測的功能已不存在）：
 
-- [ ] **T-9.1** `test_resampler.py`（381 行）
-- [ ] **T-9.2** `test_bar_coverage.py`（556 行）
-- [ ] **T-9.3** `test_bar_aggregator.py`（163 行）
-- [ ] **T-9.4** `test_publisher_version.py`（222 行）
-- [ ] **T-9.5** `test_audit_bar_cache_tool.py`（276 行）、`test_clear_bar_cache_tool.py`（148 行）
-- [ ] **T-9.6** `tests/scripts/test_aggregate_parquet_script.py`、`test_audit_bar_cache_script.py`、`test_clear_bar_cache_script.py`
+- [x] **T-9.1** `test_resampler.py`（381 行）
+- [x] **T-9.2** `test_bar_coverage.py`（556 行）
+- [x] **T-9.3** `test_bar_aggregator.py`（163 行）
+- [x] **T-9.4** `test_publisher_version.py`（222 行）
+- [x] **T-9.5** `test_audit_bar_cache_tool.py`（276 行）、`test_clear_bar_cache_tool.py`（148 行）
+- [x] **T-9.6** `tests/scripts/test_aggregate_parquet_script.py`、`test_audit_bar_cache_script.py`、`test_clear_bar_cache_script.py`
 
 **改寫**：
 
-- [ ] **T-9.7** `test_history_store.py`（679 → 目標 150 行）：只留 glob 命中、範圍過濾、空結果 schema 一致、ET/UTC 時區、`1d` 扁平佈局
-- [ ] **T-9.8** `test_el_subscriber.py`（1233 → 目標 800 行）：刪除 v1/v2/v3/v4 閘門與 4 個 `publisher_convention` 測試；**新增**：五個 `el_*` 欄位解析、**缺 `proto` 欄位必須拒收且訊息可辨識**、**缺 `el_*` 欄位必須拋錯而非寫 0**。保留 `ts_str` 優先序、DST、本地化 AM/PM 拒收、topic prefix 過濾、malformed drop、`_SequenceTracker` 全套、報價缺席規則、`tf` 必填/未知拒收、native daily 錨點
-- [ ] **T-9.9** `test_timeframe_grid.py`：移除與 `resampler._bucket_expr` 的 DuckDB 對照；只留 `align_bucket_start` 自身的 DST 與 04:00 ET 錨點測試
-- [ ] **T-9.10** `test_domain.py`、`test_bar_writer.py`、`test_tick_writer.py`、`test_sinks_parquet.py`、`test_ingestion_runtime.py`：配合新 schema 與移除 aggregator 後的建構子
-- [ ] **T-9.11** `tests/scripts/test_imputation_parquet_script.py`：配合非破壞性 + 獨立 schema
-- [ ] **T-9.12** `tests/conformance/test_wire_conformance.py`：移除兩個 `publisher_convention` 測試與 v3/v1 replay；**`_schema_path_for` (`:298-302`) 目前硬編碼 `f"v{version}/{stem}.schema.json"`，schema 移到 `contract/` 根之後這行必壞，要一併改**
+- [x] **T-9.7** `test_history_store.py`（679 → 242 行）：只留 glob 命中、範圍過濾、空結果 schema 一致、ET/UTC 時區、`1d` 扁平佈局；另加 `test_load_bars_never_derives_from_ticks`（見 D-14）
+- [x] **T-9.8** `test_el_subscriber.py`（1233 → 801 行）：刪除 v1/v2/v3/v4 閘門與 4 個 `publisher_convention` 測試；**新增**：五個 `el_*` 欄位解析、**缺 `proto` 欄位必須拒收且訊息可辨識**、**缺 `el_*` 欄位必須拋錯而非寫 0**（五欄逐一 parametrize）、拒收的 frame 仍計入 seq。保留 `ts_str` 優先序、DST、本地化 AM/PM 拒收、topic prefix 過濾、malformed drop、`_SequenceTracker` 全套、報價缺席規則、`tf` 必填/未知拒收、native daily 錨點
+- [x] **T-9.9** `test_timeframe_grid.py`：移除與 `resampler._bucket_expr` 的 DuckDB 對照；只留 `align_bucket_start` 自身的 DST 與 04:00 ET 錨點測試
+- [x] **T-9.10** `test_domain.py`、`test_bar_writer.py`、`test_tick_writer.py`、`test_sinks_parquet.py`、`test_ingestion_runtime.py`：配合新 schema 與移除 aggregator 後的建構子。**清單漏了 5 個檔案**，見 D-11 / D-12 / D-13
+- [x] **T-9.11** `tests/scripts/test_imputation_parquet_script.py`：配合非破壞性 + 獨立 schema；新增「輸入檔逐位元組不變」的斷言
+- [x] **T-9.12** `tests/conformance/test_wire_conformance.py`：移除兩個 `publisher_convention` 測試與 v3/v1 replay；`_schema_path_for` 改成 `contract/` 根的 `{kind}.schema.json`。新增 bar 全程無報價、每個 frame 都宣告 `proto`、以及舊 publisher 的 frame 被拒收而非誤讀
 
 **不動**：`test_session.py`、`test_market_snapshot.py`、`test_runtime_config.py`、`test_sinks_*.py`（parquet 除外）、`test_read_timezone.py`、`tests/scripts/test_common_helpers.py` / `test_record_tool.py` / `test_verify_parquet_script.py` / `test_dedupe_bars_script.py` / `test_dump_parquet_script.py`
 

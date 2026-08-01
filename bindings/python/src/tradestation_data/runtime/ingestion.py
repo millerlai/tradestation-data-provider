@@ -27,7 +27,7 @@ _DIRECT_BAR_CLOSE_GRACE = timedelta(seconds=2)
 class _Counters:
     ticks_in: int = 0
     bars_out: int = 0
-    bars_direct_in: int = 0  # bars emitted via the direct (EL_PublishTickEx) path
+    bars_direct_in: int = 0  # whole bars received on the EL_PublishBar path
     bars_direct_updated: int = 0  # intra-bar updates to a buffered direct bar
     bars_duplicate_dropped: int = 0  # stale/out-of-order direct bar (bucket_start < buffered)
     ticks_dropped: int = 0
@@ -265,7 +265,7 @@ class IngestionRuntime:
 
         if bar.bucket_start == current.bucket_start:
             # Intra-bar refresh — replace so the final emit carries the
-            # complete OHLC / volume / tick_count for the minute.
+            # complete OHLC and quantities for the interval.
             self._current_direct_bars[key] = bar
             self._counters.bars_direct_updated += 1
             return

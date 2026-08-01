@@ -81,11 +81,11 @@ def write_synthetic_store(root: Path, *, minutes: int = 30) -> tuple[int, int]:
                     high=round(max(open_, close) + 0.04, 2),
                     low=round(min(open_, close) - 0.03, 2),
                     close=close,
-                    el_volume=up,          # EL `Volume`  — up-tick shares
-                    el_ticks=up + down,    # EL `Ticks`   — total shares
+                    el_volume=up,  # EL `Volume`  — up-tick shares
+                    el_ticks=up + down,  # EL `Ticks`   — total shares
                     el_upticks=up,
                     el_downticks=down,
-                    el_open_interest=0,    # 0 on equities; futures only
+                    el_open_interest=0,  # 0 on equities; futures only
                     timeframe="1m",
                 )
             )

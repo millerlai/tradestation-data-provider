@@ -11,26 +11,53 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from tradestation_data.domain.bar import Bar
 from tradestation_data.domain.tick import Tick
-from tradestation_data.storage import HistoryStore, TickWriter
+from tradestation_data.storage import BarWriter, HistoryStore, TickWriter
 
 ET = ZoneInfo("America/New_York")
 OPEN_ET = datetime(2026, 4, 20, 9, 30, tzinfo=ET)  # 13:30 UTC
 
 
 def _store(tmp_path: Path, n: int = 30) -> HistoryStore:
-    with TickWriter(tmp_path / "ticks") as w:
+    """A store holding both series the read API exposes.
+
+    The 5m bars are written, not derived: nothing in this binding computes a
+    bar, so a query for an interval nobody published answers zero rows and the
+    timezone assertions below would pass vacuously.
+    """
+    with TickWriter(tmp_path / "ticks") as tw:
         for i in range(n):
-            w.write(
+            tw.write(
                 Tick(
                     symbol="SPY",
                     timestamp=OPEN_ET.astimezone(UTC) + timedelta(minutes=i),
                     price=450.0 + i,
-                    volume=100,
+                    el_volume=100,
+                    el_ticks=200,
+                    el_upticks=100,
+                    el_downticks=100,
+                    el_open_interest=0,
                     bid=None,
                     ask=None,
-                    tick_count=1,
-                    source="tradestation_el",
+                )
+            )
+    with BarWriter(tmp_path / "bars") as bw:
+        for i in range(0, n, 5):
+            bw.write(
+                Bar(
+                    symbol="SPY",
+                    bucket_start=OPEN_ET.astimezone(UTC) + timedelta(minutes=i),
+                    open=450.0 + i,
+                    high=450.0 + i + 4,
+                    low=450.0 + i,
+                    close=450.0 + i + 4,
+                    el_volume=500,
+                    el_ticks=1000,
+                    el_upticks=500,
+                    el_downticks=500,
+                    el_open_interest=0,
+                    timeframe="5m",
                 )
             )
     return HistoryStore(tmp_path)

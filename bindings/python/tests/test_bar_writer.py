@@ -10,7 +10,7 @@ from tradestation_data.domain.bar import Bar
 from tradestation_data.storage import BarWriter
 
 
-def _bar(symbol: str, bucket: datetime, close: float, *, volume: int = 100) -> Bar:
+def _bar(symbol: str, bucket: datetime, close: float, *, el_volume: int = 100) -> Bar:
     return Bar(
         symbol=symbol,
         bucket_start=bucket,
@@ -18,9 +18,11 @@ def _bar(symbol: str, bucket: datetime, close: float, *, volume: int = 100) -> B
         high=close + 0.2,
         low=close - 0.2,
         close=close,
-        volume=volume,
-        tick_count=5,
-        source="tradestation_el",
+        el_volume=el_volume,
+        el_ticks=el_volume * 2,
+        el_upticks=el_volume,
+        el_downticks=el_volume,
+        el_open_interest=0,
     )
 
 
@@ -44,9 +46,11 @@ def test_writer_creates_timeframe_partitioned_file(tmp_path: Path) -> None:
         "high",
         "low",
         "close",
-        "volume",
-        "tick_count",
-        "source",
+        "el_volume",
+        "el_ticks",
+        "el_upticks",
+        "el_downticks",
+        "el_open_interest",
     } <= set(table.column_names)
     assert table.column("close").to_pylist() == pytest.approx([450.0, 450.5])
 
@@ -66,7 +70,7 @@ def test_writer_partitions_by_symbol_and_date(tmp_path: Path) -> None:
         assert p.exists(), p
 
 
-def test_empty_bar_writes_zero_volume(tmp_path: Path) -> None:
+def test_empty_bar_writes_zero_quantities(tmp_path: Path) -> None:
     root = tmp_path / "bars"
     with BarWriter(root) as writer:
         writer.write(
@@ -77,16 +81,17 @@ def test_empty_bar_writes_zero_volume(tmp_path: Path) -> None:
                 high=450.0,
                 low=450.0,
                 close=450.0,
-                volume=0,
-                tick_count=0,
-                source="empty",
+                el_volume=0,
+                el_ticks=0,
+                el_upticks=0,
+                el_downticks=0,
+                el_open_interest=0,
             )
         )
     path = root / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
     table = pq.read_table(path)
-    assert table.column("volume").to_pylist() == [0]
-    assert table.column("tick_count").to_pylist() == [0]
-    assert table.column("source").to_pylist() == ["empty"]
+    for column in ("el_volume", "el_ticks", "el_upticks", "el_downticks", "el_open_interest"):
+        assert table.column(column).to_pylist() == [0], column
 
 
 def test_writer_close_is_idempotent(tmp_path: Path) -> None:
@@ -237,9 +242,11 @@ def test_writer_partitions_on_the_bar_timeframe_not_its_own(tmp_path) -> None:
             high=2.0,
             low=0.5,
             close=1.5,
-            volume=10,
-            tick_count=3,
-            source="tradestation_el",
+            el_volume=10,
+            el_ticks=20,
+            el_upticks=10,
+            el_downticks=10,
+            el_open_interest=0,
             timeframe=tf,
         )
 
@@ -265,9 +272,11 @@ def _daily(bucket: datetime, close: float) -> Bar:
         high=close + 1,
         low=close - 2,
         close=close,
-        volume=1_000,
-        tick_count=50,
-        source="tradestation_el",
+        el_volume=1_000,
+        el_ticks=50,
+        el_upticks=1_000,
+        el_downticks=0,
+        el_open_interest=0,
         timeframe="1d",
     )
 

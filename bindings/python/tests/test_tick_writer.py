@@ -15,20 +15,21 @@ def _tick(
     ts: datetime,
     price: float,
     *,
-    volume: int = 100,
+    el_volume: int = 100,
     bid: float | None = None,
     ask: float | None = None,
-    tick_count: int = 1,
 ) -> Tick:
     return Tick(
         symbol=symbol,
         timestamp=ts,
         price=price,
-        volume=volume,
+        el_volume=el_volume,
+        el_ticks=el_volume * 2,
+        el_upticks=el_volume,
+        el_downticks=el_volume,
+        el_open_interest=0,
         bid=bid,
         ask=ask,
-        tick_count=tick_count,
-        source="tradestation_el",
     )
 
 
@@ -46,9 +47,17 @@ def test_writer_creates_hive_partitioned_file(tmp_path: Path) -> None:
 
     table = pq.read_table(expected)
     assert table.num_rows == 2
-    assert {"timestamp", "price", "volume", "bid", "ask", "tick_count", "source"} <= set(
-        table.column_names
-    )
+    assert {
+        "timestamp",
+        "price",
+        "el_volume",
+        "el_ticks",
+        "el_upticks",
+        "el_downticks",
+        "el_open_interest",
+        "bid",
+        "ask",
+    } <= set(table.column_names)
     prices = table.column("price").to_pylist()
     assert prices == pytest.approx([450.0, 450.1])
 
@@ -105,14 +114,14 @@ def test_should_flush_triggers_on_size(tmp_path: Path) -> None:
 
 def test_index_symbol_writes_null_bid_ask(tmp_path: Path) -> None:
     writer = TickWriter(tmp_path / "ticks")
-    writer.write(_tick("VXX", T0, 18.5, volume=0, bid=None, ask=None, tick_count=0))
+    writer.write(_tick("VXX", T0, 18.5, el_volume=0, bid=None, ask=None))
     writer.close()
 
     path = tmp_path / "ticks" / "symbol=VXX" / "date=2026-04-18" / "ticks.parquet"
     table = pq.read_table(path)
     assert table.column("bid").to_pylist() == [None]
     assert table.column("ask").to_pylist() == [None]
-    assert table.column("volume").to_pylist() == [0]
+    assert table.column("el_volume").to_pylist() == [0]
 
 
 def test_close_is_idempotent(tmp_path: Path) -> None:
