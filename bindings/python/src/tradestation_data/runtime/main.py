@@ -1,14 +1,14 @@
 """
 CLI entry point for the data-provider ingestion runtime.
 
-Wires TradeStationELProvider (ZMQ SUB) → MarketSnapshot + BarAggregator
-→ SinkPipeline (declared in ``config/sinks.yaml``), installs a SIGINT
+Wires TradeStationELProvider (ZMQ SUB) → MarketSnapshot → SinkPipeline
+(declared in ``config/sinks.yaml``), installs a SIGINT
 handler for graceful shutdown, and runs IngestionRuntime until
 interrupted.
 
 This is the data-collection-only fork of the runtime — strategy /
 broker / risk wiring has been removed. The ingestion loop dispatches
-ticks and 1-min bars to a user-configurable sink pipeline; the default
+ticks and bars to a user-configurable sink pipeline; the default
 ``config/sinks.yaml`` writes both as Hive-partitioned Parquet under
 ``data/`` (matching the historical layout), but users can swap in any
 sink declared in ``sinks.yaml`` — see ``sinks/`` for the protocol.
@@ -29,7 +29,6 @@ import sys
 from pathlib import Path
 from typing import ClassVar
 
-from tradestation_data.aggregation.bar_aggregator import BarAggregator
 from tradestation_data.aggregation.snapshot import MarketSnapshot
 from tradestation_data.domain.bar import Bar
 from tradestation_data.runtime.config import load_symbols
@@ -271,7 +270,6 @@ async def _amain(args: argparse.Namespace) -> int:
 
     provider = TradeStationELProvider(endpoint=args.endpoint)
     snapshot = MarketSnapshot(symbol_policies=cfg.session_policies())
-    aggregator = BarAggregator()
 
     try:
         pipeline = _build_pipeline(args, log)
@@ -289,7 +287,6 @@ async def _amain(args: argparse.Namespace) -> int:
         provider=provider,
         symbols=symbols,
         snapshot=snapshot,
-        aggregator=aggregator,
         sinks=pipeline,
         heartbeat_interval=args.heartbeat_seconds,
     )

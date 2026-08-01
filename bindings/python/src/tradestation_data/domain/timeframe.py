@@ -1,11 +1,10 @@
 """The timeframe vocabulary, and the bucket grid every layer must agree on.
 
-`tf` on the wire, `timeframe=` in the Parquet layout and the resampler's
-bucket grid are deliberately the same set of strings: a value one layer can
-name and another cannot is a bar filed under the wrong interval, and nothing
-downstream can detect that. The enum lives here so adding a member is one
-edit rather than six — the wire allow-list, the minutes table, the cache
-tools' default and the SQL interval are all derived from it.
+`tf` on the wire and `timeframe=` in the Parquet layout are deliberately the
+same set of strings: a value one layer can name and another cannot is a bar
+filed under the wrong interval, and nothing downstream can detect that. The
+enum lives here so adding a member is one edit rather than several — the wire
+allow-list, the minutes table and the storage layout are all derived from it.
 
 Bucket alignment is contract/semantics.md §2.2, not a local choice.
 """
@@ -39,14 +38,6 @@ TIMEFRAME_MINUTES: dict[str, int] = {
 # interval we cannot place must be refused, not filed under a default.
 SUPPORTED_TIMEFRAMES: frozenset[str] = frozenset(tf.value for tf in Timeframe)
 
-# Intervals that must never be computed — only taken as published.
-# TradeStation's daily bar carries the exchange's official OHLC and is
-# split/dividend adjusted; summing minutes or ticks reproduces neither, and
-# the result is indistinguishable from the real thing on disk. See
-# contract/semantics.md §2.3. Anything here is data, not cache: it is not
-# rebuildable, so nothing may overwrite or evict it.
-NATIVE_ONLY_TIMEFRAMES: frozenset[str] = frozenset({Timeframe.D1})
-
 # Intervals coarse enough that one file per calendar day would hold a row or
 # two. A closed Parquet file costs ~2.9 KB of schema and footer whatever it
 # holds, so a `1d` day partition spent 2,903 bytes carrying about 60 of data.
@@ -60,17 +51,6 @@ SINGLE_FILE_TIMEFRAMES: frozenset[str] = frozenset({Timeframe.D1})
 # one, since subtracting a whole interval would land the bar in the previous
 # session. See contract/semantics.md §2.2.
 SESSION_ANCHORED_TIMEFRAMES: frozenset[str] = frozenset({Timeframe.D1})
-
-# Everything the live 1-minute writer does not produce itself *and* that may
-# legitimately be computed, i.e. the frames a Tier 3 cache can hold. Derived
-# from the enum so a new member is never silently left out of the cache
-# tooling — and excludes NATIVE_ONLY_TIMEFRAMES, because deleting one of
-# those on the promise that it can be rebuilt is data loss.
-TIER3_TIMEFRAMES: tuple[str, ...] = tuple(
-    tf.value
-    for tf in Timeframe
-    if tf is not Timeframe.M1 and tf.value not in NATIVE_ONLY_TIMEFRAMES
-)
 
 _ET_TZ: ZoneInfo = ZoneInfo("America/New_York")
 
@@ -108,10 +88,11 @@ def timeframe_to_minutes(timeframe: str | Timeframe) -> int:
 def align_bucket_start(ts_utc: datetime, timeframe: str | Timeframe) -> datetime:
     """Floor a UTC instant onto the bucket grid for `timeframe`.
 
-    The Python twin of `storage.resampler._bucket_expr`. The two must agree:
-    one produces the bars a cache miss writes, the other produces the bars
-    written beside them, and a grid mismatch shows up only as a join that
-    quietly matches nothing.
+    Note this does NOT apply the right-label-to-left-label shift of
+    contract/semantics.md §2. That is the caller's job, because it is skipped
+    for SESSION_ANCHORED_TIMEFRAMES: alignment there discards the time-of-day
+    for the 04:00 ET anchor anyway, and subtracting an interval first would
+    move the bar into the previous session.
     """
     tf = str(timeframe)
     if tf == Timeframe.D1:

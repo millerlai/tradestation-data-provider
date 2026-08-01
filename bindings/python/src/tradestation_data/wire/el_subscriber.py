@@ -15,7 +15,6 @@ from tradestation_data.domain.tick import Tick
 from tradestation_data.domain.timeframe import (
     SESSION_ANCHORED_TIMEFRAMES,
     SUPPORTED_TIMEFRAMES,
-    Timeframe,
     align_bucket_start,
     timeframe_to_minutes,
 )
@@ -37,55 +36,50 @@ DEFAULT_INDEX_SYMBOLS: frozenset[str] = frozenset(
     {"$TICK", "$ADD", "$VOLD", "$TRIN", "$PCVA", "VXX"}
 )
 
-# Wire versions this binding understands.
-#   v1  no seq/sid, so no gap detection
-#   v2  adds seq/sid, and nullable bid/ask
-#   v3  adds `tf`; `kind` narrows to tick/bar with the interval in its own field
-#   v4  adds `pv` — which publisher convention produced the numbers
-# Reading a version above the maximum is an error rather than a guess — an
-# unknown high version may have changed field semantics we would silently
-# misread. See ../../../../contract/compat.md.
-
-# Publisher conventions this binding knows, reported as `pv` on wire v4.
-#   0  undeclared — an exporter older than the field. Read intraday `vol` as
-#      up-tick share volume alone, roughly half of what traded.
-#   1  contract/semantics.md §3.4: `vol` is total share volume on every
-#      timeframe, and intraday `tc` is 0.
-# Absent (v1/v2/v3) is read the same way as 0 — do not trust intraday `vol`
-# to be the total — but is *stored* as None; see _publisher_version.
-#
-# Unlike `v`, an unknown `pv` is logged and the frame is kept. `v` unknown
-# means we cannot tell where the fields are; `pv` unknown means we can read
-# them but some were computed by a rule we do not know — the data is not
-# damaged, and dropping it would lose more than it protects. compat.md
-# spells out the asymmetry.
-_PUBLISHER_UNDECLARED = 0
-KNOWN_PUBLISHER_VERSIONS: frozenset[int] = frozenset({0, 1})
-
-
-def _publisher_version(data: dict[str, Any]) -> int | None:
-    """`pv` off the wire, or None when the payload had no such field.
-
-    None and 0 both mean "do not trust intraday `vol` to be the total", but
-    they are not the same fact and are stored apart: 0 is a publisher that
-    declared itself undeclared, None is a wire version that had nowhere to
-    declare it. Collapsing them would make a v3 feed indistinguishable from
-    a v4 one running an old indicator.
-    """
-    pv = data.get("pv")
-    return None if pv is None else int(pv)
-
-
 # Timeframes this binding will accept on the wire live in
 # domain.timeframe.SUPPORTED_TIMEFRAMES — deliberately the same vocabulary the
 # storage layer partitions on. A `tf` we cannot place is a frame we must not
 # file, because filing it under a default would put bars of one interval into
 # another interval's partition.
-SUPPORTED_WIRE_VERSIONS: frozenset[int] = frozenset({1, 2, 3, 4})
+
+# The protocol version, carried in `proto`. There is exactly one, and a frame
+# without the key is not this protocol at all.
+#
+# The key is `proto` rather than `v` on purpose. The superseded wire used `v`
+# and counted to 4; restarting at 1 under the same key would have made
+# {"v":1} a legal opening for both protocols, and the frames would then have
+# failed in the worst possible way — the old v1 bar used kind "bar_1m", which
+# the unknown-kind rule skips silently, while an old v1 tick would have
+# matched on shape and only diverged at field level. See contract/wire.md.
+PROTO_VERSION = 1
+
+# The five quantity fields, EasyLanguage's reserved words verbatim. Read as
+# REQUIRED, never with a default: a missing quantity must raise, because the
+# alternative is writing a zero that is indistinguishable from a real one.
+# That failure mode -- a plausible number nobody can audit after the fact --
+# is the entire reason this protocol exists.
+_QUANTITY_FIELDS = (
+    "el_volume",
+    "el_ticks",
+    "el_upticks",
+    "el_downticks",
+    "el_open_interest",
+)
+
+
+def _quantities(data: dict[str, Any], payload_kind: str) -> dict[str, int]:
+    try:
+        return {name: int(data[name]) for name in _QUANTITY_FIELDS}
+    except KeyError as exc:
+        raise ValueError(
+            f"{payload_kind} payload is missing {exc.args[0]!r}. This is likely a "
+            f"publisher older than proto {PROTO_VERSION}; reinstall TS2Python.dll "
+            f"and re-import the .ELD that shipped with it."
+        ) from exc
 
 
 class _SequenceTracker:
-    """Per-symbol gap detection for wire v2.
+    """Per-symbol gap detection.
 
     PUB/SUB drops silently at both high-water marks, so a missing message
     looks exactly like a quiet market. The publisher stamps a per-symbol
@@ -166,53 +160,45 @@ class TradeStationELProvider:
     """
     Subscribes to events published by the TS2Python C++ DLL over ZeroMQ.
 
-    Wire format (see ../../../../docs/architecture.md §5):
+    Wire format (see ../../../../contract/wire.md):
       Frame 1: topic = symbol (UTF-8 bytes, e.g. b"SPY", b"VXX")
       Frame 2: JSON payload. Two shapes, discriminated by ``kind``:
 
         Tick (EL_PublishTick):
           {
-            "v":      4,          # wire version
-            "pv":     <int>,      # publisher convention; 0 = undeclared
+            "proto":  1,
             "seq":    <int>,      # monotonic sequence per symbol
-            "sid":    <int>,      # publisher session id
+            "sid":    <int>,      # publisher session id, epoch microseconds
             "kind":   "tick",
             "ts":     <float>,    # DLL receive time, unix epoch UTC
-            "ts_utc": <float>,    # ET→UTC conversion done in the DLL
             "ts_str": "<str>",    # Raw EL timestamp "yyyy-MM/dd-HH:mm:ss"
             "px":     <float>,    # last trade price
-            "vol":    <int>,
-            "bid":    <float>,    # null/ignored for index symbols
-            "ask":    <float>,
-            "tc":     <int>
+            "el_volume": <int>, "el_ticks": <int>, "el_upticks": <int>,
+            "el_downticks": <int>, "el_open_interest": <int>,
+            "bid":    <float>,    # null when no quote
+            "ask":    <float>
           }
 
-        Bar (EL_PublishBar, non-tick OHLC):
+        Bar (EL_PublishBar, complete OHLC):
           {
-            "v":      4,
-            "pv":     <int>,
+            "proto":  1,
             "seq":    <int>,
             "sid":    <int>,
             "kind":   "bar",
             "tf":     "<str>",    # timeframe, e.g. "1m", "5m", "1d"
             "ts":     <float>,
-            "ts_utc": <float>,
             "ts_str": "<str>",
-            "o":      <float>,
-            "h":      <float>,
-            "l":      <float>,
-            "c":      <float>,
-            "vol":    <int>,
-            "bid":    <float>,
-            "ask":    <float>,
-            "tc":     <int>
+            "o": <float>, "h": <float>, "l": <float>, "c": <float>,
+            "el_volume": <int>, "el_ticks": <int>, "el_upticks": <int>,
+            "el_downticks": <int>, "el_open_interest": <int>
           }
 
     The DLL stamps ``ts`` when the EL call lands — for live ticks this is
-    within a millisecond of the exchange event. ``bar.bucket_start`` is
-    parsed from ``ts_str`` as ET (authoritative); ``ts_utc`` from the DLL
-    is used only as a sanity cross-check. Ticks still use ``ts`` as the
-    authoritative receive-side timestamp.
+    within a millisecond of the exchange event, and semantics.md §1 makes it
+    a tick's authoritative time. ``bar.bucket_start`` instead comes from
+    ``ts_str``, parsed here as ET: it is the publisher's raw fact, and
+    parsing it locally keeps the answer correct even if the DLL host's tz
+    database is stale. Bars carry no quote.
     """
 
     source_id = "tradestation_el"
@@ -232,18 +218,15 @@ class TradeStationELProvider:
         self._subscribed: set[str] = set()
         self._closed = False
         self._seq = _SequenceTracker()
-        self._warned_no_gap_detection = False
-        # Which `pv` values have already been reported. Per value rather than
-        # a single flag: a publisher restart between two indicator vintages
-        # inside one subscriber session is exactly the case worth seeing twice.
-        self._reported_publisher_versions: set[int | None] = set()
 
     @property
     def gap_detection_available(self) -> bool:
-        """True once a frame carrying ``seq``/``sid`` (wire v2+) has arrived.
+        """True once a frame carrying ``seq``/``sid`` has arrived.
 
-        False means loss cannot be detected on this link at all — either the
-        publisher is a v1 DLL, or nothing has been received yet.
+        Every frame in this protocol is sequenced, so this only distinguishes
+        "counting has started" from "nothing has been received yet" — which
+        still matters, because ``messages_lost == 0`` before the first frame
+        is not a statement about the link. See semantics.md §6.6.
         """
         return self._seq.sid is not None
 
@@ -337,7 +320,6 @@ class TradeStationELProvider:
 
     def _parse_payload(self, symbol: str, payload: bytes) -> MarketEvent:
         data = json.loads(payload)
-        version = data.get("v", 1)
 
         # Sequence accounting happens before the version gate on purpose. A
         # frame we refuse still occupied a slot in the publisher's per-symbol
@@ -348,145 +330,68 @@ class TradeStationELProvider:
         seq = data.get("seq")
         if seq is not None:
             self._seq.observe(symbol, int(seq), int(data.get("sid", 0)))
-        elif not self._warned_no_gap_detection:
-            # Do not refuse the frame: an older DLL may still be deployed in
-            # the user's TradeStation, and refusing would break data
-            # collection entirely rather than degrade it.
-            self._warned_no_gap_detection = True
-            log.warning(
-                "gap_detection_unavailable",
-                extra={"wire_version": version, "reason": "payload carries no seq"},
+
+        proto = data.get("proto")
+        if proto != PROTO_VERSION:
+            # Absent is the common case and the informative one: a publisher
+            # predating this protocol has no such key at all. Saying so beats
+            # "unsupported version None", which reads like a corrupt frame.
+            raise ValueError(
+                f"payload declares proto={proto!r}, expected {PROTO_VERSION}. "
+                f"A missing 'proto' means the publisher predates this protocol; "
+                f"reinstall TS2Python.dll and re-import the .ELD that shipped "
+                f"with it."
             )
 
-        if version not in SUPPORTED_WIRE_VERSIONS:
-            raise ValueError(f"Unsupported payload version: {version}")
-
-        self._note_publisher_version(data)
-
-        kind = data.get("kind", "tick")
+        kind = data.get("kind")
         if kind == "tick":
             return self._parse_tick(symbol, data)
-        if kind in ("bar", "bar_1m"):
-            if version < 3:
-                # v1/v2 said bar_1m and had no other option, so 1m is the one
-                # reading that cannot invent data the older wire could not
-                # express.
-                tf = str(Timeframe.M1)
-            else:
-                # v3 lists `tf` as required, and compat.md is explicit: an
-                # unknown interval must be refused, never defaulted. A bar
-                # filed under the wrong timeframe= partition is indetectable
-                # downstream — it looks exactly like real data at that
-                # interval.
-                tf_val = data.get("tf")
-                if not tf_val:
-                    raise ValueError(f"v3 bar payload carries no 'tf': {payload!r}")
-                tf = str(tf_val)
-
+        if kind == "bar":
+            # An unknown interval must be refused, never defaulted. A bar
+            # filed under the wrong timeframe= partition is undetectable
+            # downstream — it looks exactly like real data at that interval.
+            tf_val = data.get("tf")
+            if not tf_val:
+                raise ValueError(f"bar payload carries no 'tf': {payload!r}")
+            tf = str(tf_val)
             if tf not in SUPPORTED_TIMEFRAMES:
                 raise ValueError(f"Unsupported timeframe: {tf!r}")
             return self._parse_bar(symbol, data, tf)
         raise ValueError(f"Unknown event kind: {kind!r}")
 
-    def _note_publisher_version(self, data: dict[str, Any]) -> None:
-        """Report the publisher convention once per distinct value.
-
-        The frame is never refused over this. An undeclared publisher is
-        still publishing real trades; what changes is how one column has to
-        be read, and a log line is the only place that can be said. It is the
-        one signal an operator who upgraded the binding but kept the
-        previously imported .ELD will ever see — the numbers themselves look
-        perfectly ordinary. compat.md requires exactly this handling.
-        """
-        pv = _publisher_version(data)
-        if pv in self._reported_publisher_versions:
-            return
-        self._reported_publisher_versions.add(pv)
-        if pv is None or pv == _PUBLISHER_UNDECLARED:
-            log.warning(
-                "publisher_convention_undeclared",
-                extra={
-                    "publisher_version": pv,
-                    "consequence": (
-                        "intraday vol may be up-tick share volume only, roughly half of "
-                        "what traded; re-import EL/TS2Python_Exporter.el to fix"
-                    ),
-                },
-            )
-        elif pv not in KNOWN_PUBLISHER_VERSIONS:
-            log.warning(
-                "publisher_convention_unknown",
-                extra={
-                    "publisher_version": pv,
-                    "known": sorted(KNOWN_PUBLISHER_VERSIONS),
-                    "consequence": "field semantics may have changed; frames are kept",
-                },
-            )
-        else:
-            log.info("publisher_convention", extra={"publisher_version": pv})
-
     def _parse_tick(self, symbol: str, data: dict[str, Any]) -> Tick:
-        ts_epoch = float(data["ts"])
-        timestamp = datetime.fromtimestamp(ts_epoch, tz=UTC)
+        timestamp = datetime.fromtimestamp(float(data["ts"]), tz=UTC)
 
-        # Cross-check: the DLL also converts the EL-supplied ET string to
-        # UTC via std::chrono::zoned_time and ships it as ts_utc. A large
-        # delta from the receive-side ts typically means the TS host clock
-        # is skewed; log once per occurrence but never raise.
-        ts_utc = _optional_float(data.get("ts_utc"))
-        if ts_utc is not None and ts_utc > 0.0 and abs(ts_utc - ts_epoch) > 5.0:
-            log.debug(
-                "ts_utc drifts from recv ts by %.2fs (symbol=%s ts=%.3f ts_utc=%.3f)",
-                ts_utc - ts_epoch,
-                symbol,
-                ts_epoch,
-                ts_utc,
-            )
-
+        # Two independent reasons a quote can be meaningless, and both apply:
+        # the wire says null when EL had none to report (§3.1), and an
+        # index/breadth symbol's live numbers mean nothing even when present
+        # (§3.2). The DLL cannot do the second — it holds no symbol taxonomy.
         is_index = symbol in self._index_symbols
         return Tick(
             symbol=symbol,
             timestamp=timestamp,
             price=float(data["px"]),
-            volume=int(data.get("vol", 0)),
             bid=None if is_index else _quote_or_none(data.get("bid")),
             ask=None if is_index else _quote_or_none(data.get("ask")),
-            tick_count=int(data.get("tc", 0)),
-            source=self.source_id,
-            publisher_version=_publisher_version(data),
+            **_quantities(data, "tick"),
         )
 
     def _parse_bar(self, symbol: str, data: dict[str, Any], timeframe: str = "1m") -> Bar:
         # Priority for bucket_start (UTC):
         #   1. ts_str (authoritative) — EL wall-clock string, parsed here
         #      as America/New_York. Zone-correct on any DLL host because
-        #      we never rely on the host's system tz.
+        #      we never rely on the host's system tz. The publisher no longer
+        #      parses this string at all, so a malformed one arrives intact
+        #      and is caught here rather than upstream.
         #   2. ts — receive-side wall clock, last-resort only. During
         #      historical replay every bar shares one ts and would collapse
-        #      onto a single bucket, so we only fall back to it when ts_str
-        #      is absent AND the ts_utc cross-check is missing too.
+        #      onto a single bucket, so this is strictly a fallback for a
+        #      publisher that sent no ts_str.
         bucket_start: datetime | None = None
 
         ts_str_raw = data.get("ts_str")
         if isinstance(ts_str_raw, str) and ts_str_raw:
             bucket_start = _parse_el_str_as_et(ts_str_raw)
-
-        # Sanity cross-check against the DLL's own ET→UTC conversion. A
-        # >5s drift between the two parses is almost always a DST table
-        # mismatch or a malformed ts_str; record it for later diagnosis
-        # but keep the ts_str answer authoritative.
-        ts_utc = _optional_float(data.get("ts_utc"))
-        if bucket_start is not None and ts_utc is not None and ts_utc > 0.0:
-            ts_utc_floor = _floor_to_minute_utc(ts_utc)
-            if ts_utc_floor != bucket_start:
-                log.debug(
-                    "bar ts_str vs ts_utc mismatch (symbol=%s ts_str=%r → %s, ts_utc=%.3f → %s)",
-                    symbol,
-                    ts_str_raw,
-                    bucket_start.isoformat(),
-                    ts_utc,
-                    ts_utc_floor.isoformat(),
-                )
 
         if bucket_start is None:
             bucket_start = _floor_to_minute_utc(float(data["ts"]))
@@ -506,10 +411,9 @@ class TradeStationELProvider:
 
         # §2.2 — the grid is the contract's, not the publisher's. EL stamps a
         # bar with its chart's own Date/Time, which for a daily bar is nowhere
-        # near the 04:00 ET session anchor a derived 1d bar uses. Left alone,
-        # the same trading day would end up as two rows in
-        # bars/timeframe=1d/ with different bucket_starts, and every join
-        # downstream would double-count it.
+        # near the 04:00 ET session anchor. Left alone, one trading day could
+        # end up as two rows in bars/timeframe=1d/ with different
+        # bucket_starts, and every join downstream would double-count it.
         bucket_start = align_bucket_start(bucket_start, timeframe)
 
         return Bar(
@@ -519,11 +423,8 @@ class TradeStationELProvider:
             high=float(data["h"]),
             low=float(data["l"]),
             close=float(data["c"]),
-            volume=int(data.get("vol", 0)),
-            tick_count=int(data.get("tc", 0)),
-            source=self.source_id,
             timeframe=timeframe,
-            publisher_version=_publisher_version(data),
+            **_quantities(data, "bar"),
         )
 
     async def close(self) -> None:
@@ -547,11 +448,10 @@ def _optional_float(value: object) -> float | None:
 def _quote_or_none(value: object) -> float | None:
     """Read a bid/ask, treating "no quote" as absent however it is spelled.
 
-    A wire-v2 publisher already sends null when EL had no quote to report
-    (historical replay, or a symbol that never carries one). A v1 publisher
-    cannot — it emits 0.000000 instead — so a non-positive number has to be
-    read as absent too, or a v1 history replay would look like a run of
-    $0.00 quotes. See contract/semantics.md §3.
+    The publisher already sends null when EL had no quote to report
+    (historical replay, or a symbol that never carries one). The
+    non-positive check is belt-and-braces for any value that gets past it —
+    a $0.00 quote is never a real one. See contract/semantics.md §3.
     """
     q = _optional_float(value)
     if q is None or q <= 0.0:
@@ -561,7 +461,7 @@ def _quote_or_none(value: object) -> float | None:
 
 def _floor_to_minute_utc(epoch_seconds: float) -> datetime:
     ts = datetime.fromtimestamp(epoch_seconds, tz=UTC)
-    return ts.replace(second=0, microsecond=0) - timedelta(0)
+    return ts.replace(second=0, microsecond=0)
 
 
 def _parse_el_str_as_et(s: str) -> datetime | None:

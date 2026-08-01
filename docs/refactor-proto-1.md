@@ -17,9 +17,9 @@
 | 2 EL indicator | ✅ | 五個量值原樣送；`EL_Init3` + `EL_DllVersion` latch；原型/呼叫端參數數已自動核對 |
 | 3 C++ DLL | ✅ | ABI 1；x86+x64 建置通過；匯出修飾 `_EL_PublishTick@72` / `_EL_PublishBar@88` 與 EL 端逐位元組吻合；墓碑驗證已自動化 |
 | 4 重錄 fixtures | ✅ | 4 份重錄（6/3/6/2）；expected 手工推導後逐欄核對 wire；17 frame 全數通過 JSON Schema |
-| 5 domain + wire | ⬜ | |
-| 6 storage | ⬜ | |
-| 7 runtime | ⬜ | |
+| 5 domain + wire | ✅ | 五個 `el_*` 必填讀取；`proto` 閘門；fixture 逐欄比對通過 |
+| 6 storage | ✅ | resampler / bar_coverage 刪除；history_store 753 → 156 行，改 polars |
+| 7 runtime | ✅ | bar_aggregator 刪除；IngestionRuntime 不再有 aggregator 參數 |
 | 8 scripts/examples | ⬜ | |
 | 9 測試 | ⬜ | **第一個該全綠的檢查點** |
 | 10 文件 | ⬜ | |
@@ -36,6 +36,7 @@
 | D-4 | `semantics.md` 收在 430 行，未達計畫的「250 行內」 | 減幅 28%。再往下砍就要動 §2.2 的 DST 論證與 §3.4 的實測數據，兩者都是被真實 bug 逼出來、且無法從程式碼重新推導的內容。行數是估計值，內容取捨優先 |
 | D-5 | T-3.11 的「手動驗證墓碑」改成 **harness 每次啟動都自動驗證** | 手動檢查是不會被重複執行的檢查。`test_harness.cpp` 現在在任何 init 之前先斷言 `EL_DllVersion() == 1` 且 `EL_Init` / `EL_Init2` 都回 `-6`，任何 mode 跑起來都會驗一次 |
 | D-6 | 計畫未列：**更新 `cpp/prebuilt/` 的兩顆 DLL** | 那兩顆是 committed 的 ABI 9 binary，而 README 教使用者直接拿來用。不更新的話，新 `.ELD` 會在 `DefineDLLFunc` 找不到 `EL_Init3` —— 雖然是可讀的失敗，但對照著文件走的人會撞上它。已用本次 x86/x64 Release 產物覆蓋 |
+| D-8 | Phase 5 / 6 / 7 **合併成一個 commit** | 三者是一次不可分割的變更：domain 移除 `source` / `publisher_version` 後，`resampler`、`bar_aggregator`、`history_store` 立刻 import 失敗。單獨 commit Phase 5 會留下一個無法 import 的 tree，正是計畫「每個 Phase 結束就 commit」要避免的狀態 |
 | D-7 | 計畫未列：`cpp/README.md` / `README.zh-TW.md` 的 ABI 敘述 | 兩份都寫著過時的 `EL_DllVersion() == 6`（`issues.md` E-01 已記錄過一次）。計畫的 Phase 10 文件清單漏掉這兩份，已補進 T-10.11 |
 
 ---

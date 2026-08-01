@@ -28,42 +28,24 @@ BAR_SCHEMA: pa.Schema = pa.schema(
             pa.timestamp("us", tz="America/New_York"),
             nullable=False,
         ),
+        # Prices are the only floating-point values here.
         pa.field("open", pa.float64(), nullable=False),
         pa.field("high", pa.float64(), nullable=False),
         pa.field("low", pa.float64(), nullable=False),
         pa.field("close", pa.float64(), nullable=False),
-        pa.field("volume", pa.int64(), nullable=False),
-        pa.field("tick_count", pa.int32(), nullable=False),
-        pa.field("source", pa.string(), nullable=False),
-        # Which publisher convention produced `volume` — wire v4's `pv`.
-        # Nullable and last in the schema on purpose: every partition written
-        # before this field existed simply lacks the column, and null is the
-        # only honest value for those rows. `with_publisher_version` is what
-        # lets such a file still be read and rewritten.
-        pa.field("publisher_version", pa.int32(), nullable=True),
+        # EasyLanguage's reserved words, verbatim and integral. The el_
+        # prefix is part of the contract, not decoration: on an intraday bar
+        # `el_volume` is up-tick share volume alone and `el_ticks` is the
+        # total, and a column called plain `volume` invites exactly the
+        # misreading that cost this repo a systematically halved volume
+        # column. See contract/semantics.md §3.4.
+        pa.field("el_volume", pa.int64(), nullable=False),
+        pa.field("el_ticks", pa.int64(), nullable=False),
+        pa.field("el_upticks", pa.int64(), nullable=False),
+        pa.field("el_downticks", pa.int64(), nullable=False),
+        pa.field("el_open_interest", pa.int64(), nullable=False),
     ]
 )
-
-
-def with_publisher_version(table: pa.Table) -> pa.Table:
-    """Give a table read off disk the `publisher_version` column if it lacks one.
-
-    Partitions written before the field existed have no such column, and
-    ``Table.cast(BAR_SCHEMA)`` compares field lists — it raises rather than
-    filling the gap. Both rewrite paths cast, and both treat a failure as
-    "this file is not ours, leave it alone", so without this an old partition
-    would quietly become un-rebuildable: the row count on disk stops changing
-    and nothing says why.
-
-    Null, not 0: 0 is a publisher that declared itself undeclared, null is a
-    row written before anything could declare.
-    """
-    if "publisher_version" in table.column_names:
-        return table
-    return table.append_column(
-        BAR_SCHEMA.field("publisher_version"),
-        pa.nulls(table.num_rows, pa.int32()),
-    )
 
 
 @dataclass(slots=True)
@@ -233,16 +215,11 @@ class BarWriter:
         assert isinstance(incoming, pl.DataFrame)
         frames = [incoming]
         if path.exists():
-            # Through pyarrow rather than pl.read_parquet so a file written
-            # before `publisher_version` existed gets the column back as
-            # nulls; pl.concat(how="vertical") requires matching widths and
-            # this is the only copy of a native daily bar.
-            #
             # ParquetFile, not read_table: this path sits under
             # timeframe=/symbol=, and read_table runs hive discovery on those
-            # and hands back two extra dictionary columns — a width mismatch
-            # in the other direction.
-            existing = pl.from_arrow(with_publisher_version(pq.ParquetFile(path).read()))
+            # and hands back two extra dictionary columns, which
+            # pl.concat(how="vertical") rejects as a width mismatch.
+            existing = pl.from_arrow(pq.ParquetFile(path).read())
             assert isinstance(existing, pl.DataFrame)
             frames = [existing, incoming]
         merged = (
@@ -303,10 +280,11 @@ def _bars_to_table(bars: list[Bar]) -> pa.Table:
             "high": [b.high for b in bars],
             "low": [b.low for b in bars],
             "close": [b.close for b in bars],
-            "volume": [b.volume for b in bars],
-            "tick_count": [b.tick_count for b in bars],
-            "source": [b.source for b in bars],
-            "publisher_version": [b.publisher_version for b in bars],
+            "el_volume": [b.el_volume for b in bars],
+            "el_ticks": [b.el_ticks for b in bars],
+            "el_upticks": [b.el_upticks for b in bars],
+            "el_downticks": [b.el_downticks for b in bars],
+            "el_open_interest": [b.el_open_interest for b in bars],
         },
         schema=BAR_SCHEMA,
     )

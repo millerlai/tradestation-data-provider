@@ -1,4 +1,3 @@
-from tradestation_data.aggregation.bar_aggregator import BarAggregator
 from tradestation_data.aggregation.session import (
     SessionPolicy,
     session_date_of,
@@ -7,7 +6,6 @@ from tradestation_data.aggregation.session import (
 from tradestation_data.aggregation.snapshot import MarketSnapshot, SymbolState, SymbolView
 
 __all__ = [
-    "BarAggregator",
     "MarketSnapshot",
     "SessionPolicy",
     "SymbolState",
