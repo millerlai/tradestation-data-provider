@@ -1,53 +1,43 @@
 """The bucket grid — contract/semantics.md §2.2.
 
-Two implementations produce bars into the same `timeframe=` directories:
-`storage.resampler._bucket_expr` (DuckDB) on a cache miss, and
-`domain.timeframe.align_bucket_start` (Python) for `aggregate_parquet.py` and
-for native non-1m bars off the wire. A disagreement between them does not
-raise anything — it just makes every `bucket_start` join match nothing — so
-the agreement is asserted here directly.
+There used to be two implementations of this grid — a DuckDB expression on
+the resampler's cache-miss path and the Python one here — and most of this
+file existed to assert they agreed, because a disagreement raises nothing
+and simply makes every `bucket_start` join match nothing.
+
+Nothing resamples any more, so `align_bucket_start` is the only
+implementation and there is no second opinion to check it against. What is
+left are the grid's own invariants, which is what the cross-check was really
+protecting: a label never later than what it labels, a fold that does not
+merge two different hours, and the session open landing on an edge.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
-import duckdb
 import pytest
 
 from tradestation_data.domain.timeframe import Timeframe, align_bucket_start
-from tradestation_data.storage.resampler import _bucket_expr
-
-
-def _duckdb_bucket(ts: datetime, timeframe: str) -> datetime:
-    con = duckdb.connect()
-    try:
-        con.execute("SET TimeZone='UTC'")
-        # Fetched as text on purpose: duckdb's Python client needs pytz to
-        # materialise a TIMESTAMPTZ and that is not a dependency here.
-        sql = (
-            f"SELECT strftime({_bucket_expr('ts', timeframe)}, '%Y-%m-%d %H:%M:%S') "
-            "FROM (SELECT ?::TIMESTAMPTZ AS ts)"
-        )
-        row = con.execute(sql, [ts.isoformat()]).fetchone()
-    finally:
-        con.close()
-    assert row is not None
-    return datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S").replace(tzinfo=UTC)
-
 
 # 2025-11-02 falls back (02:00 EDT -> 01:00 EST); 2025-03-09 springs forward.
 _DST_DAYS = (datetime(2025, 11, 2, tzinfo=UTC), datetime(2025, 3, 9, tzinfo=UTC))
 
 
 @pytest.mark.parametrize("timeframe", [str(tf) for tf in Timeframe])
-def test_python_and_duckdb_grids_agree_across_dst(timeframe: str) -> None:
+def test_aligning_an_aligned_instant_is_a_no_op(timeframe: str) -> None:
+    """Idempotence, which is what "lands on the grid" means operationally.
+
+    Without a second implementation to diff against, this is the property
+    that catches a grid drifting: if align(t) were not itself a grid edge,
+    two bars covering the same span could get different labels depending on
+    which instant inside them happened to be aligned first.
+    """
     for base in _DST_DAYS:
         for i in range(0, 24 * 4, 3):  # every 45 min through the transition day
             ts = base + timedelta(minutes=15 * i)
-            assert _duckdb_bucket(ts, timeframe) == align_bucket_start(ts, timeframe), (
-                f"{timeframe} @ {ts.isoformat()}"
-            )
+            once = align_bucket_start(ts, timeframe)
+            assert align_bucket_start(once, timeframe) == once, f"{timeframe} @ {ts.isoformat()}"
 
 
 @pytest.mark.parametrize("timeframe", [str(tf) for tf in Timeframe])
@@ -72,7 +62,6 @@ def test_dst_fold_does_not_merge_two_different_hours() -> None:
     edt = datetime(2025, 11, 2, 5, 15, tzinfo=UTC)  # 01:15 EDT
     est = datetime(2025, 11, 2, 6, 15, tzinfo=UTC)  # 01:15 EST
     assert align_bucket_start(edt, "1h") != align_bucket_start(est, "1h")
-    assert _duckdb_bucket(edt, "1h") != _duckdb_bucket(est, "1h")
 
 
 @pytest.mark.parametrize(

@@ -15,11 +15,13 @@ def _tick(symbol: str, ts: datetime, price: float) -> Tick:
         symbol=symbol,
         timestamp=ts,
         price=price,
-        volume=100,
+        el_volume=100,
+        el_ticks=200,
+        el_upticks=100,
+        el_downticks=100,
+        el_open_interest=0,
         bid=None,
         ask=None,
-        tick_count=1,
-        source="tradestation_el",
     )
 
 
@@ -31,9 +33,11 @@ def _bar(symbol: str, bucket: datetime, close: float) -> Bar:
         high=close,
         low=close,
         close=close,
-        volume=100,
-        tick_count=1,
-        source="tradestation_el",
+        el_volume=100,
+        el_ticks=200,
+        el_upticks=100,
+        el_downticks=100,
+        el_open_interest=0,
     )
 
 

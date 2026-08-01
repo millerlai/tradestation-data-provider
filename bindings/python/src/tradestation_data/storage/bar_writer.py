@@ -28,13 +28,22 @@ BAR_SCHEMA: pa.Schema = pa.schema(
             pa.timestamp("us", tz="America/New_York"),
             nullable=False,
         ),
+        # Prices are the only floating-point values here.
         pa.field("open", pa.float64(), nullable=False),
         pa.field("high", pa.float64(), nullable=False),
         pa.field("low", pa.float64(), nullable=False),
         pa.field("close", pa.float64(), nullable=False),
-        pa.field("volume", pa.int64(), nullable=False),
-        pa.field("tick_count", pa.int32(), nullable=False),
-        pa.field("source", pa.string(), nullable=False),
+        # EasyLanguage's reserved words, verbatim and integral. The el_
+        # prefix is part of the contract, not decoration: on an intraday bar
+        # `el_volume` is up-tick share volume alone and `el_ticks` is the
+        # total, and a column called plain `volume` invites exactly the
+        # misreading that cost this repo a systematically halved volume
+        # column. See contract/semantics.md §3.4.
+        pa.field("el_volume", pa.int64(), nullable=False),
+        pa.field("el_ticks", pa.int64(), nullable=False),
+        pa.field("el_upticks", pa.int64(), nullable=False),
+        pa.field("el_downticks", pa.int64(), nullable=False),
+        pa.field("el_open_interest", pa.int64(), nullable=False),
     ]
 )
 
@@ -204,7 +213,15 @@ class BarWriter:
         """
         incoming = pl.from_arrow(_bars_to_table(bars))
         assert isinstance(incoming, pl.DataFrame)
-        frames = [pl.read_parquet(path), incoming] if path.exists() else [incoming]
+        frames = [incoming]
+        if path.exists():
+            # ParquetFile, not read_table: this path sits under
+            # timeframe=/symbol=, and read_table runs hive discovery on those
+            # and hands back two extra dictionary columns, which
+            # pl.concat(how="vertical") rejects as a width mismatch.
+            existing = pl.from_arrow(pq.ParquetFile(path).read())
+            assert isinstance(existing, pl.DataFrame)
+            frames = [existing, incoming]
         merged = (
             pl.concat(frames, how="vertical")
             .unique(subset=["bucket_start"], keep="last", maintain_order=True)
@@ -263,9 +280,11 @@ def _bars_to_table(bars: list[Bar]) -> pa.Table:
             "high": [b.high for b in bars],
             "low": [b.low for b in bars],
             "close": [b.close for b in bars],
-            "volume": [b.volume for b in bars],
-            "tick_count": [b.tick_count for b in bars],
-            "source": [b.source for b in bars],
+            "el_volume": [b.el_volume for b in bars],
+            "el_ticks": [b.el_ticks for b in bars],
+            "el_upticks": [b.el_upticks for b in bars],
+            "el_downticks": [b.el_downticks for b in bars],
+            "el_open_interest": [b.el_open_interest for b in bars],
         },
         schema=BAR_SCHEMA,
     )

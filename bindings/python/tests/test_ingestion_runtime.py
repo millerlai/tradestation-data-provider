@@ -10,7 +10,7 @@ import pytest
 import zmq
 import zmq.asyncio
 
-from tradestation_data.aggregation import BarAggregator, MarketSnapshot
+from tradestation_data.aggregation import MarketSnapshot
 from tradestation_data.runtime import IngestionRuntime
 from tradestation_data.sinks import SinkPipeline
 from tradestation_data.sinks.parquet import ParquetBarSink, ParquetTickSink
@@ -21,15 +21,56 @@ async def _publish(pub: zmq.asyncio.Socket, topic: str, payload: dict) -> None:
     await pub.send_multipart([topic.encode(), json.dumps(payload).encode()])
 
 
+def _tick_payload(ts: float, px: float) -> dict:
+    return {
+        "proto": 1,
+        "kind": "tick",
+        "ts": ts,
+        "px": px,
+        "el_volume": 100,
+        "el_ticks": 180,
+        "el_upticks": 100,
+        "el_downticks": 80,
+        "el_open_interest": 0,
+        "bid": None,
+        "ask": None,
+    }
+
+
+def _bar_payload(ts: float, ohlc: tuple[float, float, float, float], el_volume: int) -> dict:
+    """A proto-1 bar frame. `ts` is right-labelled — EL stamps the close."""
+    o, h, low, c = ohlc
+    return {
+        "proto": 1,
+        "kind": "bar",
+        "tf": "1m",
+        "ts": ts,
+        "o": o,
+        "h": h,
+        "l": low,
+        "c": c,
+        "el_volume": el_volume,
+        "el_ticks": el_volume * 2,
+        "el_upticks": el_volume,
+        "el_downticks": el_volume,
+        "el_open_interest": 0,
+    }
+
+
 @pytest.mark.asyncio
 async def test_runtime_pipes_ticks_to_snapshot_and_storage(
     zmq_inproc_bus,
     tmp_path: Path,
 ) -> None:
+    """Ticks reach the snapshot and the tick sink — and produce no bar.
+
+    A bar sink is wired up precisely so the absence is asserted rather than
+    assumed: nothing in this binding builds a bar from ticks, so a bars
+    partition appearing here would mean a derivation crept back in.
+    """
     ctx, pub, endpoint = zmq_inproc_bus
     provider = TradeStationELProvider(endpoint=endpoint, context=ctx)
     snap = MarketSnapshot()
-    agg = BarAggregator()
     pipeline = SinkPipeline(
         [
             ParquetTickSink(
@@ -47,7 +88,6 @@ async def test_runtime_pipes_ticks_to_snapshot_and_storage(
         provider=provider,
         symbols=["SPY"],
         snapshot=snap,
-        aggregator=agg,
         sinks=pipeline,
         on_bar=lambda b: observed_bars.append(b),
         heartbeat_interval=3600,
@@ -59,28 +99,22 @@ async def test_runtime_pipes_ticks_to_snapshot_and_storage(
 
     bucket1 = datetime(2026, 4, 18, 13, 30, 0, tzinfo=UTC).timestamp()
     bucket2 = datetime(2026, 4, 18, 13, 31, 0, tzinfo=UTC).timestamp()
-    await _publish(pub, "SPY", {"v": 1, "ts": bucket1 + 1, "px": 450.0, "vol": 100, "tc": 1})
-    await _publish(pub, "SPY", {"v": 1, "ts": bucket1 + 30, "px": 450.5, "vol": 100, "tc": 1})
-    # Crossing into next bucket closes the first bar
-    await _publish(pub, "SPY", {"v": 1, "ts": bucket2 + 1, "px": 451.0, "vol": 100, "tc": 1})
+    for ts, px in ((bucket1 + 1, 450.0), (bucket1 + 30, 450.5), (bucket2 + 1, 451.0)):
+        await _publish(pub, "SPY", _tick_payload(ts, px))
 
-    # Wait for the bar to emerge
     for _ in range(200):
-        if observed_bars:
+        state = snap.state_of("SPY")
+        if state is not None and state.last_tick is not None:
             break
         await asyncio.sleep(0.01)
 
-    assert len(observed_bars) >= 1
-    bar = observed_bars[0]
-    assert bar.symbol == "SPY"
-    assert bar.volume == 200
-    assert bar.close == pytest.approx(450.5)
-
-    # Snapshot sees it
+    # Snapshot sees the ticks; no bar was ever published, so it has none.
     state = snap.state_of("SPY")
     assert state is not None
     assert state.last_tick is not None
-    assert state.last_closed_bar is not None
+    assert state.last_tick.price == pytest.approx(451.0)
+    assert state.last_closed_bar is None
+    assert observed_bars == []
 
     runtime.stop()
     await asyncio.wait_for(task, timeout=2.0)
@@ -90,27 +124,23 @@ async def test_runtime_pipes_ticks_to_snapshot_and_storage(
     assert tick_file.exists()
     assert pq.read_table(tick_file).num_rows == 3
 
-    # Bar parquet written
-    bar_file = (
-        tmp_path / "bars" / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
-    )
-    assert bar_file.exists()
-    assert pq.read_table(bar_file).num_rows >= 1
+    # Nothing derived a bar from them.
+    assert not list((tmp_path / "bars").rglob("bars.parquet"))
 
 
 @pytest.mark.asyncio
-async def test_runtime_direct_bar_bypasses_aggregator(
+async def test_runtime_preserves_published_bar_ohlc(
     zmq_inproc_bus,
     tmp_path: Path,
 ) -> None:
-    """Bar events from EL_PublishTickEx land on the snapshot + bar_writer
-    directly without being re-ingested through the aggregator. We prove
-    it by checking OHLC is preserved (the aggregator would collapse
-    O=H=L=C to the close price if it were involved)."""
+    """Whole bars land on the snapshot and the bar sink unchanged.
+
+    Proven by checking OHLC survives: anything that rebuilt the bar from its
+    close price alone would collapse O=H=L=C onto the close.
+    """
     ctx, pub, endpoint = zmq_inproc_bus
     provider = TradeStationELProvider(endpoint=endpoint, context=ctx)
     snap = MarketSnapshot()
-    agg = BarAggregator()
     pipeline = SinkPipeline([ParquetBarSink(name="bars_parquet", root=tmp_path / "bars")])
 
     observed: list = []
@@ -118,7 +148,6 @@ async def test_runtime_direct_bar_bypasses_aggregator(
         provider=provider,
         symbols=["SPY"],
         snapshot=snap,
-        aggregator=agg,
         sinks=pipeline,
         on_bar=lambda b: observed.append(b),
         heartbeat_interval=3600,
@@ -129,24 +158,7 @@ async def test_runtime_direct_bar_bypasses_aggregator(
     await asyncio.sleep(0)
 
     ts_el = datetime(2026, 4, 20, 13, 30, 0, tzinfo=UTC).timestamp()
-    await _publish(
-        pub,
-        "SPY",
-        {
-            "v": 1,
-            "kind": "bar_1m",
-            "ts": ts_el + 0.5,
-            "ts_el": ts_el,
-            "o": 450.10,
-            "h": 450.75,
-            "l": 449.80,
-            "c": 450.40,
-            "vol": 12000,
-            "bid": 450.39,
-            "ask": 450.41,
-            "tc": 140,
-        },
-    )
+    await _publish(pub, "SPY", _bar_payload(ts_el + 0.5, (450.10, 450.75, 449.80, 450.40), 12000))
 
     # The bar is buffered (replace-last semantics); drain via stop().
     await asyncio.sleep(0.05)
@@ -155,12 +167,12 @@ async def test_runtime_direct_bar_bypasses_aggregator(
 
     assert len(observed) == 1
     bar = observed[0]
-    # OHLC preserved — proves aggregator was bypassed.
+    # OHLC preserved end to end: open/high/low are not the close.
     assert bar.open == pytest.approx(450.10)
     assert bar.high == pytest.approx(450.75)
     assert bar.low == pytest.approx(449.80)
     assert bar.close == pytest.approx(450.40)
-    assert bar.volume == 12000
+    assert bar.el_volume == 12000
     # ts 13:30:30 floors to 13:30, then steps back one interval: §2 labels a
     # bar by its left edge, while the wire stamps it at the close.
     assert bar.bucket_start == datetime(2026, 4, 20, 13, 29, 0, tzinfo=UTC)
@@ -171,7 +183,7 @@ async def test_runtime_direct_bar_bypasses_aggregator(
     assert state.last_closed_bar is not None
     assert state.last_closed_bar.high == pytest.approx(450.75)
 
-    # Counter advanced on the direct-bar path, not the aggregator path.
+    # Counter advanced on the direct-bar path.
     assert runtime._counters.bars_direct_in == 1
     assert runtime._counters.ticks_in == 0
 
@@ -197,7 +209,6 @@ async def test_runtime_replaces_intra_bar_updates_and_drops_stale_bars(
     ctx, pub, endpoint = zmq_inproc_bus
     provider = TradeStationELProvider(endpoint=endpoint, context=ctx)
     snap = MarketSnapshot()
-    agg = BarAggregator()
     pipeline = SinkPipeline([ParquetBarSink(name="bars_parquet", root=tmp_path / "bars")])
 
     observed: list = []
@@ -205,7 +216,6 @@ async def test_runtime_replaces_intra_bar_updates_and_drops_stale_bars(
         provider=provider,
         symbols=["SPY"],
         snapshot=snap,
-        aggregator=agg,
         sinks=pipeline,
         on_bar=lambda b: observed.append(b),
         heartbeat_interval=3600,
@@ -217,81 +227,13 @@ async def test_runtime_replaces_intra_bar_updates_and_drops_stale_bars(
 
     ts_el_1 = datetime(2026, 4, 20, 13, 30, 0, tzinfo=UTC).timestamp()
     # Three intra-bar refreshes for bucket 13:30 — close/high/volume grow.
-    await _publish(
-        pub,
-        "SPY",
-        {
-            "v": 1,
-            "kind": "bar_1m",
-            "ts": ts_el_1 + 5,
-            "ts_el": ts_el_1,
-            "o": 450.10,
-            "h": 450.20,
-            "l": 450.05,
-            "c": 450.15,
-            "vol": 3000,
-            "bid": 450.14,
-            "ask": 450.16,
-            "tc": 40,
-        },
-    )
-    await _publish(
-        pub,
-        "SPY",
-        {
-            "v": 1,
-            "kind": "bar_1m",
-            "ts": ts_el_1 + 30,
-            "ts_el": ts_el_1,
-            "o": 450.10,
-            "h": 450.50,
-            "l": 450.05,
-            "c": 450.45,
-            "vol": 8000,
-            "bid": 450.44,
-            "ask": 450.46,
-            "tc": 90,
-        },
-    )
-    await _publish(
-        pub,
-        "SPY",
-        {
-            "v": 1,
-            "kind": "bar_1m",
-            "ts": ts_el_1 + 55,
-            "ts_el": ts_el_1,
-            "o": 450.10,
-            "h": 450.75,
-            "l": 449.80,
-            "c": 450.40,
-            "vol": 12000,
-            "bid": 450.39,
-            "ask": 450.41,
-            "tc": 140,
-        },
-    )
+    await _publish(pub, "SPY", _bar_payload(ts_el_1 + 5, (450.10, 450.20, 450.05, 450.15), 3000))
+    await _publish(pub, "SPY", _bar_payload(ts_el_1 + 30, (450.10, 450.50, 450.05, 450.45), 8000))
+    await _publish(pub, "SPY", _bar_payload(ts_el_1 + 55, (450.10, 450.75, 449.80, 450.40), 12000))
     # Wire stamps the close, so these land on the 13:29 / 13:30 left edges.
     # New bucket 13:30 closes 13:29 and buffers itself.
     ts_el_2 = datetime(2026, 4, 20, 13, 31, 0, tzinfo=UTC).timestamp()
-    await _publish(
-        pub,
-        "SPY",
-        {
-            "v": 1,
-            "kind": "bar_1m",
-            "ts": ts_el_2 + 1,
-            "ts_el": ts_el_2,
-            "o": 450.40,
-            "h": 450.60,
-            "l": 450.30,
-            "c": 450.55,
-            "vol": 5000,
-            "bid": 450.54,
-            "ask": 450.56,
-            "tc": 70,
-        },
-    )
+    await _publish(pub, "SPY", _bar_payload(ts_el_2 + 1, (450.40, 450.60, 450.30, 450.55), 5000))
 
     for _ in range(200):
         if len(observed) >= 1 and runtime._counters.bars_direct_updated >= 2:
@@ -304,29 +246,12 @@ async def test_runtime_replaces_intra_bar_updates_and_drops_stale_bars(
     assert first.bucket_start == datetime(2026, 4, 20, 13, 29, 0, tzinfo=UTC)
     assert first.high == pytest.approx(450.75)
     assert first.close == pytest.approx(450.40)
-    assert first.volume == 12000
+    assert first.el_volume == 12000
     assert runtime._counters.bars_direct_in == 1
     assert runtime._counters.bars_direct_updated == 2
 
     # Now replay bucket 13:29 — it is stale (<= last_emitted) and must be dropped.
-    await _publish(
-        pub,
-        "SPY",
-        {
-            "v": 1,
-            "kind": "bar_1m",
-            "ts": ts_el_1 + 55,
-            "ts_el": ts_el_1,
-            "o": 450.10,
-            "h": 450.75,
-            "l": 449.80,
-            "c": 450.40,
-            "vol": 12000,
-            "bid": 450.39,
-            "ask": 450.41,
-            "tc": 140,
-        },
-    )
+    await _publish(pub, "SPY", _bar_payload(ts_el_1 + 55, (450.10, 450.75, 449.80, 450.40), 12000))
 
     for _ in range(200):
         if runtime._counters.bars_duplicate_dropped >= 1:
@@ -359,7 +284,6 @@ async def test_runtime_stops_cleanly_without_ticks(zmq_inproc_bus, tmp_path: Pat
         provider=provider,
         symbols=["SPY"],
         snapshot=MarketSnapshot(),
-        aggregator=BarAggregator(),
         heartbeat_interval=3600,
         flush_poll_interval=0.05,
         advance_interval=0.05,
@@ -393,7 +317,6 @@ def _make_runtime(**kwargs) -> IngestionRuntime:
         provider=_StubProvider(),
         symbols=["SPY"],
         snapshot=MarketSnapshot(),
-        aggregator=BarAggregator(),
         heartbeat_interval=3600,
         flush_poll_interval=3600,
         advance_interval=3600,
@@ -411,9 +334,11 @@ def _bar(symbol: str, ts: datetime, close: float = 450.0, timeframe: str = "1m")
         high=close + 0.2,
         low=close - 0.2,
         close=close,
-        volume=100,
-        tick_count=5,
-        source="test",
+        el_volume=100,
+        el_ticks=180,
+        el_upticks=100,
+        el_downticks=80,
+        el_open_interest=0,
         timeframe=timeframe,
     )
 
@@ -471,11 +396,13 @@ async def test_tick_sink_failure_logged(caplog) -> None:
         symbol="SPY",
         timestamp=datetime(2026, 4, 20, 13, 30, tzinfo=UTC),
         price=450.0,
-        volume=100,
+        el_volume=100,
+        el_ticks=180,
+        el_upticks=100,
+        el_downticks=80,
+        el_open_interest=0,
         bid=None,
         ask=None,
-        tick_count=1,
-        source="test",
     )
     with caplog.at_level(logging.ERROR):
         await runtime._handle_tick(tick)
@@ -585,7 +512,6 @@ async def test_run_logs_when_provider_close_raises(caplog) -> None:
         provider=_BadCloseProvider(),
         symbols=["SPY"],
         snapshot=MarketSnapshot(),
-        aggregator=BarAggregator(),
         heartbeat_interval=3600,
         flush_poll_interval=3600,
         advance_interval=3600,
@@ -603,29 +529,29 @@ async def test_run_logs_when_background_task_raises(caplog) -> None:
     """Covers lines 149-150: awaited task raises non-CancelledError → log."""
     import logging
 
-    class _KaboomAggregator(BarAggregator):
-        def __init__(self) -> None:
-            super().__init__()
-            self._blew_up = False
-
-        def advance_time(self, now):
-            # Raise once from _advance_loop so `await t` surfaces it.
-            # Subsequent calls (from _shutdown) must be benign.
-            if not self._blew_up:
-                self._blew_up = True
-                raise RuntimeError("advance-boom")
-            return []
-
     # advance_interval very short so _advance_loop raises before stop()
     runtime = IngestionRuntime(
         provider=_StubProvider(),
         symbols=["SPY"],
         snapshot=MarketSnapshot(),
-        aggregator=_KaboomAggregator(),
         heartbeat_interval=3600,
         flush_poll_interval=3600,
         advance_interval=0.01,
     )
+
+    # Blow up from inside _advance_loop once, then behave. The aggregator used
+    # to be what this test broke; the direct-bar sweep is the loop's only
+    # remaining work, so it is what stands in now.
+    blew_up = False
+
+    def _boom(now):
+        nonlocal blew_up
+        if not blew_up:
+            blew_up = True
+            raise RuntimeError("advance-boom")
+        return []
+
+    runtime._advance_direct_bars = _boom  # type: ignore[method-assign]
     task = asyncio.create_task(runtime.run())
     # Give advance_loop a moment to fire and explode
     await asyncio.sleep(0.05)
@@ -662,11 +588,13 @@ async def test_ingest_loop_returns_when_stop_set_mid_stream() -> None:
                     symbol="SPY",
                     timestamp=datetime(2026, 4, 20, 13, 30, tzinfo=UTC),
                     price=450.0,
-                    volume=1,
+                    el_volume=1,
+                    el_ticks=2,
+                    el_upticks=1,
+                    el_downticks=1,
+                    el_open_interest=0,
                     bid=None,
                     ask=None,
-                    tick_count=1,
-                    source="test",
                 )
                 if stop_event_ref:
                     stop_event_ref[0].set()
@@ -677,7 +605,6 @@ async def test_ingest_loop_returns_when_stop_set_mid_stream() -> None:
         provider=provider,
         symbols=["SPY"],
         snapshot=MarketSnapshot(),
-        aggregator=BarAggregator(),
         heartbeat_interval=3600,
         flush_poll_interval=3600,
         advance_interval=3600,
@@ -688,46 +615,36 @@ async def test_ingest_loop_returns_when_stop_set_mid_stream() -> None:
 
 
 @pytest.mark.asyncio
-async def test_advance_loop_emits_aggregator_and_direct_bars() -> None:
-    """Covers lines 227 and 229: advance_loop emits both kinds of closed bars."""
+async def test_advance_loop_closes_a_bar_whose_interval_has_elapsed() -> None:
+    """The wall-clock sweep is what stops a quiet symbol's last bar hanging.
 
-    class _FakeAggregator(BarAggregator):
-        def __init__(self) -> None:
-            super().__init__()
-            self._called = False
-
-        def advance_time(self, now):
-            if self._called:
-                return []
-            self._called = True
-            yield _bar("SPY", datetime(2026, 4, 20, 13, 30, tzinfo=UTC), close=451.0)
-
+    Without it a bar sits in the buffer until the next one for the same
+    (symbol, timeframe) arrives -- which for a symbol that stops trading is
+    never, so the final bar of the session would never reach a sink.
+    """
     runtime = IngestionRuntime(
         provider=_StubProvider(),
         symbols=["SPY"],
         snapshot=MarketSnapshot(),
-        aggregator=_FakeAggregator(),
         heartbeat_interval=3600,
         flush_poll_interval=3600,
         advance_interval=0.01,
     )
-    # Seed a direct bar that is past the grace window.
+    # Seed a direct bar whose interval plus grace is well past.
     old_ts = datetime.now(tz=UTC) - timedelta(minutes=2)
-    runtime._current_direct_bars["NVDA"] = _bar("NVDA", old_ts, close=200.0)
+    runtime._current_direct_bars[("NVDA", "1m")] = _bar("NVDA", old_ts, close=200.0)
 
     observed: list = []
     runtime._on_bar = lambda b: observed.append(b)
 
     task = asyncio.create_task(runtime._advance_loop())
     for _ in range(200):
-        if len(observed) >= 2:
+        if observed:
             break
         await asyncio.sleep(0.01)
     runtime._stop.set()
     await asyncio.wait_for(task, timeout=2.0)
-    symbols_emitted = {b.symbol for b in observed}
-    assert "SPY" in symbols_emitted
-    assert "NVDA" in symbols_emitted
+    assert [b.symbol for b in observed] == ["NVDA"]
 
 
 @pytest.mark.asyncio
@@ -750,7 +667,6 @@ async def test_flush_loop_logs_when_sink_flush_raises(caplog) -> None:
         provider=_StubProvider(),
         symbols=["SPY"],
         snapshot=MarketSnapshot(),
-        aggregator=BarAggregator(),
         sinks=SinkPipeline([_FlushBoomSink()]),
         heartbeat_interval=3600,
         flush_poll_interval=0.01,
@@ -771,7 +687,6 @@ async def test_heartbeat_loop_invokes_emit() -> None:
         provider=_StubProvider(),
         symbols=["SPY"],
         snapshot=MarketSnapshot(),
-        aggregator=BarAggregator(),
         heartbeat_interval=0.01,
         flush_poll_interval=3600,
         advance_interval=3600,

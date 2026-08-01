@@ -4,7 +4,7 @@
 
 C++ DLL，把 TradeStation EasyLanguage 的呼叫橋到 ZeroMQ PUB socket。Python 端（[`tradestation-data-provider`](../README.md)，本 repo 根目錄）透過 `tcp://127.0.0.1:5555` 訂閱，再把收到的事件交給可插拔的 sink pipeline。
 
-這個子目錄是整個系統的**發布端**。當前 ABI 是 **DLL version 8**。
+這個子目錄是整個系統的**發布端**。當前 ABI 是 **DLL version 1**，承載 wire `proto` 1。兩者都只有一個版本 —— 見 [`../contract/wire.md`](../contract/wire.md)。
 
 ## Wire format
 
@@ -17,18 +17,24 @@ C++ DLL，把 TradeStation EasyLanguage 的呼叫橋到 ZeroMQ PUB socket。Pyth
 
 ```jsonc
 // Tick (EL_PublishTick) — 單筆成交
-{ "v": 1, "kind": "tick", "ts": 1747700000.123, "ts_utc": 1747700000.0,
-  "ts_str": "2026-04/18-13:30:45",
-  "px": 450.0, "vol": 100, "bid": 449.99, "ask": 450.01, "tc": 1 }
+{ "proto": 1, "kind": "tick", "seq": 1, "sid": 1784998823554057,
+  "ts": 1747700000.123, "ts_str": "2026-04/18-13:30:45",
+  "px": 450.0,
+  "el_volume": 300, "el_ticks": 812, "el_upticks": 300,
+  "el_downticks": 512, "el_open_interest": 0,
+  "bid": 449.99, "ask": 450.01 }
 
-// Bar (EL_PublishTickEx) — 已成形的 1 分鐘 OHLC
-{ "v": 1, "kind": "bar_1m", "ts": 1747700060.0, "ts_utc": 1747700060.0,
-  "ts_str": "2026-04/18-13:31:00",
+// Bar (EL_PublishBar) — 已成形的 OHLC bar，任意間隔
+{ "proto": 1, "kind": "bar", "tf": "1m", "seq": 3, "sid": 1784998823554057,
+  "ts": 1747700060.0, "ts_str": "2026-04/18-13:31:00",
   "o": 450.1, "h": 450.75, "l": 449.8, "c": 450.4,
-  "vol": 12000, "bid": 450.39, "ask": 450.41, "tc": 140 }
+  "el_volume": 6100, "el_ticks": 12000, "el_upticks": 6100,
+  "el_downticks": 5900, "el_open_interest": 0 }
 ```
 
-`ts` 是 DLL 收到時刻的 wall clock（UTC epoch）；`ts_utc` 是 EL 字串透過 `std::chrono::zoned_time`（"America/New_York" zone）轉成 UTC；`ts_str` 是 EL 原始 `yyyy-MM/dd-HH:mm:ss` 24 小時字串，原文 pass-through。Subscriber 對 bar 的 `bucket_start` **以 `ts_str` 為準**。規範見 [`../contract/semantics.md`](../contract/semantics.md) §1–2 及 [`../contract/v1/envelope.md`](../contract/v1/envelope.md)。
+**五個 `el_*` 欄位是 EasyLanguage reserved word 的原文轉送。** 這層 ABI 不做選擇也不做換算 —— 特別是 `Volume` 與 `Ticks` 在 intraday 圖與 daily 圖上意義相反，先前在這裡替使用者「調和」它們，正是讓數字變得無法事後稽核的原因。對照表見 [`../contract/semantics.md`](../contract/semantics.md) §3.4。
+
+`ts` 是 DLL 收到時刻的 wall clock（UTC epoch），只用於量測延遲；`ts_str` 是 EL 原始 `yyyy-MM/dd-HH:mm:ss` 24 小時字串，原文 pass-through，subscriber 對 bar 的 `bucket_start` **以它為準**。**DLL 不再解析 `ts_str`，因此也不再驗證它** —— 無法解析的字串會原樣送出，在 subscriber 端才失敗。Bar 不帶 `bid`/`ask`：即時報價描述的是呼叫當下，不是那根 bar。規範見 [`../contract/wire.md`](../contract/wire.md) 與 [`../contract/semantics.md`](../contract/semantics.md) §1–2。
 
 ## 要求
 
@@ -216,33 +222,59 @@ cmake --install build/x86-release --prefix build/x86-release/stage
 
 ## C ABI
 
-DLL 版本 `EL_DllVersion() == 8`。return codes 見 [`../contract/error_codes.md`](../contract/error_codes.md)，ABI × wire 版本對應見 [`../contract/compat.md`](../contract/compat.md)。
+DLL 版本 `EL_DllVersion() == 1`。return codes 見 [`../contract/error_codes.md`](../contract/error_codes.md)。
 
 ```c
 int __stdcall EL_DllVersion(void);
-int __stdcall EL_Init(const char* zmq_endpoint);
+int __stdcall EL_Init3(const char* zmq_endpoint);
 
-// 單筆成交 — Python 端會把 tick 聚合成 1 分鐘 bar。
+// 單筆成交。量值是 EasyLanguage reserved word 的原文。
+// 型別是 double，因為 DefineDLLFunc 沒有 64 位元整數型別；
+// DLL 端 cast 成 long long 後以 %lld 寫出。
 int __stdcall EL_PublishTick(
     const char* symbol,
     const char* el_timestamp,   // "yyyy-MM/dd-HH:mm:ss" 24h，America/New_York；可為 NULL/""
-    double price, double volume,
-    double bid, double ask, double tick_count);
+    double price,
+    double volume, double ticks, double upticks, double downticks,
+    double open_interest,
+    double inside_bid, double inside_ask);
 
-// 已成形 OHLC bar — 跳過 Python 的 tick aggregator。
-// EL indicator 用 bar-close（或 "update every tick"）模式時使用。
-int __stdcall EL_PublishTickEx(
+// 已成形的 OHLC bar，間隔由圖表決定。
+// bar_type / bar_interval 就是 EasyLanguage 的 BarType 與 BarInterval；
+// DLL 把它們對應成 `tf` 字串，對應不出來的間隔**回 -5 且不送出**，
+// 而不是塞進某個預設值。
+int __stdcall EL_PublishBar(
     const char* symbol,
     const char* el_timestamp,
+    int bar_type, int bar_interval,
     double bar_open, double bar_high, double bar_low, double bar_close,
-    double volume, double bid, double ask, double tick_count);
+    double volume, double ticks, double upticks, double downticks,
+    double open_interest);
 
 int __stdcall EL_Shutdown(void);
+
+// 墓碑 —— 前一代協定的 init 匯出。兩者都回 -6 且不初始化任何東西。見下節。
+int __stdcall EL_Init(const char* zmq_endpoint);
+int __stdcall EL_Init2(const char* zmq_endpoint, int publisher_version);
 ```
 
-Return codes：`0` 成功、`1` 已初始化（重複呼叫 idempotent）、`-1` 未初始化、`-2` ZMQ send 失敗、`-3` init 失敗（bind / socket create）、`-4` 參數無效。
+Return codes：`0` 成功、`1` 已初始化（重複呼叫 idempotent）、`-1` 未初始化、`-2` ZMQ send 失敗、`-3` init 失敗（bind / socket create）、`-4` 參數無效、`-5` 無法對應的 bar 間隔、`-6` ABI 不符（墓碑）。
 
-DLL 在第一次成功 `EL_Init` 時，**把自己 pin 在 host process 的位址空間裡**（Windows `GetModuleHandleExW` 加 `GET_MODULE_HANDLE_EX_FLAG_PIN`）。這是為了避免 TradeStation 呼叫 `FreeLibrary` 觸發 C runtime 的 static destructor — 在 loader lock 下 `zmq_ctx_term()` join ZMQ I/O thread 會 deadlock TradeStation。`EL_Shutdown()` 僅供 standalone test harness 使用。
+### 為什麼要留墓碑
+
+`EL_PublishTick` 與 `EL_PublishBar` **名字沒改，簽章改了**。兩者都是 `__stdcall`（callee 清堆疊），所以參數個數不符的呼叫會**損毀堆疊** —— 不是回傳錯誤，是 TradeStation 崩潰或隨機行為。
+
+改掉 init 的名字，就讓那條路徑走不到。indicator 裡每一次 publish 都由 `InitDone` 守衛，而 `InitRC < 0` 時 `InitDone` 永遠是 False，所以 **init 是唯一的攔截點**：
+
+| 部署組合 | 攔截點 | 結果 |
+| --- | --- | --- |
+| 新 `.ELD` + 舊 DLL | 舊 DLL 沒有 `EL_Init3` 匯出 | `DefineDLLFunc` 在 Verify 階段就失敗，錯誤訊息指名道姓 |
+| 舊 `.ELD` + 新 DLL | 墓碑回 `-6` | Print Log 出現 `EL_Init FAILED rc=-6`，一次都不會 publish |
+| 新 `.ELD` + 未來某版 DLL | indicator 端的 `EL_DllVersion()` latch | `EL_DllVersion` 沒有參數，呼叫永遠安全；回值 `<> 1` 就 latch 停止發布 |
+
+墓碑各只有三行，而且**必須留在 `TS2Python.def` 裡**。把匯出刪掉一樣安全，但 operator 拿到的會是一個 symbol 解析失敗，而不是一句看得懂、能照著做的話。
+
+DLL 在第一次成功 `EL_Init3` 時，**把自己 pin 在 host process 的位址空間裡**（Windows `GetModuleHandleExW` 加 `GET_MODULE_HANDLE_EX_FLAG_PIN`）。這是為了避免 TradeStation 呼叫 `FreeLibrary` 觸發 C runtime 的 static destructor — 在 loader lock 下 `zmq_ctx_term()` join ZMQ I/O thread 會 deadlock TradeStation。`EL_Shutdown()` 僅供 standalone test harness 使用。
 
 ## 獨立測試
 
@@ -256,4 +288,6 @@ python contract/tools/record.py --latency
 cpp\Release\TS2Python_TestHarness.exe --mode stress --rate 10000 --seconds 10
 ```
 
-Harness 退 `0` 表示沒掉訊。Subscriber 端應看到 ~100 000 筆 `SPY` topic 訊息，以及 p50 / p95 / p99 延遲統計。其他 harness 模式：`--mode smoke`（5 筆 ticks 跨 3 個 topic + 1 個 `EL_PublishTickEx` bar）、`--mode multithread --threads 8 --per-thread 5000`。
+Harness 退 `0` 表示沒掉訊。Subscriber 端應看到 ~100 000 筆 `SPY` topic 訊息，以及 p50 / p95 / p99 延遲統計。其他 harness 模式：`--mode smoke`（3 個 topic + 1 根 bar）、`--mode noquote`、`--mode bars`（每個非 1m 的 `tf`，外加 `-5` 拒收路徑）、`--mode session`、`--mode multithread --threads 8 --per-thread 5000`。各 fixture 對應的 mode 與 frame 數列在 [`../contract/fixtures/README.md`](../contract/fixtures/README.md)。
+
+**每次啟動都會先驗 ABI**：在任何 init 之前斷言 `EL_DllVersion() == 1`、且兩個墓碑都回 `-6`。只有想到才會跑的檢查，不算檢查。

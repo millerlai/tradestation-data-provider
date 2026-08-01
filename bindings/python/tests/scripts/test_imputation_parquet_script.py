@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import imputation_parquet as ip
 import pyarrow as pa
@@ -9,41 +10,56 @@ import pyarrow.parquet as pq
 import pytest
 import verify_parquet as vp
 
+_ET = ZoneInfo("America/New_York")
+
+# The shape BarWriter puts on disk. The script reads real partitions, so the
+# fixture has to be one — including bucket_start_et, which the output schema
+# carries through untouched.
 BAR_SCHEMA = pa.schema(
     [
         pa.field("bucket_start", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("bucket_start_et", pa.timestamp("us", tz="America/New_York"), nullable=False),
         pa.field("open", pa.float64(), nullable=False),
         pa.field("high", pa.float64(), nullable=False),
         pa.field("low", pa.float64(), nullable=False),
         pa.field("close", pa.float64(), nullable=False),
-        pa.field("volume", pa.int64(), nullable=False),
-        pa.field("tick_count", pa.int32(), nullable=False),
-        pa.field("source", pa.string(), nullable=False),
+        pa.field("el_volume", pa.int64(), nullable=False),
+        pa.field("el_ticks", pa.int64(), nullable=False),
+        pa.field("el_upticks", pa.int64(), nullable=False),
+        pa.field("el_downticks", pa.int64(), nullable=False),
+        pa.field("el_open_interest", pa.int64(), nullable=False),
     ]
 )
 
 
-def _row(ts, close, open_=None, volume=1000):
+def _row(ts, close, open_=None, el_volume=1000):
     return {
         "bucket_start": ts,
+        "bucket_start_et": ts.astimezone(_ET),
         "open": open_ if open_ is not None else close,
         "high": close,
         "low": close,
         "close": close,
-        "volume": volume,
-        "tick_count": 5,
-        "source": "live",
+        "el_volume": el_volume,
+        "el_ticks": el_volume * 2,
+        "el_upticks": el_volume,
+        "el_downticks": el_volume,
+        "el_open_interest": 0,
     }
 
 
 def test_build_imputed_row_structure():
     ts = datetime(2026, 4, 18, 13, 31, tzinfo=UTC)
-    row = ip._build_imputed_row(ts, 123.45, "imputed_ffill")
+    row = ip._build_imputed_row(ts, 123.45)
     assert row["open"] == row["high"] == row["low"] == row["close"] == 123.45
-    assert row["volume"] == 0
-    assert row["tick_count"] == 0
-    assert row["source"] == "imputed_ffill"
-    assert "vwap" not in row
+    # No trading was observed, so none is recorded. Carrying a neighbour's
+    # volume forward would invent activity on top of inventing a price.
+    for q in ("el_volume", "el_ticks", "el_upticks", "el_downticks", "el_open_interest"):
+        assert row[q] == 0, q
+    assert row["imputed"] is True
+    # Provenance is a column of its own now, not a string smuggled into a
+    # field that also names real publishers.
+    assert "source" not in row
 
 
 def test_impute_value_ffill_uses_prev():
@@ -116,14 +132,37 @@ def test_impute_day_fills_one_gap(tmp_path):
     tz = vp._resolve_tz("UTC")
     expected = [t0 + timedelta(minutes=i) for i in range(4)]
 
-    before, added, _log, new_table = ip.impute_day(path, expected, "ffill", "imputed_ffill", 60, tz)
+    before, added, _log, new_table = ip.impute_day(path, expected, "ffill", 60, tz)
     assert before == 3
     assert added == 1
     assert new_table is not None
     assert new_table.num_rows == 4
 
-    sources = new_table.column("source").to_pylist()
-    assert sources.count("imputed_ffill") == 1
+    # Which rows came off the wire is a boolean column, and the three that
+    # did are flagged False rather than left null — "real" versus "invented"
+    # is never a missing-value question.
+    assert new_table.column("imputed").to_pylist() == [False, False, True, False]
+
+
+def test_impute_day_does_not_touch_the_input_file(tmp_path):
+    """Imputation is non-destructive: the source partition is only read.
+
+    Rewriting in place is unrecoverable if a run is interrupted, and nothing
+    on disk would record which rows had been invented.
+    """
+    path = tmp_path / "bars.parquet"
+    t0 = datetime(2026, 4, 18, 13, 31, tzinfo=UTC)
+    _write_bars(path, [_row(t0, 100.0), _row(t0 + timedelta(minutes=2), 102.0)])
+    before_bytes = path.read_bytes()
+
+    tz = vp._resolve_tz("UTC")
+    expected = [t0 + timedelta(minutes=i) for i in range(3)]
+    _before, added, _log, new_table = ip.impute_day(path, expected, "ffill", 60, tz)
+
+    assert added == 1
+    assert new_table is not None
+    assert path.read_bytes() == before_bytes
+    assert "imputed" not in pq.read_table(path).column_names
 
 
 def test_impute_day_no_gap_returns_none(tmp_path):
@@ -134,7 +173,7 @@ def test_impute_day_no_gap_returns_none(tmp_path):
 
     tz = vp._resolve_tz("UTC")
     expected = [t0 + timedelta(minutes=i) for i in range(3)]
-    before, added, log, new_table = ip.impute_day(path, expected, "ffill", "imputed_ffill", 60, tz)
+    before, added, log, new_table = ip.impute_day(path, expected, "ffill", 60, tz)
     assert before == 3
     assert added == 0
     assert new_table is None

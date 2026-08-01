@@ -8,7 +8,9 @@
 
 > 📖 [English README](README.md)
 
-純 Python 資料管線：訂閱 TradeStation EasyLanguage 訊號（透過 C++/ZeroMQ bridge），把 tick 與 1 分鐘 bar 派發給**可插拔的輸出 sink** — Parquet、in-memory buffer、使用者 callback，或任何你自己實作的 sink。
+純 Python 資料管線：訂閱 TradeStation EasyLanguage 訊號（透過 C++/ZeroMQ bridge），把 tick 與整根 OHLC bar 派發給**可插拔的輸出 sink** — Parquet、in-memory buffer、使用者 callback，或任何你自己實作的 sink。
+
+**它只做接收、標記時間、寫入這三件事。** 不聚合、不重取樣、不回補、不快取。TradeStation 沒發布過的 bar，在這裡就是不存在 —— 去問它會拿到 0 列，而不是一份看起來很合理的替代品。
 
 這是 [`contract/`](../../contract/) 所定義 wire protocol 的 **reference binding** —— 該 repo 支援的多語言 subscriber 之一。發布資料的 EasyLanguage indicator 與 C++ DLL 分別在 [`EL/`](../../EL/) 與 [`cpp/`](../../cpp/)。
 
@@ -19,9 +21,10 @@
 ## 為什麼用它
 
 - **能自訂輸出格式**：在 `config/sinks.yaml` 宣告一個 sink、指向任何可 `import` 的 `module:attr`，runtime 就會把每筆 tick / bar 派給它。不必 fork 本專案。
-- **預設行為與舊版相容**：內建 `ParquetBarSink` / `ParquetTickSink` 維持原本的 Hive-partitioned schema。
+- **開箱即用的 Hive-partitioned Parquet**：內建 `ParquetBarSink` / `ParquetTickSink`，依 timeframe / symbol / 日期各一層目錄。
 - **能在自己程式裡接收資料**：`CallbackSink` 讓你註冊 Python function，依 symbol 或全收，從 ingest loop 同步派發。
-- **完整離線工具**：[`scripts/`](scripts/) 下有聚合、驗證、稽核、去重、缺值補全等 Parquet 後處理腳本。
+- **從圖表到欄位之間沒有任何加工**：五個量值欄位是 EasyLanguage reserved word 的原文，以 `el_*` 命名，所以你讀到的數字可以直接跟終端機對帳。
+- **Operator 工具**：[`scripts/`](scripts/) 下有完整性驗證、去重、傾印、缺值補全等腳本 —— 全部都是讀取 store，不會改寫它。
 
 ## 架構
 
@@ -31,7 +34,6 @@ flowchart TD
     Provider["TradeStationELProvider<br/>(asyncio ZMQ SUB)"]
     Runtime["IngestionRuntime<br/>(intra-bar buffer · dedupe)"]
     Snapshot["MarketSnapshot"]
-    Aggregator["BarAggregator"]
     Pipeline[["SinkPipeline · fan-out"]]
     OnBar(["optional on_bar callback"])
 
@@ -43,10 +45,8 @@ flowchart TD
 
     DLL -- "ZMQ PUB" --> Provider
     Provider -- "Tick" --> Runtime
-    Provider -- "Bar (EL_PublishTickEx)" --> Runtime
+    Provider -- "Bar (EL_PublishBar)" --> Runtime
     Runtime -- "Tick" --> Snapshot
-    Runtime -- "Tick" --> Aggregator
-    Aggregator -- "closed Bar" --> Runtime
     Runtime -- "closed Bar" --> Snapshot
     Runtime -- "Tick / closed Bar" --> Pipeline
     Runtime --> OnBar
@@ -83,12 +83,13 @@ uv add "git+https://github.com/millerlai/tradestation-data-provider.git#subdirec
 poetry add "git+https://github.com/millerlai/tradestation-data-provider.git#subdirectory=bindings/python"
 
 # 釘特定 tag、branch 或 commit
-pip install "git+https://github.com/millerlai/tradestation-data-provider.git@v0.2.0#subdirectory=bindings/python"
+pip install "git+https://github.com/millerlai/tradestation-data-provider.git@v0.3.0#subdirectory=bindings/python"
 ```
 
 > 少了 fragment，pip 會以 *"neither 'setup.py' nor 'pyproject.toml' found"* 失敗。
-> 不加 fragment 的 `...git@v0.1.0` 確實裝得起來 —— 但那只是因為該 tag 早於這次搬移，
-> 等於靜默安裝一個沒有 wire v2/v3 支援的舊套件。
+> 不加 fragment 的 `...git@v0.1.0` 確實裝得起來 —— 但那只是因為該 tag 早於搬進
+> `bindings/python/` 這次變動，等於靜默安裝一個早於現行協定的舊套件，
+> 它會拒收這顆 DLL 送出的每一個 frame。
 
 ### 在本專案內開發
 
@@ -104,7 +105,7 @@ uv run pytest                 # 完整測試套件，數秒
 
 ```python
 import asyncio
-from tradestation_data.aggregation import BarAggregator, MarketSnapshot
+from tradestation_data.aggregation import MarketSnapshot
 from tradestation_data.wire.el_subscriber import TradeStationELProvider
 from tradestation_data.runtime.ingestion import IngestionRuntime
 from tradestation_data.sinks import SinkPipeline
@@ -115,7 +116,6 @@ async def main() -> None:
         provider=TradeStationELProvider(endpoint="tcp://127.0.0.1:5555"),
         symbols=["SPY", "QQQ"],
         snapshot=MarketSnapshot(),
-        aggregator=BarAggregator(),
         sinks=SinkPipeline([
             ParquetBarSink(name="bars",  root="data/bars"),
             ParquetTickSink(name="ticks", root="data/ticks"),
@@ -141,7 +141,7 @@ tradestation-data-ingest --sinks-config config/sinks.yaml
 | --- | --- | --- | --- |
 | 01 | [`01_print_events.py`](examples/01_print_events.py) | 需要 | 整個接收迴圈，約 20 行 |
 | 02 | [`02_custom_sink.py`](examples/02_custom_sink.py) | 需要 | 自己寫一個 sink；完整 runtime |
-| 03 | [`03_read_history.py`](examples/03_read_history.py) | **不用** | 儲存分層；一份 tick，多種 timeframe |
+| 03 | [`03_read_history.py`](examples/03_read_history.py) | **不用** | 寫出一個小的 Parquet store 再讀回來 —— 資料由它自己產生 |
 | 04 | [`04_replay_fixtures.py`](examples/04_replay_fixtures.py) | **不用** | 用錄下來的 frame 餵真正的 binding |
 
 從 `bindings/python/` 執行：
@@ -186,7 +186,7 @@ in-process ZeroMQ socket 重播，讓你的 sink 走的是與正式環境完全�
 
 | Sink | 用途 |
 | --- | --- |
-| `tradestation_data.sinks.parquet:ParquetBarSink` | 寫 Hive-partitioned 1m bar Parquet（預設啟用）|
+| `tradestation_data.sinks.parquet:ParquetBarSink` | 寫 Hive-partitioned bar Parquet，依 bar 自己的 timeframe 分區（預設啟用）|
 | `tradestation_data.sinks.parquet:ParquetTickSink` | 寫 Hive-partitioned tick Parquet（預設啟用）|
 | `tradestation_data.sinks.memory:InMemorySink` | 在記憶體緩衝（測試 / notebook）；不適合長時間運行 |
 | `tradestation_data.sinks.callback:CallbackSink` | 派發給動態註冊的 Python callback，可依 symbol 或全收 |
@@ -272,45 +272,50 @@ Runtime 負責收集資料；[`scripts/`](scripts/) 下的腳本針對產出的 
 
 ```powershell
 python scripts/run_ingestion.py                                  # 啟動即時 ingestion
-python scripts/aggregate_parquet.py --symbol all --timeframe 5m `
-  --input data/bars/timeframe=1m --output data/bars              # 1m → Nm 聚合
 python scripts/verify_parquet.py --start-date 2026-03-20 --end-date 2026-04-17
-python scripts/imputation_parquet.py --start-date 2026-03-20 --end-date 2026-04-17 --dry-run
-python scripts/audit_bar_cache.py                                # 週稽核
-python scripts/clear_bar_cache.py                                # 清 Tier-3 cache
+python scripts/imputation_parquet.py --start-date 2026-03-20 --end-date 2026-04-17 `
+  --output data/imputed --dry-run
 python scripts/dedupe_bars.py                                    # 去重複 bar
 python scripts/dump_parquet.py                                   # 看 parquet 內容
 python ../../contract/tools/record.py                            # 原始 ZMQ wire 檢視
 ```
 
-## 範例資料
+**這些腳本都不會改寫收集到的 store。** `imputation_parquet.py` 的 `--output` 是必填，
+它寫到另一個 root、用自己的 schema —— 多一欄 `imputed: bool`，所以補出來的 bar 永遠
+不可能被當成收到的 bar；`HistoryStore` 也會直接拒讀那個目錄，而不是把它當原始資料。
 
-`data/` 在 `.gitignore` 內，但仍以 `git add -f` 收錄了 8 個小 Parquet 檔（合計約 89 KB），讓離線工具與 `HistoryStore` 不需要 TradeStation、DLL 或即時資料流就能試跑。你自己採集的資料仍會落在被忽略的路徑，只有這 8 個被追蹤。
+關於 `verify_parquet.py`，有兩件事要先知道：
 
-| 路徑 | 筆數 | 涵蓋範圍 |
-|---|---|---|
-| `data/bars/timeframe=1d/symbol=SPY/bars.parquet` | 499 | 2024-07-29 … 2026-07-24，單一扁平檔（`SINGLE_FILE_TIMEFRAMES`，沒有 `date=` 層）|
-| `data/bars/timeframe=1m/symbol=SPY/date=2026-07-23/` | 389 | 僅 RTH |
-| `data/bars/timeframe=1m/symbol=SPY/date=2026-07-24/` | 390 | 僅 RTH，09:30…15:59 |
-| `data/bars/timeframe=5m/symbol=SPY/date=2026-07-20…24/` | 各 166–168 | 含盤前盤後，06:00…19:55 ET |
+- **它是 operator 的完整性檢查，不是對資料的保證。** 它回答的是「這個 session 該產出的
+  bar 有沒有全部到齊」—— 那是關於採集過程的問題。它不寫入任何東西，它報告的內容也不會
+  改變磁碟上的資料。
+- **它不處理半日市。** session 區間來自 `--start-time` / `--end-time`，且套用到範圍內
+  每一天，所以提早收盤的日子（感恩節隔天、聖誕夜）每次都會被報成 INCOMPLETE。
+  `--holidays` 只能整天略過，沒有辦法縮短某一天。那些日期請另外傳對應的 `--end-time`，
+  或把 INCOMPLETE 理解為預期內。
+
+## 沒有即時資料時怎麼試跑
+
+`data/` 在 `.gitignore` 內，而且裡面沒有任何被追蹤的檔案。四支範例中有兩支完全不需要 publisher：
 
 ```powershell
-python scripts/dump_parquet.py data/bars/timeframe=1m/symbol=SPY/date=2026-07-24/bars.parquet --head 3
-python scripts/dump_parquet.py data/bars/timeframe=1d/symbol=SPY/bars.parquet --tail 5 --tz native
+python examples/03_read_history.py    # 寫出一個小 store，再讀回來
+python examples/04_replay_fixtures.py # 把 contract/fixtures/ 的 frame 餵給真正的 binding
 ```
 
-把它們當成參考輸出之前，有三件事要先知道：
+`03` 會自己在 `data-example/` 下產生 bar 與 tick（該目錄若已有東西它會拒絕動手），所以它檢視的那份 store 是你可以重新產生、也可以隨意修改的。接著就能傾印它寫出來的內容：
 
-- **`1m/date=2026-07-23` 是修復前的資料。** 它從 09:31 起、到 15:59 止 —— 右標籤，採集於 `_parse_bar` 學會往回退一格（`contract/semantics.md` §2）之前。其餘檔案都是正確的左標籤。留著它當回歸樣本，別照抄它的形狀。
-- **1m 與 5m 不可直接比較。** 1m 那兩天只有 RTH，5m 那五天含盤前盤後，互相加總等於混用兩種 session template。另外 `5m/date=2026-07-20` 缺第一根（從 06:05 開始），`date=2026-07-24` 少兩根。
-- **不要拿 intraday 加總去核對 `1d` 的 volume。** 兩者是不同口徑，本來就不會相等 —— 見 `contract/semantics.md` §3.4。在這批資料上，即使把盤前盤後全部加進來，日線總量仍約為 intraday 加總的 3 倍，該節已將這個落差標記為尚未解釋。
+```powershell
+python scripts/dump_parquet.py data-example/bars/timeframe=1m/symbol=SPY/date=<它印出來的日期>/bars.parquet --head 3
+```
+
+**不要拿 intraday 加總去核對 `1d` 的 bar。** 兩者是不同口徑，本來就不會相等 —— `contract/semantics.md` §3.4 列了四個原因。另外要注意：intraday bar 上的 `el_volume` **不是**總成交股數 —— EasyLanguage 的 `Volume` 與 `Ticks` 在 intraday 圖與 daily 圖上意義互換，而這正是每個量值欄位都帶 `el_` 前綴、而不是取一個會讓人自行假設的名字的原因。
 
 ## 專案結構
 
 ```
 bindings/python/                   # 本 binding；repo 根目錄在上兩層
 ├── pyproject.toml
-├── .python-version                # 3.12，與 CI matrix 對齊
 ├── LICENSE                        # 副本 —— 打包後端無法引用本目錄之上
 ├── config/
 │   ├── sinks.yaml                 # 可插拔 sink pipeline（值為 module:attr）
@@ -319,11 +324,10 @@ bindings/python/                   # 本 binding；repo 根目錄在上兩層
 ├── src/tradestation_data/
 │   ├── domain/                    # Bar / Tick —— wire 的值域
 │   ├── wire/                      # frame 解碼、缺漏偵測          [core]
-│   ├── aggregation/               # BarAggregator / MarketSnapshot [app]
-│   ├── storage/                   # BarWriter / TickWriter / HistoryStore / Resampler
+│   ├── aggregation/               # MarketSnapshot / session policy  [app]
+│   ├── storage/                   # BarWriter / TickWriter / HistoryStore
 │   ├── sinks/                     # Sink protocol、pipeline、registry、內建 sinks
-│   ├── runtime/                   # IngestionRuntime + CLI entry
-│   └── tools/                     # scripts 共用的 audit / clear cache helper
+│   └── runtime/                   # IngestionRuntime + CLI entry
 └── tests/
     └── conformance/               # 用 contract/fixtures/ 驗證本 binding
 ```
@@ -344,7 +348,7 @@ reference application。見 [`docs/architecture.md`](../../docs/architecture.md)
 - C++ DLL 見 [`cpp/README.zh-TW.md`](../../cpp/README.zh-TW.md)；本目錄只負責 Python binding。
 - 預設資料根目錄是 `<project-root>/data/`；可用 `--data-root` 覆寫（**僅在 `sinks.yaml` 缺檔時的 fallback 路徑生效**；正常情況以 YAML 內每個 sink 的 `root` 參數為準）。
 - 純 smoke test（不寫任何輸出）用 `--no-storage`，等於空 sink pipeline。
-- pytest 設定 `filterwarnings = ["error", "ignore::DeprecationWarning"]` — **新 warning 會讓 build 失敗**。修原因，不要放寬 filter。
+- pytest 設定 `filterwarnings = ["error", ...]` — **新 warning 會讓 build 失敗**。那三條例外是**針對特定訊息的窄 ignore**，只涵蓋 `tests/conftest.py` 仍不得不呼叫的 asyncio policy API（pytest-asyncio 1.3.0 在測試裡掌管 loop 建立，且沒有提供 `loop_factory` 掛點）。這裡原本放的是一條包山包海的 `ignore::DeprecationWarning`，它把同一個 deprecation 藏了好幾個月。請修原因，**永遠不要**把它放寬回整個 category。
 
 ## License
 

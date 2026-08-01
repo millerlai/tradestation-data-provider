@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tradestation-data-provider"
-version = "0.2.0"
+version = "0.3.0"
 description = "TradeStation EasyLanguage → Python data ingestion pipeline with pluggable output sinks (Parquet, CSV, in-process callbacks, ...)"
 requires-python = ">=3.12"
 readme = "README.md"
@@ -44,12 +44,9 @@ dependencies = [
     "polars>=1.0,<2",
     "pyarrow>=16.0,<25",
     "pyyaml>=6.0,<7",
-    "structlog>=24.0,<26",
     # Windows Python stdlib ships without IANA tz data; polars needs it
-    # when reading TIMESTAMPTZ columns from DuckDB / Arrow.
+    # when reading timezone-aware timestamp columns back out of Arrow.
     "tzdata>=2024.1 ; sys_platform == 'win32'",
-    "duckdb>=1.5.2,<2",
-    "pydantic>=2.13.2,<3",
 ]
 
 [project.optional-dependencies]

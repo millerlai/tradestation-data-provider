@@ -19,6 +19,17 @@ TradeStation Chart → TS2Python_Exporter.el → TS2Python.dll → ZMQ PUB → s
 
 ## Deploying
 
+> **The DLL and the `.ELD` are a matched pair — always install both.**
+> `EL_PublishTick` and `EL_PublishBar` kept their names across the protocol
+> rewrite but not their signatures, and under `__stdcall` a mismatched call
+> corrupts the stack rather than returning an error. Two guards make every
+> mismatched combination fail readably instead: this indicator binds
+> `EL_Init3`, which an older DLL does not export (Verify fails), and this DLL
+> keeps `EL_Init` / `EL_Init2` as tombstones returning `-6`, which stops an
+> older `.ELD` at init before it can publish. There is also an
+> `EL_DllVersion()` check after init. See
+> [`../contract/wire.md`](../contract/wire.md) for the full table.
+
 Install the DLL first, then the indicator — Verify needs the DLL to be in place
 already:
 
@@ -50,18 +61,33 @@ ready-made binaries. See [`../cpp/README.md`](../cpp/README.md) for the details.
 
 ### `LogPublish`
 
-Prints the raw EasyLanguage words next to the values actually put on the wire:
+Prints all five quantity words per publish call. Since they go on the wire
+verbatim, this line is also exactly what the subscriber receives:
 
 ```
-[TS2Python] tick 2026-07/24-15:59:00 bar_type=0.00 bar_interval=1.00 px=742.55
-            el_volume=13465 el_ticks=21152 wire_vol=21152 wire_tc=0
-            bid=742.54 ask=742.56 rc=0
+[TS2Python] bar  2026-07/24-15:59:00 bar_type=1.00 bar_interval=1.00
+            o=742.31 h=742.60 l=742.28 c=742.55
+            volume=13465 ticks=21152 upticks=13465 downticks=7687 openint=0
+            rc=0
 ```
 
-`el_volume` / `el_ticks` are what EL handed over; `wire_vol` / `wire_tc` are what
-went out after the intraday/daily mapping. Having both on one line is the point
-— that pair is what flips meaning between chart types, and it is how the mapping
-gets checked on a chart type nobody has measured yet.
+That correspondence is the point: a stored partition can be checked against its
+source line by line, with no mapping step in between to reason about. `volume`
+and `ticks` sit side by side because that is the pair whose meaning flips
+between chart types.
+
+On a **refused** chart the publish never runs, so a third line shape covers it:
+
+```
+[TS2Python] refused SPY bar_type=0.00 bar_interval=100.00
+            date=1260724.00 time=1600.00
+            volume=753328 ticks=760951 upticks=753328 downticks=7623 openint=0
+```
+
+Only the EasyLanguage words appear — `rc` does not exist unless the publish
+ran. That is the half that matters when measuring a chart type for the first
+time, and without it the switch printed nothing at all on exactly the charts it
+is documented for.
 
 Leave it off in normal use. On a tick chart, or on any chart in "update every
 tick" mode, it prints once per print.
@@ -77,44 +103,60 @@ tick" mode, it prints once per print.
 | Weekly / monthly / P&F / any other unsupported interval | **idle**; the DLL rejects it with `-5` and the reason is printed once |
 | Second-based charts | **idle**; the indicator detects it itself, stops sending, and prints the reason once |
 
-### Why `vol` does not come from EasyLanguage's `Volume`
+### Why all five quantity words go out, and none is chosen for you
 
-TradeStation defines these two reserved words with **opposite meanings** on
-intraday and daily charts (stock symbols):
+TradeStation defines these reserved words with **opposite meanings** on intraday
+and daily charts (stock symbols):
 
 | | intraday | daily and up |
 | --- | --- | --- |
 | `Volume` | shares traded on **up ticks** | total shares |
 | `Ticks` | **total shares** | number of ticks |
+| `UpTicks` | up-tick shares | total shares |
+| `DownTicks` | down-tick shares | 0 |
 
 So the intuitive reading — `Volume` is the quantity, `Ticks` is the count — is
-true only on daily. This indicator used to send `Volume` as the wire's `vol` on
-every chart, which on intraday shipped the up-tick share volume alone: roughly
-half of what traded, and undetectable downstream because it is a perfectly
-plausible number that is simply too small.
+true only on daily. This indicator used to resolve that itself: one wire field
+called `vol`, filled from whichever word the chart type made "total share
+volume". Two things went wrong with that.
 
-The indicator now selects by `BarType`, so `vol` is total share volume on every
-timeframe, as [`../contract/semantics.md`](../contract/semantics.md) §3.4
-requires. `tc` has no honest intraday value — EL exposes no word for the number
-of trades on an intraday bar — so it is sent as `0` there.
+First, the original version always sent `Volume`, which on intraday is the
+up-tick share volume alone — roughly half of what traded, and undetectable
+downstream because it is a perfectly plausible number that is simply too small.
 
-`UpTicks` / `DownTicks` do carry the up/down share split intraday, which is real
-order-flow information, but the wire has nowhere to put it; adding a field is a
-version bump and has not been done.
+Second, and worse, the fix did not remove the problem so much as move it. The
+choice still happened off the wire, so a **publisher-convention version number**
+had to ride along on every payload just to say which rule had produced the
+numbers — and that number could itself go stale, because this file lives in the
+user's TradeStation install and nothing updates it when the DLL or a subscriber
+is upgraded.
+
+Shipping all five words verbatim, each in its own field named after the reserved
+word, removes the choice and with it the need to declare anything. The
+inversion is still a fact; it is now a table the consumer reads
+([`../contract/semantics.md`](../contract/semantics.md) §3.4) rather than a
+decision this file makes on their behalf. A consumer who wants total share
+volume takes `el_ticks` intraday and `el_volume` on daily.
+
+`OpenInt` is included for completeness. It is 0 on stocks and ETFs and only
+means anything on futures and options.
 
 ### Why an N-tick chart is refused
 
 A tick series is one print per call only when `BarInterval = 1`. On a 100-tick
 chart each call carries a finished bar: `Close` is the last of the hundred
-prints, `Volume` is their sum, `Ticks` is 100. `EL_PublishTick` has no field to
-express that, so Tier 1 would store it as **one trade priced at the last print
-and carrying a hundred prints' volume** — wrong by two orders of magnitude in
-the volume column, with nothing downstream able to notice.
+prints, and the volume words cover all hundred under the intraday rule above —
+`Ticks` their total share volume, `Volume` the up-tick part. Neither reports
+`100`; EL has no count intraday. `EL_PublishTick` has no field to say the call
+is a bar either, so Tier 1 would store it as **one trade priced at the last
+print and carrying a hundred prints' volume** — wrong by about two orders of
+magnitude in the volume column, with nothing downstream able to notice.
 
 Unlike the second-based case, the information needed to detect this survives:
 `BarInterval` says exactly how many prints went into the call. Measured on a
-live install — a 100-tick chart reports `bar_interval=100.00` at `EL_Init`, and
-a 1-tick chart reports `1.00` and calls `EL_PublishTick` once per print.
+live install — a 100-tick chart reports `bar_interval=100.00` at init and
+`Ticks = 760951` (the hundred prints' share volume, not `100`), while a 1-tick
+chart reports `1.00` and calls `EL_PublishTick` once per print.
 
 Note this also means `TsStr` cannot separate the prints inside one minute: a
 1-tick chart happily emits eight calls all stamped `19:48:00`, because `Time`
@@ -153,6 +195,10 @@ minute are normal), it latches and stops sending.
   symbols) they return 0, and the DLL normalises that to JSON `null` — in one
   place in the C ABI, so that every EL caller agrees. See
   [`../contract/semantics.md`](../contract/semantics.md) §3.1.
+  **Ticks only.** Bars carry no quote: a live-quote function describes the
+  moment of the call, which on a bar is its last print, not the bar.
+- The five quantity words are forwarded without conversion or selection. Any
+  interpretation of them belongs to the consumer.
 
 ## Pre-market data
 

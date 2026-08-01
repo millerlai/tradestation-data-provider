@@ -7,7 +7,7 @@
 # how to write a custom sink.
 #
 # To run without persistence (smoke-test / live observability only),
-# pass `--sinks-empty` on the CLI, or point `--sinks-config` to a
+# pass `--no-storage` on the CLI, or point `--sinks-config` to a
 # YAML file with `sinks: []`.
 
 sinks:

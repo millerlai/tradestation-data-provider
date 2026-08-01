@@ -9,7 +9,7 @@ production.
 
     uv run python examples/04_replay_fixtures.py                  # bars
     uv run python examples/04_replay_fixtures.py --fixture smoke
-    uv run python examples/04_replay_fixtures.py --fixture v1_noquote
+    uv run python examples/04_replay_fixtures.py --fixture session
 
 That makes it the pattern to copy when you want to test **your own sink**
 against realistic input: point the pipeline below at your sink instead of
@@ -27,8 +27,10 @@ Available fixtures:
     noquote      absent quotes as JSON null, on an index and a normal symbol
     bars         every non-1m timeframe: 5m/15m/30m/1h/1d
     session      first and last bar of an RTH session (09:30 / 15:59 ET)
-    v1_legacy    an old DLL's wire v1 — gap detection unavailable
-    v1_noquote   wire v1 spelling "no quote" as 0.0 rather than null
+
+There is no superseded-protocol fixture to replay. A publisher older than
+`proto` 1 is refused outright rather than read on a compatibility path, so
+there is nothing for such a fixture to certify.
 """
 
 from __future__ import annotations
@@ -155,7 +157,7 @@ async def main() -> int:
 
     lost = provider.messages_lost
     if lost is None:
-        print("messages lost: unknown — this publisher carries no sequence number")
+        print("messages lost: unknown - this publisher carries no sequence number")
     else:
         print(f"messages lost: {lost}")
     return 0

@@ -7,8 +7,11 @@
 
 把 **TradeStation** 的市場資料送出來，給任何語言的 subscriber 使用。
 
-TradeStation 的 EasyLanguage indicator 把 tick 與 1 分鐘 bar 交給 C++ bridge
+TradeStation 的 EasyLanguage indicator 把 tick 與整根 OHLC bar 交給 C++ bridge
 DLL，由它經 ZeroMQ 發布。任何看得懂這個協定的程式都能消費這條資料流。
+
+**這條路上不做任何計算。** Bar 就是 TradeStation 畫出來的那幾根、間隔就是那張圖的
+間隔；量值欄位是 EasyLanguage reserved word 的原文轉送。你訂閱到的，就是終端機看到的。
 
 ```mermaid
 ---
@@ -21,11 +24,11 @@ flowchart TB
         direction TB
         TS["TradeStation Desktop"]
         EL["EL Exporter Indicator"]
-        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 8"]
+        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 1"]
         TS --> EL --> DLL
     end
     subgraph CON["Contract — 真正的產品"]
-        WIRE["wire v3<br/>2-frame ZMQ · JSON"]
+        WIRE["wire proto 1<br/>2-frame ZMQ · JSON"]
         SEM["semantics.md<br/>schema 表達不了的規則"]
         FIX["conformance fixtures"]
     end
@@ -75,7 +78,7 @@ flowchart TB
 或直接看 [`bindings/python/examples/`](bindings/python/examples/) 裡可直接執行的腳本。
 四支裡有兩支不需要 TradeStation 也不需要 DLL：一支把
 [`contract/fixtures/`](contract/fixtures/) 錄下來的 frame 餵給真正的 binding，
-另一支用自己產生的資料示範儲存分層。
+另一支寫出一個小的 Parquet store 再讀回來。
 
 **用其他語言寫 binding** → [`contract/README.md`](contract/README.md)。
 動手寫解析程式前**務必先讀** [`contract/semantics.md`](contract/semantics.md)：
@@ -127,7 +130,8 @@ TradeStation 開著也沒關係：DLL 要等 EasyLanguage 真的載入它之後�
 完整的 `dumpbin /dependents` 清單見 [`cpp/prebuilt/README.md`](cpp/prebuilt/README.md)。
 
 **安裝 EasyLanguage indicator** → [`EL/README.zh-TW.md`](EL/README.zh-TW.md) ——
-把原始碼貼進 EasyLanguage Editor、Verify、掛到 tick 或 1 分鐘 chart。
+把原始碼貼進 EasyLanguage Editor、Verify、掛到 tick chart，或任何 wire 支援其
+間隔的分鐘／日線 chart（`1m` `5m` `15m` `30m` `1h` `1d`）。
 請先裝 DLL：Verify 的時候它就必須已經在位。
 
 **不開 TradeStation 也能檢視 wire：**
@@ -144,17 +148,20 @@ python contract/tools/record.py
 
 ## 版本
 
-三個版本號各自獨立演進，真正決定相容性的對應關係在
-[`contract/compat.md`](contract/compat.md)。
-
 | 版本 | 現值 | 誰在乎 |
 | --- | ---: | --- |
-| Wire（payload 的 `"v"`） | 3 | 所有 binding |
-| DLL ABI（`EL_DllVersion()`） | 8 | 所有 binding |
-| Python 套件 | 0.2.0 | 僅 Python 消費端 |
+| Wire（payload 的 `"proto"`） | 1 | 所有 binding |
+| DLL ABI（`EL_DllVersion()`） | 1 | 所有 binding |
+| Python 套件 | 0.3.0 | 僅 Python 消費端 |
 
-Wire v1 與 v2 已被取代但**仍須支援**：DLL 裝在使用者的 TradeStation 裡，不會隨著
-binding 升級而更新。
+**wire 與 ABI 各只有一個版本，更舊的一律不支援。** 沒有 `proto` 欄位的 frame 就不是
+這個協定，binding 會拒收而不是猜。版本欄位叫 `proto` 而不是沿用 `v` 是刻意的 ——
+前一代 wire 用 `v` 一路數到 4，若在同一個 key 上從 1 重新起算，`{"v":1}` 會同時是兩個
+協定的合法開頭，錯配就會表現成「數字不對」而不是「明確拒收」。
+
+**升級時 DLL 與 `.ELD` 必須一起換。** 兩者是分開的安裝步驟，而 indicator 綁的是
+`EL_Init3` —— 舊 DLL 沒有這個匯出。所有不相容的組合都會在送出任何資料前被攔下，
+各自由哪一道檢查攔到，列在 [`contract/wire.md`](contract/wire.md)。
 
 ## 現況
 

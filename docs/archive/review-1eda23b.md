@@ -1,4 +1,21 @@
-# Code review findings — `1eda23b` (wire v3 / ABI 8 / multi-timeframe bars)
+# 【已歸檔】Code review findings — `1eda23b` (wire v3 / ABI 8 / multi-timeframe bars)
+
+> ### ⚠ 這份文件描述的是已被取代的程式碼，僅作歷史紀錄
+>
+> **34 項在當時已全數處理完畢**（見下方原始說明），本文之後就沒有待辦事項了。
+> 2026-08-01 的 proto-1 重構又把其中許多項目所指的程式碼整個刪除 ——
+> `BarAggregator`、`Resampler`、`bar_coverage`、Tier-3 快取、`source` provenance、
+> `publisher_version`，以及 wire v1–v4 與 ABI 6–9 的整個版本序列。
+>
+> 因此**不要拿本文的行號、模組名或版本號去對照現況**。它保留下來的價值只有一個：
+> 記錄當時為什麼那樣決定。現況請看
+> [`../../contract/wire.md`](../../contract/wire.md)、
+> [`../../contract/semantics.md`](../../contract/semantics.md) 與
+> [`../architecture.md`](../architecture.md)。
+>
+> 原文自此開始，內容一字未改。
+
+---
 
 來源：`/code-review max`（6 個 finder、54 個獨立 verifier，74 個候選 → 69 通過驗證 → 去重後 24 項）。
 每一項的行號以 review 當時的 `1eda23b` 為準，修正時請以實際檔案為準。

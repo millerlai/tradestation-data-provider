@@ -4,7 +4,7 @@
 
 C++ DLL that bridges TradeStation EasyLanguage calls to a ZeroMQ PUB socket. The Python side ([`tradestation-data-provider`](../README.md), root of this repo) subscribes over `tcp://127.0.0.1:5555` and routes the events through its pluggable sink pipeline.
 
-This subdirectory is the **publisher** half of the system. The current ABI is **DLL version 8**.
+This subdirectory is the **publisher** half of the system. The current ABI is **DLL version 1**, carrying wire `proto` 1. There is exactly one of each — see [`../contract/wire.md`](../contract/wire.md).
 
 ## Wire format
 
@@ -17,18 +17,24 @@ Every publish call sends a two-frame ZMQ message:
 
 ```jsonc
 // Tick (EL_PublishTick) — single trade print
-{ "v": 1, "kind": "tick", "ts": 1747700000.123, "ts_utc": 1747700000.0,
-  "ts_str": "2026-04/18-13:30:45",
-  "px": 450.0, "vol": 100, "bid": 449.99, "ask": 450.01, "tc": 1 }
+{ "proto": 1, "kind": "tick", "seq": 1, "sid": 1784998823554057,
+  "ts": 1747700000.123, "ts_str": "2026-04/18-13:30:45",
+  "px": 450.0,
+  "el_volume": 300, "el_ticks": 812, "el_upticks": 300,
+  "el_downticks": 512, "el_open_interest": 0,
+  "bid": 449.99, "ask": 450.01 }
 
-// Bar (EL_PublishTickEx) — already-formed 1-min OHLC
-{ "v": 1, "kind": "bar_1m", "ts": 1747700060.0, "ts_utc": 1747700060.0,
-  "ts_str": "2026-04/18-13:31:00",
+// Bar (EL_PublishBar) — an already-formed OHLC bar at any interval
+{ "proto": 1, "kind": "bar", "tf": "1m", "seq": 3, "sid": 1784998823554057,
+  "ts": 1747700060.0, "ts_str": "2026-04/18-13:31:00",
   "o": 450.1, "h": 450.75, "l": 449.8, "c": 450.4,
-  "vol": 12000, "bid": 450.39, "ask": 450.41, "tc": 140 }
+  "el_volume": 6100, "el_ticks": 12000, "el_upticks": 6100,
+  "el_downticks": 5900, "el_open_interest": 0 }
 ```
 
-`ts` is the DLL's receive-side wall clock (UTC epoch); `ts_utc` is the EL string converted to UTC via `std::chrono::zoned_time` ("America/New_York" zone); `ts_str` is the raw EL `yyyy-MM/dd-HH:mm:ss` 24-hour timestamp passed through verbatim. Subscribers treat `ts_str` as authoritative for bar `bucket_start`. For the normative rules see [`../contract/semantics.md`](../contract/semantics.md) §1–2 and [`../contract/v1/envelope.md`](../contract/v1/envelope.md).
+**The five `el_*` fields are EasyLanguage's reserved words forwarded verbatim.** This ABI selects nothing and converts nothing — notably, `Volume` and `Ticks` mean opposite things on an intraday chart and a daily one, and reconciling them here is what previously made the numbers unauditable. [`../contract/semantics.md`](../contract/semantics.md) §3.4 has the table.
+
+`ts` is the DLL's receive-side wall clock (UTC epoch), useful only for latency measurement; `ts_str` is the raw EL `yyyy-MM/dd-HH:mm:ss` 24-hour timestamp passed through verbatim, and subscribers treat it as authoritative for bar `bucket_start`. **The DLL no longer parses `ts_str`, so it no longer validates it** — an unparseable string travels intact and fails in the subscriber. Bars carry no `bid`/`ask`: a live quote describes the moment of the call, not the bar. For the normative rules see [`../contract/wire.md`](../contract/wire.md) and [`../contract/semantics.md`](../contract/semantics.md) §1–2.
 
 ## Requirements
 
@@ -216,33 +222,60 @@ Then, in the EasyLanguage editor, Verify the indicator that imports the DLL.
 
 ## C ABI
 
-DLL version `EL_DllVersion() == 8`. See [`../contract/error_codes.md`](../contract/error_codes.md) for return codes and [`../contract/compat.md`](../contract/compat.md) for the ABI × wire version matrix.
+DLL version `EL_DllVersion() == 1`. See [`../contract/error_codes.md`](../contract/error_codes.md) for return codes.
 
 ```c
 int __stdcall EL_DllVersion(void);
-int __stdcall EL_Init(const char* zmq_endpoint);
+int __stdcall EL_Init3(const char* zmq_endpoint);
 
-// Single trade print — Python aggregates ticks into 1-min bars.
+// Single trade print. Quantities are EasyLanguage reserved words, verbatim.
+// They arrive as double because DefineDLLFunc has no 64-bit integer type;
+// the DLL casts to long long before writing them out as %lld.
 int __stdcall EL_PublishTick(
     const char* symbol,
     const char* el_timestamp,   // "yyyy-MM/dd-HH:mm:ss" 24h, America/New_York; may be NULL/""
-    double price, double volume,
-    double bid, double ask, double tick_count);
+    double price,
+    double volume, double ticks, double upticks, double downticks,
+    double open_interest,
+    double inside_bid, double inside_ask);
 
-// Already-formed OHLC bar — bypasses Python's tick aggregator.
-// Used when the EL indicator runs in bar-close (or "update every tick") mode.
-int __stdcall EL_PublishTickEx(
+// An already-formed OHLC bar at whatever interval the chart runs.
+// bar_type / bar_interval are EasyLanguage's BarType and BarInterval; the
+// DLL maps them to the `tf` string and refuses (-5) an interval it cannot
+// place, rather than filing it under a default.
+int __stdcall EL_PublishBar(
     const char* symbol,
     const char* el_timestamp,
+    int bar_type, int bar_interval,
     double bar_open, double bar_high, double bar_low, double bar_close,
-    double volume, double bid, double ask, double tick_count);
+    double volume, double ticks, double upticks, double downticks,
+    double open_interest);
 
 int __stdcall EL_Shutdown(void);
+
+// TOMBSTONES — the init exports of the superseded protocol. Both return -6
+// and initialise nothing. See below.
+int __stdcall EL_Init(const char* zmq_endpoint);
+int __stdcall EL_Init2(const char* zmq_endpoint, int publisher_version);
 ```
 
-Return codes: `0` success, `1` already initialized (idempotent re-init), `-1` not initialized, `-2` ZMQ send failed, `-3` init failed (bind / socket create), `-4` invalid argument.
+Return codes: `0` success, `1` already initialized (idempotent re-init), `-1` not initialized, `-2` ZMQ send failed, `-3` init failed (bind / socket create), `-4` invalid argument, `-5` unmappable bar interval, `-6` ABI mismatch (tombstone).
 
-The DLL pins itself into the host process on first successful `EL_Init` (Windows `GetModuleHandleExW` with `GET_MODULE_HANDLE_EX_FLAG_PIN`) so that TradeStation calling `FreeLibrary` does not trigger the C runtime's static-destructor chain — `zmq_ctx_term()` joining the ZMQ I/O thread under loader lock would deadlock TS otherwise. `EL_Shutdown()` exists for the standalone test harness only.
+### Why the tombstones exist
+
+`EL_PublishTick` and `EL_PublishBar` **kept their names while changing signature**. They are `__stdcall`, where the callee cleans the stack, so a call with the wrong argument count corrupts the stack — TradeStation crashes or misbehaves rather than returning an error.
+
+Renaming init instead is what makes that unreachable. Every publish call in the indicator is guarded by `InitDone`, which stays False whenever `InitRC < 0`, so **init is the only interception point**:
+
+| Deployment | Caught by | Result |
+| --- | --- | --- |
+| new `.ELD` + old DLL | old DLL has no `EL_Init3` export | `DefineDLLFunc` fails at Verify, with a named error |
+| old `.ELD` + new DLL | tombstone returns `-6` | `EL_Init FAILED rc=-6` in the Print Log; never publishes |
+| new `.ELD` + a future DLL | the indicator's `EL_DllVersion()` latch | `EL_DllVersion` takes no arguments, so calling it is always safe; anything `!= 1` latches publishing off |
+
+The tombstones are three lines each and **must stay in `TS2Python.def`**. Dropping the exports would also be safe, but the operator would get a symbol-resolution failure instead of a sentence they can act on.
+
+The DLL pins itself into the host process on first successful `EL_Init3` (Windows `GetModuleHandleExW` with `GET_MODULE_HANDLE_EX_FLAG_PIN`) so that TradeStation calling `FreeLibrary` does not trigger the C runtime's static-destructor chain — `zmq_ctx_term()` joining the ZMQ I/O thread under loader lock would deadlock TS otherwise. `EL_Shutdown()` exists for the standalone test harness only.
 
 ## Standalone test
 
@@ -256,4 +289,6 @@ python contract/tools/record.py --latency
 cpp\Release\TS2Python_TestHarness.exe --mode stress --rate 10000 --seconds 10
 ```
 
-A successful harness exits with code `0` (no dropped sends). The subscriber should print ~100 000 `SPY`-topic messages and per-percentile latency stats. Other harness modes: `--mode smoke` (5 ticks across 3 topics, one bar via `EL_PublishTickEx`), `--mode multithread --threads 8 --per-thread 5000`.
+A successful harness exits with code `0` (no dropped sends). The subscriber should print ~100 000 `SPY`-topic messages and per-percentile latency stats. Other harness modes: `--mode smoke` (3 topics plus one bar), `--mode noquote`, `--mode bars` (every non-1m `tf` plus the `-5` refusal path), `--mode session`, `--mode multithread --threads 8 --per-thread 5000`. Each fixture's mode and frame count is tabulated in [`../contract/fixtures/README.md`](../contract/fixtures/README.md).
+
+**Every run first asserts the ABI**: `EL_DllVersion() == 1`, and both tombstones returning `-6`, before any init. A check that only runs when someone remembers to run it is not a check.

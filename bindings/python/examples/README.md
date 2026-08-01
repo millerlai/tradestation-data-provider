@@ -11,7 +11,7 @@ just want to see the shapes.
 | --- | --- | --- | --- |
 | 01 | [`01_print_events.py`](01_print_events.py) | yes | The whole receive loop in ~20 lines |
 | 02 | [`02_custom_sink.py`](02_custom_sink.py) | yes | Writing your own sink; the full runtime |
-| 03 | [`03_read_history.py`](03_read_history.py) | **no** | Storage tiers; one tick store, many timeframes |
+| 03 | [`03_read_history.py`](03_read_history.py) | **no** | Reading the store back, and what it deliberately will not compute |
 | 04 | [`04_replay_fixtures.py`](04_replay_fixtures.py) | **no** | Replaying recorded frames through the real binding |
 
 Run everything from `bindings/python/`:

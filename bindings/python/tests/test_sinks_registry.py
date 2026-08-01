@@ -27,9 +27,11 @@ def _bar(symbol: str = "SPY") -> Bar:
         high=2.0,
         low=0.5,
         close=1.5,
-        volume=10,
-        tick_count=3,
-        source="t",
+        el_volume=10,
+        el_ticks=20,
+        el_upticks=10,
+        el_downticks=10,
+        el_open_interest=0,
     )
 
 

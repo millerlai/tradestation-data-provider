@@ -22,8 +22,18 @@ implementation — this repo has already had a spec drift into describing fields
 no longer emitted, unnoticed, because nothing checked. Anything a second binding would
 have to guess belongs in `contract/semantics.md`, with a fixture.
 
-- Wire v3 / DLL ABI 8 is current; v1 and v2 are superseded but **still supported** — the DLL sits
-  in the user's TradeStation install and does not update when a binding does.
+- **Wire `proto` 1 / DLL ABI 1. There is exactly one of each, and nothing else is
+  supported.** The version key is `proto`, not `v`: the superseded wire used `v` and
+  counted to 4, so restarting at 1 under the same key would have made `{"v":1}` a legal
+  opening for two different protocols. A frame without `proto` is simply not this
+  protocol, and `_parse_payload` refuses it with a message naming the fix. **Upgrade DLL
+  and `.ELD` together** — they are separate install steps and the indicator binds
+  `EL_Init3`, which an older DLL does not export.
+- `EL_Init` and `EL_Init2` survive as **tombstones** returning `-6`. They are three lines
+  each and must stay in `TS2Python.def`: `EL_PublishTick` / `EL_PublishBar` kept their
+  names while changing signature, and those are `__stdcall`, so a mismatched call
+  corrupts the stack rather than returning an error. Init is the only interception point —
+  the indicator guards every publish on `InitDone`, which stays False when `InitRC < 0`.
 - Python 3.12–3.14, managed with **uv**; all three are in the CI matrix. 3.11 was
   dropped so the Windows event loop can be selected with
   `asyncio.run(loop_factory=...)` (3.12+) instead of the policy API, which 3.14
@@ -40,11 +50,12 @@ have to guess belongs in `contract/semantics.md`, with a fixture.
   `Timeframe` — the value range of the wire, `tf` included. A new domain type with no
   counterpart on the wire means scope is leaking back in.
 - `domain/timeframe.py` is the single source for the timeframe vocabulary: the enum,
-  `NATIVE_ONLY_TIMEFRAMES` (never computed), `SINGLE_FILE_TIMEFRAMES` (no `date=` level),
-  the minutes table, the wire allow-list, the Tier-3 default, and `align_bucket_start`
-  (the Python twin of `resampler._bucket_expr`). Adding an interval should be one edit
-  there, not six scattered ones — and any new interval must divide one hour, or the
-  intraday grid stops surviving DST (`contract/semantics.md` §2.2).
+  the minutes table, the wire allow-list (`SUPPORTED_TIMEFRAMES`),
+  `SINGLE_FILE_TIMEFRAMES` (no `date=` level), `SESSION_ANCHORED_TIMEFRAMES` (the 04:00
+  ET anchor, and the frames exempt from the right-to-left label shift), and
+  `align_bucket_start`. Adding an interval should be one edit there, not six scattered
+  ones — and any new interval must divide one hour, or the intraday grid stops surviving
+  DST (`contract/semantics.md` §2.2).
 
 ## Commands
 
@@ -60,10 +71,8 @@ python scripts/run_ingestion.py --no-storage --log-level DEBUG
 python scripts/run_ingestion.py --print-bars 5
 
 # Offline Parquet tools (uv-run wrappers)
-python scripts/aggregate_parquet.py --symbol all --timeframe 5m --input data/bars/timeframe=1m --output data/bars
 python scripts/verify_parquet.py    --start-date YYYY-MM-DD --end-date YYYY-MM-DD
-python scripts/imputation_parquet.py --start-date YYYY-MM-DD --end-date YYYY-MM-DD --dry-run
-python scripts/audit_bar_cache.py ; python scripts/clear_bar_cache.py
+python scripts/imputation_parquet.py --start-date YYYY-MM-DD --end-date YYYY-MM-DD --output data/imputed --dry-run
 python scripts/dedupe_bars.py ; python scripts/dump_parquet.py
 
 # Tests / lint / types
@@ -115,7 +124,6 @@ rather than widening the filter.
 TradeStation EL DLL  ──ZMQ PUB──▶  TradeStationELProvider (SUB, asyncio)
                                             │
                                             ├── Tick  ──▶ MarketSnapshot.on_tick
-                                            │            └──▶ BarAggregator.ingest ──▶ closed Bar
                                             │            └──▶ SinkPipeline.on_tick
                                             │
                                             └── Bar   ──▶ IngestionRuntime._handle_provider_bar
@@ -133,40 +141,82 @@ TradeStation EL DLL  ──ZMQ PUB──▶  TradeStationELProvider (SUB, asynci
 Background loops in IngestionRuntime: ingest / advance (wall-clock) / flush (sinks that advertise it) / heartbeat.
 ```
 
+**Ticks do not become bars.** There is one bar path and TradeStation is on the other
+end of it. Nothing here aggregates, resamples, backfills or caches — see "What this
+binding does not do" below.
+
 ### Pluggable sinks (`sinks/`)
 
 `IngestionRuntime` writes to a `SinkPipeline` rather than directly to `BarWriter` / `TickWriter`. The pipeline broadcasts every Tick and every closed Bar to every registered sink and **isolates per-sink exceptions** (one bad sink doesn't take down the others). The pipeline is built from `config/sinks.yaml` via `tradestation_data.sinks.registry.build_pipeline_from_config()`; users register custom sinks by pointing the YAML `class:` field at any importable `module:attr` returning a Sink protocol implementation. Built-ins:
 
-- `ParquetBarSink`, `ParquetTickSink` — thin adapters over the legacy `BarWriter` / `TickWriter` under `storage/`; on-disk layout and schema are unchanged. **Both buffer and both advertise `flush`** — bars used to be written one at a time, which cost one Parquet row group per bar. Both writers also *seal* a partition (flush + close its file) as soon as an event for a later day of the same series arrives: a `ParquetWriter` left open has no footer, so its file is unreadable to every reader until the process stops.
+- `ParquetBarSink`, `ParquetTickSink` — thin adapters over `BarWriter` / `TickWriter` under `storage/`. **Both buffer and both advertise `flush`** — bars used to be written one at a time, which cost one Parquet row group per bar. Both writers also *seal* a partition (flush + close its file) as soon as an event for a later day of the same series arrives: a `ParquetWriter` left open has no footer, so its file is unreadable to every reader until the process stops.
 - `InMemorySink` — bounded per-symbol deques; for tests / notebook use only.
 - `CallbackSink` — dynamic Python callback dispatch with per-symbol or catch-all registration. Instances are tracked in a module-level `WeakValueDictionary`; user code does `get_sink(name)` to look up the instance declared in `sinks.yaml` and register handlers on it. `close()` eagerly removes the registry entry so a subsequent `get_sink()` raises `KeyError` immediately, not after GC.
 
-The `tick_writer` / `bar_writer` constructor parameters on `IngestionRuntime` are gone — pass a `SinkPipeline` instead. The legacy `BarWriter` / `TickWriter` classes still live under `storage/` because `ParquetBarSink` / `ParquetTickSink` wrap them; they are *not* the public interface anymore.
+The `tick_writer` / `bar_writer` constructor parameters on `IngestionRuntime` are gone — pass a `SinkPipeline` instead. The `BarWriter` / `TickWriter` classes still live under `storage/` because `ParquetBarSink` / `ParquetTickSink` wrap them; they are *not* the public interface anymore.
 
-Two bar paths coexist because the DLL supports both `EL_PublishTick` (tick-only — bars built by `BarAggregator`) and `EL_PublishTickEx` (whole-OHLC bars). Whole bars **bypass the aggregator** — running a single close-price tick through it would collapse OHLC to O=H=L=C. EL's "Update every tick" mode re-sends the same `(symbol, bucket_start)` many times per minute; `_handle_provider_bar` buffers the latest per symbol and only emits when the next bucket arrives, on wall-clock advance past `bucket_end + grace`, or on shutdown. `_last_emitted_direct_bucket` blocks history-replay duplicates after a TS chart reload.
+The DLL exports `EL_PublishTick` and `EL_PublishBar`; a bar always arrives whole. EL's "Update every tick" mode re-sends the same `(symbol, bucket_start)` many times per minute, so `_handle_provider_bar` buffers the latest per symbol and only emits when the next bucket arrives, on wall-clock advance past `bucket_end + grace`, or on shutdown. `_last_emitted_direct_bucket` blocks history-replay duplicates after a TS chart reload.
 
-### Storage tiers (`storage/`)
+### What this binding does not do
 
-Hive-partitioned Parquet under `data/`. `ParquetBarSink` / `ParquetTickSink` produce Tier 1 + Tier 2; Tier 3 is derived on demand:
+**It receives, labels and stores. Nothing else.** No aggregation, no resampling, no
+backfill, no cache, no imputation into the live store — those are the consumer's
+business, and every one of them used to live here. `BarAggregator`, `Resampler`,
+`bar_coverage`, the `source = derived:*` provenance mechanism and `publisher_version`
+are all gone.
 
-| Tier | Path                                                                     | Producer       |
-|------|--------------------------------------------------------------------------|----------------|
-| 1    | `ticks/symbol={SYM}/date={YYYY-MM-DD}/ticks.parquet`                     | `ParquetTickSink` (→ `TickWriter`) |
-| 2    | `bars/timeframe=1m/symbol={SYM}/date={YYYY-MM-DD}/bars.parquet`          | `ParquetBarSink`  (→ `BarWriter`)  |
-| 3    | `bars/timeframe={5m,15m,30m,1h}/symbol={SYM}/date={YYYY-MM-DD}/bars.parquet` | `Resampler` (lazy, on cache miss from `HistoryStore.load_bars`) or `aggregate_parquet.py` (batch) |
-| —    | `bars/timeframe=1d/symbol={SYM}/bars.parquet`                            | `ParquetBarSink` only — **published, never derived** |
+The reason is that a computed bar is indistinguishable from a published one the moment
+it is persisted. `HistoryStore.load_bars` therefore answers zero rows for an interval
+TradeStation never published, and never writes on a read path.
+`tests/test_history_store.py::test_load_bars_never_derives_from_ticks` pins it.
 
-**`1d` is not a tier, it is data.** `NATIVE_ONLY_TIMEFRAMES` in `domain/timeframe.py` names it: TradeStation's daily bar carries the exchange's official close and the split/dividend adjustment, which no rollup reproduces, so nothing computes one. `load_bars` returns empty rather than building it, `rebuild_bar_cache` and `aggregate_parquet.py` refuse it, and `clear_bar_cache.py` leaves it alone. Its layout is flat — no `date=` level, one file per symbol rewritten whole on each flush (`SINGLE_FILE_TIMEFRAMES`), because a day partition of daily bars is one row inside a ~2.9 KB file. Any reader building a bars path must ask `domain/timeframe.py` which shape applies rather than assuming `date=`.
+### Storage layout (`storage/`)
 
-**Do not "verify" a `1d` bar by summing intraday bars.** The daily `vol` is the exchange's official consolidated total (late prints, block trades, dark pool, closing cross); intraday is what the live SIP stream happened to carry. They are two different measurements and will not match — `contract/semantics.md` §3.4 has the four reasons.
+Hive-partitioned Parquet under `data/`. Everything on disk came off the wire:
 
-**EasyLanguage's `Volume` and `Ticks` mean opposite things intraday and daily**, which is what made that gap look impossible (3× on SPY). Intraday, `Volume` is *up-tick share volume only* and `Ticks` is *total share volume*; daily, they swap. Confirmed against TradeStation's own reserved-word docs and measured on a live 100-tick chart — §3.4 has the table and the evidence. The indicator now picks the field the chart type requires, so wire `vol` is total share volume everywhere; `tc` is a trade count **only on `1d`**, and even there it is under suspicion (byte-for-byte equal to `vol` across 499 SPY rows). Never read `tc` as a trade count on intraday — EL exposes no reserved word for it, and the field goes out as 0. Measured on the collected SPY data, correcting the field takes the gap from **3.00× to 1.33×** — the remainder is the four reasons above, and the two numbers are still not meant to be equal.
+| Path                                                                | Producer |
+|---------------------------------------------------------------------|----------|
+| `ticks/symbol={SYM}/date={YYYY-MM-DD}/ticks.parquet`                | `ParquetTickSink` (→ `TickWriter`) |
+| `bars/timeframe={tf}/symbol={SYM}/date={YYYY-MM-DD}/bars.parquet`   | `ParquetBarSink` (→ `BarWriter`) |
+| `bars/timeframe=1d/symbol={SYM}/bars.parquet`                       | `ParquetBarSink` — flat, no `date=` level |
 
-**Bars written before this fix have an understated intraday `vol`** — it holds up-tick volume — while `tick_count` holds the total. On the data in `bindings/python/data/`, `tick_count / volume` sits at 1.85–2.25 across 1m and 5m. Old partitions are recoverable without re-collecting: the total is already there under the wrong name. There is deliberately no migration script — swapping two columns in place is the kind of edit that is unrecoverable if the store is half-old and half-new, and nothing on disk records which convention a partition was written under.
+`1d` is flat because a day partition of daily bars is one row inside a ~2.9 KB file
+(`SINGLE_FILE_TIMEFRAMES`; the file is rewritten whole on each flush). Any reader
+building a bars path must ask `domain/timeframe.py` which shape applies rather than
+assuming `date=`.
 
-`HistoryStore` is the read-side facade — DuckDB + Polars over the Parquet glob; `load_bars` falls through to `Resampler` and persists the result. `BAR_SCHEMA` / `TICK_SCHEMA` carry both `*_utc` (`UTC`) and `*_et` (`America/New_York`) timestamps — both are persisted so downstream tooling never has to convert at query time. Tier 3 caches are derived; `clear_bar_cache.py` deletes them safely and `audit_bar_cache.py` cross-checks them against a Tier-1 rebuild. **Native bars are not only 1m** — a 5-minute chart publishes native 5m bars into the Tier-3 directory, which is why the provenance guard (`source` = `derived:*`) is what decides deletion, never the path.
+`HistoryStore` is the read-side facade — polars `scan_parquet(hive_partitioning=True)`
+over the glob. `BAR_SCHEMA` / `TICK_SCHEMA` carry both a UTC and an
+`America/New_York` timestamp; both are persisted so downstream tooling never has to
+convert at query time. `_as_utc` normalises a caller's bound to UTC — a naive one
+means ET, and an aware one must still be converted because polars refuses to compare a
+UTC column against a literal in another zone.
 
-`--data-root` is now only a fallback path used when `--sinks-config` is missing — the YAML's per-sink `root` parameter wins otherwise. When you need to redirect output, edit `sinks.yaml`, not the CLI flag.
+### The five `el_*` quantities
+
+**The wire carries EasyLanguage's reserved words verbatim, one column each:
+`el_volume`, `el_ticks`, `el_upticks`, `el_downticks`, `el_open_interest`.** The
+publisher selects nothing and converts nothing; the binding must not either.
+
+**`Volume` and `Ticks` mean opposite things intraday and daily.** Intraday, `Volume` is
+*up-tick share volume only* and `Ticks` is *total share volume*; daily, they swap.
+Confirmed against TradeStation's own reserved-word docs and measured on a live 100-tick
+chart — `contract/semantics.md` §3.4 has the table and the evidence. This is a fact
+about TradeStation, not a thing to fix: the exporter used to swap the fields so `vol`
+would mean one thing everywhere, and `pv` existed solely because that swap happened
+off-wire where no number could reveal it. Both are gone.
+
+The `el_` prefix is the point. A column called plain `volume` invites the reading that
+already cost this repo a systematically halved volume column, and the numbers looked
+entirely plausible throughout. A consumer wanting "how much traded" reads the field the
+§3.4 table names for its timeframe.
+
+**Do not "verify" a `1d` bar by summing intraday bars.** The daily figure is the
+exchange's official consolidated total (late prints, block trades, dark pool, closing
+cross); intraday is what the live SIP stream happened to carry. Two different
+measurements — §3.4 has the four reasons.
+
+`--data-root` is only a fallback path used when `--sinks-config` is missing — the YAML's per-sink `root` parameter wins otherwise. When you need to redirect output, edit `sinks.yaml`, not the CLI flag.
 
 ### Timestamps and sessions
 
@@ -176,10 +226,16 @@ and every binding must agree. Change them there first.**
 - `ts_str` (`yyyy-MM/dd-HH:mm:ss`, 24-hour) is **authoritative** for `Bar.bucket_start`:
   parsed as `America/New_York`, converted to UTC, then **floored to the minute**. The
   flooring is invisible in normal operation because EL sends aligned times; the smoke
-  fixture catches it because the harness reuses a tick's `:45` timestamp. `ts_utc` from
-  the DLL is only a cross-check (>5s drift logged, never raised). 24-hour is deliberate —
+  fixture catches it because the harness reuses a tick's `:45` timestamp. `ts` is the
+  DLL's receive clock and a last-resort fallback only — during historical replay every
+  bar shares one `ts` and would collapse onto a single bucket. 24-hour is deliberate —
   `hh:mm:ss tt` broke on zh-TW Windows hosts where `FormatTime("tt")` emits localised
   AM/PM.
+- **The DLL no longer parses `ts_str`, so it no longer validates it.** `ts_utc` is gone
+  from the wire: it was `zoned_time`'s reading of the same string that Python parses with
+  `ZoneInfo`, and the >5s drift warning was the only signal that the two ends disagreed
+  about a timezone database. Dropping it was a trade, recorded in `contract/wire.md` —
+  an unparseable time string now arrives intact and fails one layer later, here.
 - Bars are **left-labelled**: `bucket_start` covers `[t, t+step)`, so an RTH 1m session
   runs 09:30…15:59, not 09:31…16:00. **The wire is right-labelled** — EasyLanguage's
   `Time` is the bar's *close* and the indicator forwards it verbatim — so `_parse_bar`
@@ -195,11 +251,14 @@ and every binding must agree. Change them there first.**
   bars before 04:00 ET belong to the *previous* session. Per-symbol retention via
   `SessionPolicy`: `breadth` indices reset daily, everything else retains 60 min of
   pre-market. Defaults from `symbols.yaml::category`, overrides in `runtime/config.py`.
-- **Quotes are absent in two different ways.** EL's `InsideBid`/`InsideAsk` return 0 when
-  there is no quote (historical replay, non-live mode, breadth indices); the DLL
-  normalises non-positive values to JSON `null` on wire v2. Separately, index/breadth
-  symbols (`DEFAULT_INDEX_SYMBOLS`) may carry live numbers that still mean nothing, and
-  the binding invalidates those. `_quote_or_none()` handles both, plus v1's bare `0.0`.
+- **Quotes are absent in two different ways, and only ticks have them at all.** EL's
+  `InsideBid`/`InsideAsk` return 0 when there is no quote (historical replay, non-live
+  mode, breadth indices); the DLL normalises non-positive values to JSON `null`.
+  Separately, index/breadth symbols (`DEFAULT_INDEX_SYMBOLS`) may carry live numbers that
+  still mean nothing, and the binding invalidates those. `_quote_or_none()` handles both.
+  **Bars carry no quote** — a live-quote function describes the moment of the call, which
+  on a bar is its last print rather than the bar, so the wire does not send one and `Bar`
+  does not model one.
 
 ### Windows-specific event loop
 
@@ -211,7 +270,7 @@ The supported spelling is `asyncio.run(coro, loop_factory=asyncio.SelectorEventL
 
 ### Shutdown ordering
 
-`IngestionRuntime.run()` deliberately cancels tasks → closes provider → awaits tasks → calls `_shutdown()` in an *outer* finally; `runtime/main.py` then calls `pipeline.close()` one more time as belt-and-suspenders. `_shutdown()` drains the aggregator and the direct-bar buffer **before** closing the sink pipeline, so any final closed bar still reaches every sink. A second Ctrl+C while `zmq ctx.term()` was blocking previously skipped sink close and left `bars.parquet` without a footer — don't simplify the nested-finally structure without understanding that failure mode.
+`IngestionRuntime.run()` deliberately cancels tasks → closes provider → awaits tasks → calls `_shutdown()` in an *outer* finally; `runtime/main.py` then calls `pipeline.close()` one more time as belt-and-suspenders. `_shutdown()` drains the direct-bar buffer **before** closing the sink pipeline, so any final closed bar still reaches every sink. A second Ctrl+C while `zmq ctx.term()` was blocking previously skipped sink close and left `bars.parquet` without a footer — don't simplify the nested-finally structure without understanding that failure mode.
 
 ## Packaging and distribution
 

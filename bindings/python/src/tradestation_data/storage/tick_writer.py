@@ -26,11 +26,17 @@ TICK_SCHEMA: pa.Schema = pa.schema(
             nullable=False,
         ),
         pa.field("price", pa.float64(), nullable=False),
-        pa.field("volume", pa.int64(), nullable=False),
+        # EasyLanguage's reserved words, verbatim and integral — see
+        # BAR_SCHEMA for why they keep the el_ prefix.
+        pa.field("el_volume", pa.int64(), nullable=False),
+        pa.field("el_ticks", pa.int64(), nullable=False),
+        pa.field("el_upticks", pa.int64(), nullable=False),
+        pa.field("el_downticks", pa.int64(), nullable=False),
+        pa.field("el_open_interest", pa.int64(), nullable=False),
+        # Null when there is no quote: historical replay, or a symbol that
+        # never carries one. contract/semantics.md §3.
         pa.field("bid", pa.float64(), nullable=True),
         pa.field("ask", pa.float64(), nullable=True),
-        pa.field("tick_count", pa.int32(), nullable=False),
-        pa.field("source", pa.string(), nullable=False),
     ]
 )
 
@@ -193,11 +199,13 @@ def _ticks_to_table(ticks: list[Tick]) -> pa.Table:
             "timestamp": [t.timestamp for t in ticks],
             "timestamp_et": [t.timestamp_et for t in ticks],
             "price": [t.price for t in ticks],
-            "volume": [t.volume for t in ticks],
+            "el_volume": [t.el_volume for t in ticks],
+            "el_ticks": [t.el_ticks for t in ticks],
+            "el_upticks": [t.el_upticks for t in ticks],
+            "el_downticks": [t.el_downticks for t in ticks],
+            "el_open_interest": [t.el_open_interest for t in ticks],
             "bid": [t.bid for t in ticks],
             "ask": [t.ask for t in ticks],
-            "tick_count": [t.tick_count for t in ticks],
-            "source": [t.source for t in ticks],
         },
         schema=TICK_SCHEMA,
     )

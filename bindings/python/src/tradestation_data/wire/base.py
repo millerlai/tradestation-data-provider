@@ -6,13 +6,11 @@ from typing import Protocol, runtime_checkable
 from tradestation_data.domain.bar import Bar
 from tradestation_data.domain.tick import Tick
 
-# An event on the wire is either a single trade/quote print (Tick) or a
-# complete OHLC bar (Bar) emitted directly by the EL indicator.
-# Historically the bridge only shipped ticks and Python aggregated bars
-# downstream; now EL_PublishTickEx can ship an already-formed minute bar
-# so the OHLC is preserved through historical-chart replay.
+# An event on the wire is either a single trade print (Tick) or a complete
+# OHLC bar (Bar). Both come straight from the EL indicator; this binding
+# builds neither from the other.
 #
-# This union is the value range of the wire — see contract/v1/envelope.md.
+# This union is the value range of the wire — see contract/wire.md.
 MarketEvent = Tick | Bar
 
 
@@ -35,6 +33,11 @@ class MarketDataProvider(Protocol):
     See docs/architecture.md §7.1.
     """
 
+    # Which ingress produced these events. Nothing inside this binding reads
+    # it any more — Tick and Bar no longer carry a provenance field, because
+    # with nothing computing bars there are no two kinds of bar to tell
+    # apart. It stays on the Protocol for consumers running more than one
+    # ingress, which is the only place the distinction can still matter.
     source_id: str
 
     async def connect(self) -> None:

@@ -7,7 +7,6 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from tradestation_data.aggregation.bar_aggregator import BarAggregator
 from tradestation_data.aggregation.snapshot import MarketSnapshot
 from tradestation_data.domain.bar import Bar
 from tradestation_data.domain.tick import Tick
@@ -28,7 +27,7 @@ _DIRECT_BAR_CLOSE_GRACE = timedelta(seconds=2)
 class _Counters:
     ticks_in: int = 0
     bars_out: int = 0
-    bars_direct_in: int = 0  # bars emitted via the direct (EL_PublishTickEx) path
+    bars_direct_in: int = 0  # whole bars received on the EL_PublishBar path
     bars_direct_updated: int = 0  # intra-bar updates to a buffered direct bar
     bars_duplicate_dropped: int = 0  # stale/out-of-order direct bar (bucket_start < buffered)
     ticks_dropped: int = 0
@@ -39,12 +38,18 @@ class _Counters:
 
 class IngestionRuntime:
     """
-    Wires Provider → Snapshot/BarAggregator → SinkPipeline.
+    Wires Provider → Snapshot → SinkPipeline.
+
+    Ticks and bars both arrive already formed; nothing here builds one from
+    the other. A tick goes to the snapshot and the sinks as it is, and a bar
+    is buffered only long enough to absorb EL's "update every tick" resends
+    of the same bucket.
 
     Also runs a background:
       - flush task (drives any buffered sink's flush() when its
         should_flush() returns True)
-      - wall-clock advance task (BarAggregator.advance_time every second)
+      - wall-clock advance task (closes a buffered bar whose interval has
+        elapsed, so a quiet symbol's last bar is not held indefinitely)
       - heartbeat task (structured log of msg/sec, bar count, etc.)
 
     Shutdown: `stop()` signals all loops to exit; `run()` awaits clean
@@ -63,7 +68,6 @@ class IngestionRuntime:
         provider: MarketDataProvider,
         symbols: list[str],
         snapshot: MarketSnapshot,
-        aggregator: BarAggregator,
         sinks: SinkPipeline | None = None,
         *,
         on_bar: Callable[[Bar], None] | None = None,
@@ -74,7 +78,6 @@ class IngestionRuntime:
         self._provider = provider
         self._symbols = symbols
         self._snapshot = snapshot
-        self._aggregator = aggregator
         self._sinks = sinks if sinks is not None else SinkPipeline()
         self._on_bar = on_bar
         self._heartbeat_interval = heartbeat_interval
@@ -145,16 +148,13 @@ class IngestionRuntime:
         self._stop.set()
 
     async def _shutdown(self) -> None:
-        # Emit any still-open bars so nothing is lost.
-        now = datetime.now(tz=UTC)
-        for bar in self._aggregator.advance_time(now):
-            await self._on_closed_bar(bar)
+        # Emit any still-buffered bar so nothing is lost.
         for bar in self._drain_direct_bars():
             await self._on_closed_bar(bar)
-        # Sinks close last — closing earlier would mean any final bar
-        # the aggregator/direct-buffer drain emits hits a closed parquet
-        # writer and gets lost. SinkPipeline.close() swallows per-sink
-        # errors so one bad sink doesn't block the rest.
+        # Sinks close last — closing earlier would mean any final bar the
+        # drain emits hits a closed parquet writer and gets lost.
+        # SinkPipeline.close() swallows per-sink errors so one bad sink
+        # doesn't block the rest.
         self._sinks.close()
         log.info(
             "ingestion_stopped",
@@ -206,9 +206,8 @@ class IngestionRuntime:
 
     async def _ingest_loop(self) -> None:
         # `events()` yields Tick for trade prints and Bar for already-formed
-        # OHLC bars (EL_PublishTickEx). Bars bypass the aggregator because
-        # running a single-price "tick" through it would collapse OHLC to
-        # O=H=L=C=close and defeat the whole point of the Ex path.
+        # OHLC bars. Both are published by the indicator; neither is derived
+        # from the other here.
         async for event in self._provider.events():
             if isinstance(event, Bar):
                 await self._handle_provider_bar(event)
@@ -221,8 +220,6 @@ class IngestionRuntime:
         while not self._stop.is_set():
             await asyncio.sleep(self._advance_interval)
             now = datetime.now(tz=UTC)
-            for bar in self._aggregator.advance_time(now):
-                await self._on_closed_bar(bar)
             for bar in self._advance_direct_bars(now):
                 await self._on_closed_bar(bar)
 
@@ -243,16 +240,9 @@ class IngestionRuntime:
         self._counters.ticks_in += 1
         self._snapshot.on_tick(tick)
         self._sinks.on_tick(tick)
-        for bar in self._aggregator.ingest(tick):
-            await self._on_closed_bar(bar)
 
     async def _handle_provider_bar(self, bar: Bar) -> None:
-        """Whole-bar path for OHLC shipped by the provider (EL_PublishTickEx).
-
-        Skips the aggregator on purpose — the bar is already final in
-        bar-close mode, or will be after a few more intra-bar updates in
-        "Update every tick" mode; rebuilding it through ingest() would
-        collapse OHLC to the close price either way.
+        """Buffer and de-duplicate a bar shipped by the provider.
 
         EL's "Update every tick" mode re-emits the same (symbol,
         bucket_start) many times per minute with a refined OHLC each
@@ -275,7 +265,7 @@ class IngestionRuntime:
 
         if bar.bucket_start == current.bucket_start:
             # Intra-bar refresh — replace so the final emit carries the
-            # complete OHLC / volume / tick_count for the minute.
+            # complete OHLC and quantities for the interval.
             self._current_direct_bars[key] = bar
             self._counters.bars_direct_updated += 1
             return

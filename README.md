@@ -7,9 +7,13 @@
 
 Market data out of **TradeStation**, for subscribers in any language.
 
-A TradeStation EasyLanguage indicator hands ticks and 1-minute bars to a C++
+A TradeStation EasyLanguage indicator hands ticks and whole OHLC bars to a C++
 bridge DLL, which publishes them over ZeroMQ. Anything that speaks the protocol
 can consume the feed.
+
+**Nothing on the way is computed.** The bars are the ones TradeStation drew, at
+the interval its chart runs; the quantity fields are EasyLanguage's reserved
+words forwarded verbatim. What you subscribe to is what the terminal saw.
 
 ```mermaid
 ---
@@ -22,11 +26,11 @@ flowchart TB
         direction TB
         TS["TradeStation Desktop"]
         EL["EL Exporter Indicator"]
-        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 8"]
+        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 1"]
         TS --> EL --> DLL
     end
     subgraph CON["Contract — the product"]
-        WIRE["wire v3<br/>2-frame ZMQ · JSON"]
+        WIRE["wire proto 1<br/>2-frame ZMQ · JSON"]
         SEM["semantics.md<br/>the rules a schema cannot express"]
         FIX["conformance fixtures"]
     end
@@ -78,7 +82,7 @@ or go straight to the runnable scripts in
 [`bindings/python/examples/`](bindings/python/examples/). Two of the four need
 neither TradeStation nor the DLL: one replays the recorded fixtures in
 [`contract/fixtures/`](contract/fixtures/) through the real binding, the other
-demonstrates the storage tiers on data it generates itself.
+writes a small Parquet store and reads it back.
 
 **Writing a binding in another language** → [`contract/README.md`](contract/README.md).
 Read [`contract/semantics.md`](contract/semantics.md) before writing any parsing
@@ -137,8 +141,9 @@ The full `dumpbin /dependents` breakdown is in
 [`cpp/prebuilt/README.md`](cpp/prebuilt/README.md).
 
 **Installing the EasyLanguage indicator** → [`EL/README.md`](EL/README.md) — paste
-the source into the EasyLanguage Editor, Verify, apply it to a tick or 1-minute
-chart. Install the DLL first: Verify needs it in place already.
+the source into the EasyLanguage Editor, Verify, apply it to a tick chart or to
+any minute/daily chart whose interval the wire supports (`1m` `5m` `15m` `30m`
+`1h` `1d`). Install the DLL first: Verify needs it in place already.
 
 **Inspecting the wire without TradeStation:**
 
@@ -154,17 +159,23 @@ python contract/tools/record.py
 
 ## Versioning
 
-Three version numbers move independently; the pairing that matters is in
-[`contract/compat.md`](contract/compat.md).
-
 | Version | Current | Who cares |
 | --- | ---: | --- |
-| Wire (`"v"` in the payload) | 3 | Every binding |
-| DLL ABI (`EL_DllVersion()`) | 8 | Every binding |
-| Python package | 0.2.0 | Python consumers only |
+| Wire (`"proto"` in the payload) | 1 | Every binding |
+| DLL ABI (`EL_DllVersion()`) | 1 | Every binding |
+| Python package | 0.3.0 | Python consumers only |
 
-Wire v1 and v2 are superseded but **still supported**: the DLL lives inside a user's
-TradeStation install and does not update when a binding does.
+**There is one wire version and one ABI, and nothing older is supported.** A
+frame without `proto` is not this protocol; a binding refuses it rather than
+guessing. The key is `proto` rather than `v` on purpose — the superseded wire
+used `v` and counted to 4, so restarting at 1 under the same key would have made
+`{"v":1}` a legal opening for two different protocols, and the mismatch would
+have surfaced as wrong numbers rather than a refusal.
+
+**Upgrade the DLL and the `.ELD` together.** They are separate install steps and
+the indicator binds `EL_Init3`, which an older DLL does not export. Every
+incompatible combination is caught before anything is published —
+[`contract/wire.md`](contract/wire.md) tabulates which check fires in each case.
 
 ## Status
 

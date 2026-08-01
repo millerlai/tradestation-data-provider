@@ -25,7 +25,7 @@ without TradeStation):
 
 Each output line is {"topic": ..., "payload": ...} where `payload` is the
 frame verbatim, before any parsing. Payloads are UTF-8 JSON per
-contract/v3/envelope.md; a frame that fails to decode is recorded with
+contract/wire.md; a frame that fails to decode is recorded with
 `payload_invalid_utf8` instead so the failure survives into the fixture
 rather than being silently normalised away.
 """
@@ -47,7 +47,7 @@ import zmq
 def fixture_entry(symbol: str, payload: bytes) -> dict[str, str]:
     """Turn one received frame into a fixture line, without interpreting it.
 
-    Payloads are UTF-8 JSON per contract/v3/envelope.md. A frame that does
+    Payloads are UTF-8 JSON per contract/wire.md. A frame that does
     not decode is preserved under a different key rather than dropped or
     coerced — a fixture that silently omits what the wire actually produced
     is worse than no fixture, because every binding would then be checked

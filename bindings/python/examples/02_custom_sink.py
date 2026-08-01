@@ -47,7 +47,6 @@ from dataclasses import dataclass
 
 import _compat
 
-from tradestation_data.aggregation.bar_aggregator import BarAggregator
 from tradestation_data.aggregation.snapshot import MarketSnapshot
 from tradestation_data.domain.bar import Bar
 from tradestation_data.domain.tick import Tick
@@ -93,17 +92,14 @@ class SessionStatsSink(BaseSink):
         st.low = min(st.low, tick.price)
 
     def on_bar(self, bar: Bar) -> None:
-        # Bars arrive here already closed — either aggregated from ticks or
-        # shipped whole by the EL indicator. `bar.source` says which:
-        # "derived:*" is one this binding computed, anything else came off
-        # the wire (contract/semantics.md §2.3).
+        # Every bar arriving here was shipped whole by the EL indicator and
+        # is already closed. There is no other kind: nothing in this binding
+        # builds a bar, so there is no provenance to check before using one.
         st = self._stats(bar.symbol)
         st.bars += 1
         st.high = max(st.high, bar.high)
         st.low = min(st.low, bar.low)
-        print(
-            f"  bar closed  {bar.symbol:<6} {bar.timeframe:>3}  C={bar.close:.2f}  [{bar.source}]"
-        )
+        print(f"  bar closed  {bar.symbol:<6} {bar.timeframe:>3}  C={bar.close:.2f}")
 
     def close(self) -> None:
         # The Sink protocol requires close() to be idempotent (sinks/base.py).
@@ -141,15 +137,11 @@ async def main() -> int:
         provider=TradeStationELProvider(endpoint=args.endpoint),
         symbols=args.symbols,
         snapshot=snapshot,
-        # The aggregator builds 1-minute bars out of ticks. Bars the EL
-        # indicator sends whole bypass it — running a single close price
-        # through it would collapse OHLC to O=H=L=C.
-        aggregator=BarAggregator(),
         sinks=SinkPipeline([SessionStatsSink()]),
         heartbeat_interval=3600,  # quiet for a short demo run
     )
 
-    print(f"running for {args.seconds:g}s on {args.endpoint} …")
+    print(f"running for {args.seconds:g}s on {args.endpoint} ...")
     task = asyncio.create_task(runtime.run())
     try:
         await asyncio.sleep(args.seconds)

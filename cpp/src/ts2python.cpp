@@ -22,7 +22,7 @@
 
 namespace {
 
-constexpr int kDllVersion = 8;
+constexpr int kDllVersion = 1;
 
 std::mutex       g_mutex;
 // Raw pointers, never destroyed implicitly. See pin_self_module_once()
@@ -34,7 +34,7 @@ std::mutex       g_mutex;
 zmq::context_t*  g_ctx  = nullptr;
 zmq::socket_t*   g_sock = nullptr;
 
-// ---- gap detection (wire v2) --------------------------------------------
+// ---- gap detection --------------------------------------------------------
 //
 // PUB/SUB is fire-and-forget: PUB drops silently past SNDHWM and never
 // blocks, SUB drops silently past RCVHWM. Neither side reports it, so
@@ -98,6 +98,28 @@ void format_quote(char* out, std::size_t n, double v) {
     } else {
         std::snprintf(out, n, "%.6f", v);
     }
+}
+
+// ---- quantities -----------------------------------------------------------
+//
+// EasyLanguage has no 64-bit integer type — DefineDLLFunc offers `int`
+// (32-bit) and `double`, and a single day's volume on a heavily traded penny
+// stock exceeds 2^31 — so the five quantity words arrive as double and are
+// narrowed here, once, before they reach the wire.
+//
+// 9.0e15 is just under 2^53, the largest integer a double represents exactly.
+// Past that the double has already lost the low bits, so the value being
+// narrowed is not the value EL held; converting it anyway would emit a
+// precise-looking integer that is simply wrong. The bound also catches NaN
+// and infinity, both of which are undefined behaviour to cast.
+//
+// Written as a rejection rather than a clamp on purpose: a clamped quantity
+// is indistinguishable from a real one downstream, which is the failure mode
+// this whole protocol revision exists to eliminate. -4 is loud.
+bool to_int64(double v, std::int64_t* out) {
+    if (!(v >= -9.0e15 && v <= 9.0e15)) return false;  // NaN / inf / too large
+    *out = static_cast<std::int64_t>(v);
+    return true;
 }
 
 // ---- timeframe ------------------------------------------------------------
@@ -179,55 +201,20 @@ std::uint64_t recv_unix_microseconds() {
         duration_cast<microseconds>(system_clock::now().time_since_epoch()).count());
 }
 
-// Parse EL-formatted bar time "yyyy-MM/dd-HH:mm:ss" 24-hour (e.g. "2026-04/18-13:30:45")
-// into unix epoch seconds (UTC). The EL-supplied timestamp is *always*
-// America/New_York wall-clock (TradeStation chart TZ for US equities), so
-// we interpret it explicitly via std::chrono::zoned_time rather than the
-// host-local std::mktime() path used in v4 (which silently produced the
-// wrong epoch on non-ET hosts — e.g. -8h on TPE in EST, -12h in EDT).
+// The EL timestamp is no longer parsed here.
 //
-// v6 switched from 12-hour+tt ("01:30:45 PM") to 24-hour ("13:30:45")
-// because Windows FormatTime("tt") emits the locale's AM/PM designator —
-// "上午"/"下午" on zh-TW hosts — which neither the sscanf %2s here nor
-// Python's %p strptime can match, collapsing every bar onto today's
-// receive-time minute.
+// The superseded protocol carried a third time field, ts_utc: this DLL's own
+// zoned_time("America/New_York") reading of el_timestamp, published alongside
+// the raw string purely as a cross-check. It was never authoritative — a
+// binding parses ts_str itself, because the DLL host's tz database can be
+// stale in a way the binding host's is not — and shipping a value that every
+// binding must be told not to trust is worse than not shipping it.
 //
-// On Windows the IANA tzdb comes from system ICU (Win10 1903+); on Linux
-// it reads /usr/share/zoneinfo. Returns false on parse error or if the
-// requested zone is unknown — caller emits ts_utc = 0.0 in that case and
-// the Python side falls back to parsing ts_str directly.
-bool parse_el_timestamp_to_utc(const char* s, double* out_epoch) {
-    if (s == nullptr || out_epoch == nullptr) return false;
-    if (s[0] == '\0') return false;
-
-    int year = 0, mon = 0, day = 0, hour = 0, minute = 0, sec = 0;
-    const int matched = std::sscanf(
-        s, "%4d-%2d/%2d-%2d:%2d:%2d",
-        &year, &mon, &day, &hour, &minute, &sec);
-    if (matched != 6) return false;
-    if (hour < 0 || hour > 23) return false;
-
-    using namespace std::chrono;
-    try {
-        const auto ymd = year_month_day{
-            std::chrono::year{year},
-            std::chrono::month{static_cast<unsigned>(mon)},
-            std::chrono::day{static_cast<unsigned>(day)},
-        };
-        if (!ymd.ok()) return false;
-
-        const local_seconds local_t =
-            local_days{ymd} + hours{hour} + minutes{minute} + seconds{sec};
-        const auto zoned = zoned_time{"America/New_York", local_t};
-        const sys_seconds utc = zoned.get_sys_time();
-        *out_epoch = static_cast<double>(utc.time_since_epoch().count());
-        return true;
-    } catch (...) {
-        // Unknown tz, ambiguous local time during DST fold, or out-of-range —
-        // signal failure, caller emits ts_utc = 0.0 and Python re-parses ts_str.
-        return false;
-    }
-}
+// Two things are given up with it, both recorded in ../contract/wire.md:
+// the ts_utc-vs-ts drift check was the only signal that the two hosts'
+// tz databases disagreed, and parsing here doubled as a format check, so an
+// unparseable el_timestamp now reaches the binding intact instead of being
+// flagged at the publisher.
 
 }  // namespace
 
@@ -237,7 +224,7 @@ TS2P_API int TS2P_CALL EL_DllVersion(void) {
     return kDllVersion;
 }
 
-TS2P_API int TS2P_CALL EL_Init(const char* zmq_endpoint) {
+static int init_impl(const char* zmq_endpoint) {
     if (zmq_endpoint == nullptr) return -4;
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
@@ -248,8 +235,8 @@ TS2P_API int TS2P_CALL EL_Init(const char* zmq_endpoint) {
         // PUB silently drops past SNDHWM (PUB never blocks publisher).
         // 100k * ~512B payload ≈ 51MB per subscriber pipe — buys ~30 min
         // of SUB stall at 50 tps, still safe inside TS's 32-bit address space.
-        // Drops past this point are invisible here; the wire-v2 `seq` field
-        // is what lets the subscriber notice them.
+        // Drops past this point are invisible here; the `seq` field is what
+        // lets the subscriber notice them.
         sock->set(zmq::sockopt::sndhwm, 100000);
         sock->set(zmq::sockopt::linger, 0);
         sock->bind(zmq_endpoint);
@@ -271,19 +258,59 @@ TS2P_API int TS2P_CALL EL_Init(const char* zmq_endpoint) {
     }
 }
 
+TS2P_API int TS2P_CALL EL_Init3(const char* zmq_endpoint) {
+    return init_impl(zmq_endpoint);
+}
+
+// ---- tombstones -----------------------------------------------------------
+//
+// The init exports of the superseded protocol. They still exist, and they
+// never initialise anything.
+//
+// EL_PublishTick and EL_PublishBar kept their names but changed arity. Under
+// __stdcall the callee pops the arguments, so an .ELD built against the old
+// signatures would corrupt the stack rather than fail — TradeStation
+// misbehaves or dies, and there is no return code to look at.
+//
+// Every publish call in the indicator sits behind a successful init, so
+// stopping the old .ELD here stops it everywhere. Returning -6 rather than
+// dropping the export is what puts a readable "EL_Init2 FAILED rc=-6" in the
+// Print Log instead of an unexplained DefineDLLFunc resolution failure.
+//
+// Do not delete these until it is safe to assume no old .ELD survives in any
+// install this repo cannot see — which is not a thing this repo can observe.
+TS2P_API int TS2P_CALL EL_Init(const char* /*zmq_endpoint*/) {
+    return -6;
+}
+
+TS2P_API int TS2P_CALL EL_Init2(const char* /*zmq_endpoint*/,
+                                int /*publisher_version*/) {
+    return -6;
+}
+
 TS2P_API int TS2P_CALL EL_PublishTick(
     const char* symbol,
     const char* el_timestamp,
     double      price,
     double      volume,
+    double      ticks,
+    double      upticks,
+    double      downticks,
+    double      open_interest,
     double      bid,
-    double      ask,
-    double      tick_count)
+    double      ask)
 {
     if (symbol == nullptr) return -4;
 
-    double ts_utc_epoch = 0.0;
-    parse_el_timestamp_to_utc(el_timestamp, &ts_utc_epoch);  // 0.0 on failure
+    // Narrow before taking a sequence number: a rejected argument is not a
+    // lost message, so it must not leave a gap in the subscriber's count.
+    std::int64_t q_volume, q_ticks, q_upticks, q_downticks, q_oi;
+    if (!to_int64(volume,        &q_volume)    ||
+        !to_int64(ticks,         &q_ticks)     ||
+        !to_int64(upticks,       &q_upticks)   ||
+        !to_int64(downticks,     &q_downticks) ||
+        !to_int64(open_interest, &q_oi)) return -4;
+
     const char* ts_str = (el_timestamp != nullptr) ? el_timestamp : "";
 
     try {
@@ -296,17 +323,24 @@ TS2P_API int TS2P_CALL EL_PublishTick(
         format_quote(bid_s, sizeof(bid_s), bid);
         format_quote(ask_s, sizeof(ask_s), ask);
 
-        char payload[544];
+        char payload[640];
         const int n = std::snprintf(
             payload, sizeof(payload),
-            "{\"v\":3,\"kind\":\"tick\",\"seq\":%llu,\"sid\":%llu,"
-            "\"ts\":%.6f,\"ts_utc\":%.6f,\"ts_str\":\"%s\","
-            "\"px\":%.6f,\"vol\":%.6f,"
-            "\"bid\":%s,\"ask\":%s,\"tc\":%.0f}",
+            "{\"proto\":1,\"kind\":\"tick\",\"seq\":%llu,\"sid\":%llu,"
+            "\"ts\":%.6f,\"ts_str\":\"%s\","
+            "\"px\":%.6f,"
+            "\"el_volume\":%lld,\"el_ticks\":%lld,\"el_upticks\":%lld,"
+            "\"el_downticks\":%lld,\"el_open_interest\":%lld,"
+            "\"bid\":%s,\"ask\":%s}",
             static_cast<unsigned long long>(seq),
             static_cast<unsigned long long>(g_sid),
-            recv_unix_seconds(), ts_utc_epoch, ts_str, price, volume,
-            bid_s, ask_s, tick_count);
+            recv_unix_seconds(), ts_str, price,
+            static_cast<long long>(q_volume),
+            static_cast<long long>(q_ticks),
+            static_cast<long long>(q_upticks),
+            static_cast<long long>(q_downticks),
+            static_cast<long long>(q_oi),
+            bid_s, ask_s);
         if (n <= 0 || static_cast<size_t>(n) >= sizeof(payload)) return -4;
 
         zmq::message_t topic(symbol, std::strlen(symbol));
@@ -334,14 +368,21 @@ static int publish_bar_impl(
     double      bar_low,
     double      bar_close,
     double      volume,
-    double      bid,
-    double      ask,
-    double      tick_count)
+    double      ticks,
+    double      upticks,
+    double      downticks,
+    double      open_interest)
 {
     if (symbol == nullptr) return -4;
 
-    double ts_utc_epoch = 0.0;
-    parse_el_timestamp_to_utc(el_timestamp, &ts_utc_epoch);  // 0.0 on failure
+    // See EL_PublishTick: narrow before reserving a sequence number.
+    std::int64_t q_volume, q_ticks, q_upticks, q_downticks, q_oi;
+    if (!to_int64(volume,        &q_volume)    ||
+        !to_int64(ticks,         &q_ticks)     ||
+        !to_int64(upticks,       &q_upticks)   ||
+        !to_int64(downticks,     &q_downticks) ||
+        !to_int64(open_interest, &q_oi)) return -4;
+
     const char* ts_str = (el_timestamp != nullptr) ? el_timestamp : "";
 
     try {
@@ -350,23 +391,24 @@ static int publish_bar_impl(
 
         const std::uint64_t seq = reserve_seq(symbol);
 
-        char bid_s[32], ask_s[32];
-        format_quote(bid_s, sizeof(bid_s), bid);
-        format_quote(ask_s, sizeof(ask_s), ask);
-
-        char payload[640];
+        char payload[768];
         const int n = std::snprintf(
             payload, sizeof(payload),
-            "{\"v\":3,\"kind\":\"bar\",\"tf\":\"%s\",\"seq\":%llu,\"sid\":%llu,"
-            "\"ts\":%.6f,\"ts_utc\":%.6f,\"ts_str\":\"%s\","
+            "{\"proto\":1,\"kind\":\"bar\",\"tf\":\"%s\",\"seq\":%llu,\"sid\":%llu,"
+            "\"ts\":%.6f,\"ts_str\":\"%s\","
             "\"o\":%.6f,\"h\":%.6f,\"l\":%.6f,\"c\":%.6f,"
-            "\"vol\":%.6f,\"bid\":%s,\"ask\":%s,\"tc\":%.0f}",
+            "\"el_volume\":%lld,\"el_ticks\":%lld,\"el_upticks\":%lld,"
+            "\"el_downticks\":%lld,\"el_open_interest\":%lld}",
             tf,
             static_cast<unsigned long long>(seq),
             static_cast<unsigned long long>(g_sid),
-            recv_unix_seconds(), ts_utc_epoch, ts_str,
+            recv_unix_seconds(), ts_str,
             bar_open, bar_high, bar_low, bar_close,
-            volume, bid_s, ask_s, tick_count);
+            static_cast<long long>(q_volume),
+            static_cast<long long>(q_ticks),
+            static_cast<long long>(q_upticks),
+            static_cast<long long>(q_downticks),
+            static_cast<long long>(q_oi));
         if (n <= 0 || static_cast<size_t>(n) >= sizeof(payload)) return -4;
 
         zmq::message_t topic(symbol, std::strlen(symbol));
@@ -394,9 +436,10 @@ TS2P_API int TS2P_CALL EL_PublishBar(
     double      bar_low,
     double      bar_close,
     double      volume,
-    double      bid,
-    double      ask,
-    double      tick_count)
+    double      ticks,
+    double      upticks,
+    double      downticks,
+    double      open_interest)
 {
     const char* tf = wire_timeframe(bar_type, bar_interval);
     // No guessing. An unmappable interval published as some default would
@@ -404,31 +447,7 @@ TS2P_API int TS2P_CALL EL_PublishBar(
     if (tf == nullptr) return -5;
     return publish_bar_impl(symbol, el_timestamp, tf,
                             bar_open, bar_high, bar_low, bar_close,
-                            volume, bid, ask, tick_count);
-}
-
-// Retained so an EL script written against an older DLL keeps working.
-// Its signature is part of the ABI: with __stdcall, a DefineDLLFunc whose
-// argument count no longer matches corrupts the stack, so this cannot
-// simply grow two parameters.
-//
-// It can only ever have meant 1-minute — the wire had no way to say
-// otherwise. New scripts should call EL_PublishBar.
-TS2P_API int TS2P_CALL EL_PublishTickEx(
-    const char* symbol,
-    const char* el_timestamp,
-    double      bar_open,
-    double      bar_high,
-    double      bar_low,
-    double      bar_close,
-    double      volume,
-    double      bid,
-    double      ask,
-    double      tick_count)
-{
-    return publish_bar_impl(symbol, el_timestamp, "1m",
-                            bar_open, bar_high, bar_low, bar_close,
-                            volume, bid, ask, tick_count);
+                            volume, ticks, upticks, downticks, open_interest);
 }
 
 TS2P_API int TS2P_CALL EL_Shutdown(void) {

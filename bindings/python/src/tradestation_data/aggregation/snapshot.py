@@ -20,8 +20,8 @@ class SymbolState:
     """
     In-memory snapshot of a symbol's recent market state.
 
-    - `last_tick`        : most recent Tick received (any source)
-    - `last_closed_bar`  : most recent 1-min bar closed by BarAggregator
+    - `last_tick`        : most recent Tick received
+    - `last_closed_bar`  : most recent closed bar the publisher shipped
     - `recent_bars`      : bounded deque of recent closed bars
                            (oldest→newest), filtered per SessionPolicy
     - `session_date`     : NY trading date the current buffer belongs to

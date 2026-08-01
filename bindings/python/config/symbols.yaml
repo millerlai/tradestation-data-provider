@@ -1,5 +1,7 @@
 # Symbol universe configuration.
-# See docs/design.md §6.
+# Session and retention rules per category live in
+# `src/tradestation_data/aggregation/session.py`; the contract rule they
+# implement is contract/semantics.md §4.
 #
 # category:
 #   etf          — tradeable ETFs (volume, bid/ask available)
