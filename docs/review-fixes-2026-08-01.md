@@ -22,7 +22,7 @@ This file is the source of truth for progress. If a session is interrupted:
 
 | # | Severity | File | Defect | Status | Commit |
 |---|---|---|---|---|---|
-| F1 | data loss | `storage/bar_writer.py:226` | One legacy-schema partition aborts every flush for the whole run | ⬜ | |
+| F1 | data loss | `storage/bar_writer.py:226` | One legacy-schema partition aborts every flush for the whole run | ✅ | `e5a8097` |
 | F2 | data loss | `wire/el_subscriber.py:305` | `TypeError` from a bad frame kills the ingest task; process still reports healthy | ⬜ | |
 | F3 | blocks reads | `storage/history_store.py:147` | Still-open footerless partition makes every read of that symbol raise | ⬜ | |
 | F4 | data loss | `wire/el_subscriber.py:410` | 1h RTH stub bar collides with, and overwrites, the preceding hour | ⬜ | |

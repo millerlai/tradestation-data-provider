@@ -61,6 +61,11 @@ class _Partition:
     # bars. Kept in the table rather than dropped so a late bar is refused
     # instead of reopening — pq.ParquetWriter truncates on open.
     sealed: bool = False
+    # This partition cannot be written and never will be during this run —
+    # most often a file on disk under a superseded schema. Poisoning it
+    # confines the damage to one series: without this, one such file takes
+    # down every partition ordered after it, forever.
+    poisoned: bool = False
 
     @property
     def rewrites(self) -> bool:
@@ -164,6 +169,11 @@ class BarWriter:
                 },
             )
             return
+        elif part.poisoned:
+            # Already reported once by _flush_partition with the reason and
+            # the path. Buffering more would only grow memory for a write
+            # that cannot happen.
+            return
         part.buffer.append(bar)
         self._buffered_bars += 1
         if self._oldest_buffer_monotonic is None:
@@ -185,16 +195,48 @@ class BarWriter:
         return total
 
     def _flush_partition(self, part: _Partition) -> int:
-        if not part.buffer:
+        if not part.buffer or part.poisoned:
             return 0
         path = part.path(self._root)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if part.rewrites:
-            self._rewrite(path, part.buffer)
-        else:
-            if part.writer is None:
-                part.writer = pq.ParquetWriter(path, BAR_SCHEMA, compression=self._compression)
-            part.writer.write_table(_bars_to_table(part.buffer))
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if part.rewrites:
+                self._rewrite(path, part.buffer)
+            else:
+                if part.writer is None:
+                    part.writer = pq.ParquetWriter(path, BAR_SCHEMA, compression=self._compression)
+                part.writer.write_table(_bars_to_table(part.buffer))
+        except Exception as exc:
+            # One partition must not be able to starve the others. Without
+            # this, a single unwritable file — a store left over from a
+            # superseded schema is the realistic case — aborts the loop in
+            # flush() for every partition after it, and because the buffer
+            # is only cleared on success it is retried every cycle forever
+            # while memory grows. The process reports healthy throughout,
+            # because nothing here raises where anyone is watching.
+            #
+            # So: report once, loudly, naming the file; give up on this
+            # series for the rest of the run; drop its buffer so memory
+            # stays bounded. Those bars are lost, which is bad — but they
+            # were already lost, and this way the other series survive.
+            part.poisoned = True
+            n = len(part.buffer)
+            part.buffer.clear()
+            self._buffered_bars -= n
+            if self._buffered_bars == 0:
+                self._oldest_buffer_monotonic = None
+            log.error(
+                "bar_partition_unwritable",
+                extra={
+                    "symbol": part.symbol,
+                    "timeframe": part.timeframe,
+                    "date": part.day.isoformat() if part.day else "",
+                    "path": str(path),
+                    "bars_dropped": n,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+            return 0
         n = len(part.buffer)
         part.buffer.clear()
         self._buffered_bars -= n
@@ -221,6 +263,26 @@ class BarWriter:
             # pl.concat(how="vertical") rejects as a width mismatch.
             existing = pl.from_arrow(pq.ParquetFile(path).read())
             assert isinstance(existing, pl.DataFrame)
+            # Check the shape before concatenating, so the failure names the
+            # cause. `publisher_version` took `union_by_name` and the
+            # `with_publisher_version` pad with it when the schema stopped
+            # evolving, and nothing replaced them — so a store written by a
+            # superseded release (columns `volume`, `tick_count`, `source`)
+            # reaches here and pl.concat raises something that reads like a
+            # polars bug rather than "your data root is from an old
+            # version". Old and new bars cannot be merged: the intraday
+            # `volume` there is up-tick volume, not the total, so there is
+            # no correct column mapping to attempt.
+            missing = [f.name for f in BAR_SCHEMA if f.name not in existing.columns]
+            if missing:
+                raise ValueError(
+                    f"{path} was written under a different schema and cannot be "
+                    f"merged: missing {missing}. This is a store from a release "
+                    f"before the el_* quantity columns. Point --data-root (or "
+                    f"the per-sink `root` in sinks.yaml) at a fresh directory "
+                    f"and keep the old one for reading with an older release; "
+                    f"the two conventions cannot be mixed in one file."
+                )
             frames = [existing, incoming]
         merged = (
             pl.concat(frames, how="vertical")
