@@ -28,6 +28,10 @@ BAR_SCHEMA = pa.schema(
         pa.field("el_upticks", pa.int64(), nullable=False),
         pa.field("el_downticks", pa.int64(), nullable=False),
         pa.field("el_open_interest", pa.int64(), nullable=False),
+        pa.field("category", pa.int64(), nullable=False),
+        pa.field("bid", pa.float64(), nullable=True),
+        pa.field("ask", pa.float64(), nullable=True),
+        pa.field("ts", pa.float64(), nullable=True),
     ]
 )
 
@@ -46,13 +50,21 @@ def _row(ts, close, open_=None, el_volume=1000):
         "el_upticks": el_volume + 3,
         "el_downticks": el_volume + 5,
         "el_open_interest": 0,
+        "category": 2,
+        "bid": None,
+        "ask": None,
+        "ts": None,
     }
 
 
 def test_build_imputed_row_structure():
     ts = datetime(2026, 4, 18, 13, 31, tzinfo=UTC)
-    row = ip._build_imputed_row(ts, 123.45)
+    row = ip._build_imputed_row(ts, 123.45, {"category": 2})
     assert row["open"] == row["high"] == row["low"] == row["close"] == 123.45
+    # category is the symbol's, copied from the reference row; nothing was
+    # received, so bid/ask/ts are null.
+    assert row["category"] == 2
+    assert row["bid"] is None and row["ask"] is None and row["ts"] is None
     # No trading was observed, so none is recorded. Carrying a neighbour's
     # volume forward would invent activity on top of inventing a price.
     for q in ("el_volume", "el_ticks", "el_upticks", "el_downticks", "el_open_interest"):

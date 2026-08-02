@@ -88,7 +88,9 @@ def test_session_reset_clears_deque_across_session_boundary() -> None:
     assert st.session_date == date(2026, 4, 20)
 
     # Next bar belongs to 2026-04-21 session → deque must reset.
-    next_open = T0 + timedelta(days=1)  # 09:30 ET on the next day
+    # bar_time is the bar's CLOSE, so the first RTH bar closes 09:31 —
+    # a close of exactly 09:30 would be the last pre-market bar.
+    next_open = T0 + timedelta(days=1, minutes=1)  # closes 09:31 ET next day
     snap.on_bar(_bar("$ADD", next_open, 500.0))
 
     st = snap.state_of("$ADD")
@@ -138,13 +140,16 @@ def test_continuous_policy_keeps_intraday_bars() -> None:
 def test_session_open_bar_recorded_at_session_open() -> None:
     snap = MarketSnapshot(symbol_policies={"SPY": _CONTINUOUS_POLICY})
     snap.on_bar(_bar("SPY", T0.replace(hour=12, minute=45), 449.0))  # pre-market
-    snap.on_bar(_bar("SPY", T0, 450.0))  # 09:30 ET open
+    # Closes exactly 09:30 ET — the LAST pre-market minute, not the open.
+    snap.on_bar(_bar("SPY", T0, 449.5))
+    # Closes 09:31 ET — the first bar of the regular session.
+    snap.on_bar(_bar("SPY", T0 + timedelta(minutes=1), 450.0))
     snap.on_bar(_bar("SPY", T0 + timedelta(minutes=5), 451.0))
 
     st = snap.state_of("SPY")
     assert st is not None
     assert st.session_open_bar is not None
-    assert st.session_open_bar.bar_time == T0
+    assert st.session_open_bar.bar_time == T0 + timedelta(minutes=1)
     assert st.session_open_bar.open == 450.0
 
 
@@ -169,7 +174,8 @@ def test_default_policy_none_preserves_legacy_behavior() -> None:
 
 def test_view_of_exposes_session_fields() -> None:
     snap = MarketSnapshot(symbol_policies={"SPY": _CONTINUOUS_POLICY})
-    snap.on_bar(_bar("SPY", T0, 450.0))
+    # Closes 09:31 ET — a close of exactly 09:30 would be pre-market.
+    snap.on_bar(_bar("SPY", T0 + timedelta(minutes=1), 450.0))
 
     view = snap.view_of("SPY")
     assert view is not None

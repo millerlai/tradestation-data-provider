@@ -91,7 +91,10 @@ class SessionStatsSink(BaseSink):
         st.bars += 1
         st.high = max(st.high, bar.high)
         st.low = min(st.low, bar.low)
-        print(f"  bar closed  {bar.symbol:<6} {bar.timeframe:>3}  C={bar.close:.2f}")
+        print(
+            f"  point closed  {bar.symbol:<6} "
+            f"bt={bar.bar_type} iv={bar.bar_interval}  C={bar.close:.2f}"
+        )
 
     def close(self) -> None:
         # The Sink protocol requires close() to be idempotent (sinks/base.py).

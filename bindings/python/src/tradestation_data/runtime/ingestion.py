@@ -26,30 +26,13 @@ def _key(bar: Bar) -> tuple[str, int, int]:
     return (bar.symbol, bar.bar_type, bar.bar_interval)
 
 
-def _point_duration(bar: Bar) -> timedelta:
-    """How long the chart says this point covers, from its own words.
-
-    BarType 1 is an intraday minute chart and BarInterval is its minutes.
-    BarType 2 is daily. Anything else — a tick series above all — has no
-    duration TradeStation states, so the grace period alone releases it.
-    """
-    if bar.bar_type == 1:
-        return timedelta(minutes=bar.bar_interval)
-    if bar.bar_type == 2:
-        return timedelta(days=1)
-    return timedelta(0)
-
-
 @dataclass(slots=True)
 class _Counters:
-    ticks_in: int = 0
     bars_out: int = 0
     bars_direct_in: int = 0  # points received on the EL_Publish path
     bars_direct_updated: int = 0  # intra-bar updates to a buffered direct bar
     bars_duplicate_dropped: int = 0  # stale/out-of-order direct bar (bar_time < buffered)
-    ticks_dropped: int = 0
     last_report_monotonic: float = field(default_factory=time.monotonic)
-    last_report_ticks: int = 0
     last_report_bars: int = 0
 
 
@@ -199,11 +182,7 @@ class IngestionRuntime:
         self._sinks.close()
         log.info(
             "ingestion_stopped",
-            extra={
-                "ticks_in": self._counters.ticks_in,
-                "bars_out": self._counters.bars_out,
-                "ticks_dropped": self._counters.ticks_dropped,
-            },
+            extra={"bars_out": self._counters.bars_out},
         )
 
     def _drain_direct_bars(self) -> list[Bar]:
@@ -222,21 +201,23 @@ class IngestionRuntime:
 
         Handles the case where a symbol publishes once and then goes
         quiet (no next-bucket signal arrives to trigger emission). Bars
-        are released ``_DIRECT_BAR_CLOSE_GRACE`` after bucket_end so
-        ordinary publish jitter doesn't prematurely finalize a bar that
-        is still receiving intra-bar updates.
+        are released ``_DIRECT_BAR_CLOSE_GRACE`` after the point's own
+        close so ordinary publish jitter doesn't prematurely finalize a
+        bar that is still receiving intra-bar updates.
 
-        The deadline follows the chart's own ``BarInterval``. Assuming one
-        minute would close a 5-minute point at 09:31, publishing OHLC that
-        covers only the first of its five minutes and then discarding every
-        later update as a duplicate — a partition full of one-minute bars
-        under a 5-minute name, with no error anywhere.
+        ``bar_time`` IS the close — EL stamps a developing bar with the
+        time it will close at, and the binding lands that verbatim — so
+        the deadline is simply ``bar_time + grace``, for every chart type
+        alike. The previous formula added the interval on top, a holdover
+        from when the label was the bar's START: it released every point
+        one full interval late, and a daily point one full DAY late. No
+        per-chart-type duration table is needed, which also removes the
+        question of what a weekly chart's duration would be.
         """
         ready: list[Bar] = []
         for key in list(self._current_direct_bars):
             bar = self._current_direct_bars[key]
-            tf_delta = _point_duration(bar)
-            if bar.bar_time + tf_delta + _DIRECT_BAR_CLOSE_GRACE <= now:
+            if bar.bar_time + _DIRECT_BAR_CLOSE_GRACE <= now:
                 ready.append(bar)
                 del self._current_direct_bars[key]
                 self._counters.bars_direct_in += 1
@@ -282,7 +263,23 @@ class IngestionRuntime:
         advance). Stale (<= already-emitted) buckets — e.g. a TS chart
         reload replaying history — are dropped so the sinks never
         see the same minute twice.
+
+        TICK CHARTS BYPASS ALL OF IT. The buffer's precondition is that
+        ``bar_time`` names the bar uniquely, and on ``bar_type`` 0 it does
+        not: ``ts_str`` has minute resolution, so every print inside one
+        minute parses to the same ``bar_time``. Routed through the buffer,
+        each print replaced the previous one and — once the minute was
+        emitted — the ``<= last_emitted`` gate dropped the rest, silently
+        losing nearly the whole stream. Every tick-chart frame is therefore
+        forwarded the moment it arrives, exactly as the old tick path did;
+        the wire's ``ts`` (stored per row) is what orders prints within a
+        minute, and any dedupe is the consumer's decision.
         """
+        if bar.bar_type == 0:
+            self._counters.bars_direct_in += 1
+            await self._on_closed_bar(bar)
+            return
+
         key = _key(bar)
         last_emitted = self._last_emitted_direct_bucket.get(key)
         if last_emitted is not None and bar.bar_time <= last_emitted:
@@ -326,17 +323,14 @@ class IngestionRuntime:
     def _emit_heartbeat(self) -> None:
         now = time.monotonic()
         dt = max(now - self._counters.last_report_monotonic, 1e-9)
-        ticks_since = self._counters.ticks_in - self._counters.last_report_ticks
         bars_since = self._counters.bars_out - self._counters.last_report_bars
         log.info(
             "heartbeat",
             extra={
-                "ticks_in": self._counters.ticks_in,
                 "bars_out": self._counters.bars_out,
                 "bars_direct_in": self._counters.bars_direct_in,
                 "bars_direct_updated": self._counters.bars_direct_updated,
                 "bars_duplicate_dropped": self._counters.bars_duplicate_dropped,
-                "ticks_per_sec": round(ticks_since / dt, 2),
                 "bars_per_sec": round(bars_since / dt, 2),
                 "symbols_seen": len(self._snapshot.symbols()),
                 # Read together or not at all. `messages_lost` counts frames
@@ -351,5 +345,4 @@ class IngestionRuntime:
             },
         )
         self._counters.last_report_monotonic = now
-        self._counters.last_report_ticks = self._counters.ticks_in
         self._counters.last_report_bars = self._counters.bars_out

@@ -227,7 +227,8 @@ int run_bars(const Options& o) {
         }
     }
 
-    std::printf("[harness] bars: 6 published, 3 refused with rc=-5\n");
+    std::printf("[harness] bars: %d published, none refused\n",
+                (int)(sizeof(charts) / sizeof(charts[0])));
     return 0;
 }
 

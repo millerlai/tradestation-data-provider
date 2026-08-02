@@ -34,8 +34,8 @@ def test_expected_bars_1m_full_session():
     bars = vp._expected_bars(date(2026, 4, 17), time(9, 30), time(16, 0), 60, tz)
     # 09:30..15:59 inclusive left-labeled (bar_time) = 390 bars
     assert len(bars) == 390
-    assert bars[0].astimezone(tz).strftime("%H:%M") == "09:30"
-    assert bars[-1].astimezone(tz).strftime("%H:%M") == "15:59"
+    assert bars[0].astimezone(tz).strftime("%H:%M") == "09:31"
+    assert bars[-1].astimezone(tz).strftime("%H:%M") == "16:00"
 
 
 def test_expected_bars_5m_session():

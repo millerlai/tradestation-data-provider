@@ -110,12 +110,15 @@ class MarketSnapshot:
 
         st.session_date = bar_session
         # Capture the first regular-session bar we see for this date.
-        if st.session_open_bar is None and bar.bar_time >= session_start_utc(bar_session):
+        # STRICTLY greater: bar_time is the bar's CLOSE, so the pre-market
+        # bar ending exactly at 09:30 carries bar_time == session start and
+        # must not win — the first RTH bar is the one closing after it.
+        if st.session_open_bar is None and bar.bar_time > session_start_utc(bar_session):
             st.session_open_bar = bar
         elif (
             st.session_open_bar is not None
             and st.session_open_bar.bar_time > bar.bar_time
-            and bar.bar_time >= session_start_utc(bar_session)
+            and bar.bar_time > session_start_utc(bar_session)
         ):
             # Out-of-order ingest that precedes the currently recorded
             # open — keep the earliest.

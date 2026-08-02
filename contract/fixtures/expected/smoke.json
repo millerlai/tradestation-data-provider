@@ -20,7 +20,9 @@
     "  bid/ask   = InsideBid/InsideAsk, null where the publisher had none. They",
     "              arrive on every point, bars included.",
     "",
-    "sid and the tick-side ts are per-run and were read from this recording."
+    "sid and the tick-side ts are per-run and were read from this recording.",
+    "ts = the wire's receive clock, landed verbatim as its own field --",
+    "the only sub-minute ordering a tick chart's rows have (semantics.md 1)."
   ],
   "events": [
     {
@@ -41,7 +43,8 @@
       "el_downticks": 80,
       "el_open_interest": 0,
       "bid": 449.99,
-      "ask": 450.01
+      "ask": 450.01,
+      "ts": 1785647495.808314
     },
     {
       "symbol": "QQQ",
@@ -61,7 +64,8 @@
       "el_downticks": 80,
       "el_open_interest": 0,
       "bid": 449.99,
-      "ask": 450.01
+      "ask": 450.01,
+      "ts": 1785647495.808369
     },
     {
       "symbol": "VXX",
@@ -81,7 +85,8 @@
       "el_downticks": 80,
       "el_open_interest": 0,
       "bid": 449.99,
-      "ask": 450.01
+      "ask": 450.01,
+      "ts": 1785647495.808373
     },
     {
       "symbol": "SPY",
@@ -101,7 +106,8 @@
       "el_downticks": 80,
       "el_open_interest": 0,
       "bid": 449.99,
-      "ask": 450.01
+      "ask": 450.01,
+      "ts": 1785647495.808378
     },
     {
       "symbol": "QQQ",
@@ -121,7 +127,8 @@
       "el_downticks": 80,
       "el_open_interest": 0,
       "bid": 449.99,
-      "ask": 450.01
+      "ask": 450.01,
+      "ts": 1785647495.808381
     },
     {
       "symbol": "SPY",
@@ -141,7 +148,8 @@
       "el_downticks": 9000,
       "el_open_interest": 0,
       "bid": null,
-      "ask": null
+      "ask": null,
+      "ts": 1785647495.808384
     }
   ],
   "expected_messages_lost": 0

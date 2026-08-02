@@ -20,7 +20,9 @@
     "  bid/ask   = InsideBid/InsideAsk, null where the publisher had none. They",
     "              arrive on every point, bars included.",
     "",
-    "sid and the tick-side ts are per-run and were read from this recording."
+    "sid and the tick-side ts are per-run and were read from this recording.",
+    "ts = the wire's receive clock, landed verbatim as its own field --",
+    "the only sub-minute ordering a tick chart's rows have (semantics.md 1)."
   ],
   "events": [
     {
@@ -41,7 +43,8 @@
       "el_downticks": 0,
       "el_open_interest": 0,
       "bid": null,
-      "ask": null
+      "ask": null,
+      "ts": 1785647505.920702
     },
     {
       "symbol": "SPY",
@@ -61,7 +64,8 @@
       "el_downticks": 80,
       "el_open_interest": 0,
       "bid": null,
-      "ask": null
+      "ask": null,
+      "ts": 1785647505.920813
     },
     {
       "symbol": "SPY",
@@ -81,7 +85,8 @@
       "el_downticks": 9000,
       "el_open_interest": 0,
       "bid": null,
-      "ask": null
+      "ask": null,
+      "ts": 1785647505.920822
     }
   ],
   "expected_messages_lost": 0

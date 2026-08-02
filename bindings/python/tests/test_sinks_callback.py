@@ -59,7 +59,7 @@ def test_callback_sink_off_removes_handler() -> None:
 
 def test_callback_sink_invalid_kind_raises() -> None:
     sink = CallbackSink(name="cb4")
-    with pytest.raises(ValueError, match="kind must be 'tick' or 'bar'"):
+    with pytest.raises(ValueError, match="kind must be 'bar'"):
         sink.on("SPY", "candle", lambda _: None)  # type: ignore[arg-type]
 
 

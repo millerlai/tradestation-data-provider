@@ -1,4 +1,4 @@
-"""Callback sink — dispatch ticks/bars to user-registered Python functions.
+"""Callback sink — dispatch points to user-registered Python functions.
 
 The runtime declares the sink in ``sinks.yaml``; user code then looks
 it up by name and registers callbacks dynamically::
@@ -11,7 +11,7 @@ it up by name and registers callbacks dynamically::
         print(bar.symbol, bar.close)
 
     handle = sink.on("SPY", "bar", my_bar_handler)
-    sink.on_any("tick", lambda t: log_tick(t))
+    sink.on_any("bar", lambda b: log_point(b))
 
     # Later:
     sink.off(handle)               # remove specific handler
@@ -153,7 +153,7 @@ class CallbackSink(BaseSink):
         fn: AnyCallback,
     ) -> Handle:
         if kind != "bar":
-            raise ValueError(f"kind must be 'tick' or 'bar', got {kind!r}")
+            raise ValueError(f"kind must be 'bar' — the only kind there is — got {kind!r}")
         if not callable(fn):
             raise TypeError(f"callback must be callable, got {type(fn).__name__}")
         handle = Handle(id=next(self._id_counter), kind=kind, symbol=symbol)

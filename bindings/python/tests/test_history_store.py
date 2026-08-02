@@ -242,6 +242,7 @@ def test_imputation_output_root_is_refused_not_read_as_collected_data(
         "category": [2],
         "bid": [None],
         "ask": [None],
+        "ts": [None],
         "imputed": [True],
     }
     pq.write_table(

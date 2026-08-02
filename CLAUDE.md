@@ -162,7 +162,9 @@ binding does not do" below.
 
 The `tick_writer` / `bar_writer` constructor parameters on `IngestionRuntime` are gone — pass a `SinkPipeline` instead. `BarWriter` still lives under `storage/` because `ParquetBarSink` wraps it; it is *not* the public interface anymore.
 
-The DLL exports one publisher, `EL_Publish`; a point always arrives whole. EL's "Update every tick" mode re-sends the same `(symbol, bar_time)` many times per minute, so `_handle_provider_bar` buffers the latest per symbol and only emits when the next bucket arrives, on wall-clock advance past `bucket_end + grace`, or on shutdown. `_last_emitted_direct_bucket` blocks history-replay duplicates after a TS chart reload.
+The DLL exports one publisher, `EL_Publish`; a point always arrives whole. EL's "Update every tick" mode re-sends the same `(symbol, bar_time)` many times per minute, so `_handle_provider_bar` buffers the latest per chart and only emits when the next bucket arrives, on wall-clock advance past `bar_time + grace` (bar_time IS the close — adding an interval on top released every point one interval late, and a daily point a day late), or on shutdown. `_last_emitted_direct_bucket` blocks history-replay duplicates after a TS chart reload.
+
+**Tick charts (`bar_type` 0) bypass the buffer entirely.** Its precondition is that `bar_time` names the bar uniquely, and with minute-resolution `ts_str` every print inside a minute shares one `bar_time` — routed through the buffer, a live 1-tick chart lost nearly its whole stream to replace-then-dedupe. Every tick-chart frame is forwarded on arrival; the wire's `ts` (stored per row) is what orders prints within a minute, and dedupe is the consumer's call.
 
 ### What this binding does not do
 
@@ -249,6 +251,9 @@ and every binding must agree. Change them there first.**
   bar shares one `ts` and would collapse onto a single bucket. 24-hour is deliberate —
   `hh:mm:ss tt` broke on zh-TW Windows hosts where `FormatTime("tt")` emits localised
   AM/PM.
+- **The wire's `ts` (receive clock) lands verbatim as its own column.** On a tick
+  chart it is the only sub-minute time there is — `ts_str` has minute resolution,
+  so every print inside a minute shares one `bar_time` and `ts` orders them.
 - **The DLL no longer parses `ts_str`, so it no longer validates it.** `ts_utc` is gone
   from the wire: it was `zoned_time`'s reading of the same string that Python parses with
   `ZoneInfo`, and the >5s drift warning was the only signal that the two ends disagreed

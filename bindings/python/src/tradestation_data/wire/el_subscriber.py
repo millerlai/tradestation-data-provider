@@ -459,6 +459,7 @@ class TradeStationELProvider:
             close=float(data["c"]),
             bid=_quote_or_none(data.get("bid")),
             ask=_quote_or_none(data.get("ask")),
+            ts=float(data["ts"]),
             **_quantities(data),
         )
 

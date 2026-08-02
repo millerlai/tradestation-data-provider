@@ -49,11 +49,11 @@ wait
 | --- | --- | ---: |
 | `smoke.jsonl` | `smoke` | 6 |
 | `noquote.jsonl` | `noquote` | 3 |
-| `bars.jsonl` | `bars` | 6 |
+| `bars.jsonl` | `bars` | 9 |
 | `session.jsonl` | `session` | 2 |
 
-> `bars` 的 6 是 **9 次呼叫**的結果：6 個可對應的間隔各送出一個 frame，另外 3 次
-> （2 分鐘、週線、2 日線）回 `-5` 且不送出。
+> `bars` 的 9 個 frame 對應 9 種 `BarType`/`BarInterval` 組合 —— 包含 2 分鐘(1/2)、
+> 週線(3/1)與 2 日(2/2)。**沒有任何組合被拒收**;`-5` 的映射拒收已隨 `tf` 一起移除。
 
 > TradeStation 執行中時它已經佔用預設的 `tcp://127.0.0.1:5555`，init 會回 `-3`。
 > 不必關掉 TradeStation，兩邊都指定同一個別的 port 即可。

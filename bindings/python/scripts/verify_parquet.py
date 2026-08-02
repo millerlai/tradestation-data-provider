@@ -91,18 +91,21 @@ def _expected_bars(
     tf_sec: int,
     tz: ZoneInfo,
 ) -> list[datetime]:
-    """Left-labeled bucket starts for a session. 1m 09:30-16:00 → [09:30..15:59].
+    """Close-labelled bar times for a session. 1m 09:30-16:00 → [09:31..16:00].
 
-    Matches ``BAR_SCHEMA.bar_time`` semantics: bucket = [t, t+step), so
-    a US RTH 09:30-16:00 session yields ``bar_time`` values starting at
-    09:30 and ending at 15:59 (last bucket covers [15:59, 16:00)).
+    Matches ``BAR_SCHEMA.bar_time`` semantics: ``bar_time`` is EasyLanguage's
+    ``Time``, the bar's CLOSE, landed verbatim (contract/semantics.md §2).
+    A US RTH 09:30-16:00 session therefore stores 09:31 through 16:00 — the
+    left-labelled 09:30..15:59 grid this function used to generate belonged
+    to the deleted conversion, and against a verbatim store it reported one
+    phantom missing bar and one unexpected bar every single day.
     """
     start_dt = datetime.combine(day, start).replace(tzinfo=tz)
     end_dt = datetime.combine(day, end).replace(tzinfo=tz)
     step = timedelta(seconds=tf_sec)
     out: list[datetime] = []
-    t = start_dt
-    while t < end_dt:
+    t = start_dt + step
+    while t <= end_dt:
         out.append(t.astimezone(UTC))
         t += step
     return out
@@ -318,6 +321,9 @@ def main() -> int:
     args = ap.parse_args()
 
     try:
+        if args.bar_interval < 1:
+            print(f"error: --bar-interval must be >= 1, got {args.bar_interval}", file=sys.stderr)
+            return 2
         tf_label = f"bartype={args.bar_type}/interval={args.bar_interval}"
         tf_sec = args.bar_interval * 60
         start_time = _parse_hhmm(args.start_time)

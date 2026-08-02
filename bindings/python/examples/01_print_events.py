@@ -33,7 +33,6 @@ import asyncio
 
 import _compat
 
-from tradestation_data.domain.bar import Bar
 from tradestation_data.wire.el_subscriber import TradeStationELProvider
 
 
@@ -76,22 +75,17 @@ async def main() -> int:
     seen = 0
     try:
         async for event in provider.events():
-            if isinstance(event, Bar):
-                print(
-                    f"BAR  {event.symbol:<6} {event.timeframe:>3}  "
-                    f"{event.bar_time_et:%Y-%m-%d %H:%M}  "
-                    f"O={event.open:<8.2f} H={event.high:<8.2f} "
-                    f"L={event.low:<8.2f} C={event.close:<8.2f} el_vol={event.el_volume}"
-                )
-            else:
-                # bid/ask are absent when there is no quote to report:
-                # historical replay, or a breadth index that never carries one.
-                quote = format_quote(event.bid, event.ask)
-                print(
-                    f"TICK {event.symbol:<6}      "
-                    f"{event.timestamp_et:%Y-%m-%d %H:%M:%S}  "
-                    f"px={event.price:<8.2f} el_vol={event.el_volume:<6} {quote}"
-                )
+            # One frame shape, whatever the chart is. The chart names itself
+            # via bar_type/bar_interval, and bid/ask are absent when there was
+            # no quote to report (historical replay, breadth indices).
+            quote = format_quote(event.bid, event.ask)
+            print(
+                f"{event.symbol:<6} bt={event.bar_type} iv={event.bar_interval:<4} "
+                f"{event.bar_time_et:%Y-%m-%d %H:%M}  "
+                f"O={event.open:<8.2f} H={event.high:<8.2f} "
+                f"L={event.low:<8.2f} C={event.close:<8.2f} "
+                f"el_vol={event.el_volume:<8} {quote}"
+            )
 
             seen += 1
             if args.count and seen >= args.count:

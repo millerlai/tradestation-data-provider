@@ -112,10 +112,13 @@ def _passthrough_table(path: Path) -> pa.Table:
     return table.append_column(_IMPUTED_FIELD, flags)
 
 
-def _build_imputed_row(bar_time: datetime, value: float) -> dict:
+def _build_imputed_row(bar_time: datetime, value: float, reference: dict) -> dict:
     # Every quantity is 0: this bar records no trading, because none was
     # observed. Carrying a neighbour's volume forward would invent activity
-    # on top of inventing a price.
+    # on top of inventing a price. bid/ask are null and `ts` is null for the
+    # same reason — nothing was received. `category` is the one field copied
+    # from the reference row: it is a property of the symbol, not of the bar,
+    # and the file's own rows are the authority on it.
     return {
         "bar_time": bar_time,
         "bar_time_et": bar_time.astimezone(_ET_TZ),
@@ -128,6 +131,10 @@ def _build_imputed_row(bar_time: datetime, value: float) -> dict:
         "el_upticks": 0,
         "el_downticks": 0,
         "el_open_interest": 0,
+        "category": reference["category"],
+        "bid": None,
+        "ask": None,
+        "ts": None,
         "imputed": True,
     }
 
@@ -207,7 +214,7 @@ def impute_day(
             log.append((t, "SKIP_no_reference"))
             continue
         value, fallback = result
-        new_rows.append(_build_imputed_row(t, value))
+        new_rows.append(_build_imputed_row(t, value, prev if prev is not None else nxt))
         log.append((t, fallback or method))
 
     if not new_rows:
@@ -283,6 +290,9 @@ def main() -> int:
     args = ap.parse_args()
 
     try:
+        if args.bar_interval < 1:
+            print(f"error: --bar-interval must be >= 1, got {args.bar_interval}", file=sys.stderr)
+            return 2
         tf_label = f"bartype={args.bar_type}/interval={args.bar_interval}"
         tf_sec = args.bar_interval * 60
         start_time = _parse_hhmm(args.start_time)

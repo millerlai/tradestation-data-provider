@@ -127,7 +127,6 @@ async def test_runtime_preserves_published_bar_ohlc(
 
     # Counter advanced on the direct-bar path.
     assert runtime._counters.bars_direct_in == 1
-    assert runtime._counters.ticks_in == 0
 
     bar_file = (
         tmp_path
@@ -347,22 +346,64 @@ async def test_advance_direct_bars_flushes_after_grace(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_direct_bar_close_deadline_follows_the_charts_interval() -> None:
-    """A 5-minute point must not be closed one minute in.
+async def test_direct_bar_release_deadline_is_close_plus_grace() -> None:
+    """bar_time IS the close, so the point releases at close + grace.
 
-    A fixed one-minute deadline would emit OHLC covering only the first of
-    the point's five minutes, then discard every later update as a
-    duplicate — leaving interval=5 full of minute bars with no error
-    anywhere. The deadline comes from EL's own BarInterval.
+    The old formula added the chart's interval on top — right when the label
+    was the bar's START, one full interval late now that it is the close. A
+    5-minute point closing 13:30 must be out by 13:30:02, not 13:35:02; a
+    daily point must not wait an extra day.
     """
     runtime = _make_runtime()
     ts = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)
     await runtime._handle_provider_bar(_bar("SPY", ts, bar_interval=5))
 
-    assert runtime._advance_direct_bars(ts + timedelta(minutes=1, seconds=5)) == []
-    ready = runtime._advance_direct_bars(ts + timedelta(minutes=5, seconds=5))
+    # Inside the grace window the point may still be refreshed.
+    assert runtime._advance_direct_bars(ts + timedelta(seconds=1)) == []
+    ready = runtime._advance_direct_bars(ts + timedelta(seconds=5))
     assert len(ready) == 1
     assert ready[0].bar_interval == 5
+
+    # Daily: same rule, no per-type duration table.
+    d = datetime(2026, 4, 20, 20, 0, tzinfo=UTC)
+    await runtime._handle_provider_bar(_bar("SPY", d, bar_type=2, bar_interval=1))
+    assert runtime._advance_direct_bars(d + timedelta(seconds=1)) == []
+    assert len(runtime._advance_direct_bars(d + timedelta(seconds=5))) == 1
+
+
+@pytest.mark.asyncio
+async def test_tick_chart_frames_bypass_the_buffer_entirely() -> None:
+    """Every bar_type-0 frame is forwarded the moment it arrives.
+
+    ts_str has minute resolution, so every print inside one minute parses to
+    the same bar_time. Routed through the intra-bar buffer, each print
+    replaced the previous one and — once the minute was emitted — the
+    `<= last_emitted` gate dropped the rest: a live 1-tick chart lost nearly
+    its whole stream, silently, where proto 1's tick path forwarded every
+    print. The buffer's precondition is that bar_time names the bar
+    uniquely, and on a tick chart it does not.
+    """
+    runtime = _make_runtime()
+    emitted: list = []
+    runtime._on_bar = emitted.append
+
+    ts = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)
+    # Five prints inside one minute — same bar_time on every frame.
+    for i in range(5):
+        await runtime._handle_provider_bar(
+            _bar("SPY", ts, close=450.0 + i * 0.01, bar_type=0, bar_interval=1)
+        )
+
+    assert len(emitted) == 5, "a tick chart's prints must all land, not collapse"
+    assert [b.close for b in emitted] == [450.0, 450.01, 450.02, 450.03, 450.04]
+    assert runtime._counters.bars_direct_in == 5
+    assert runtime._counters.bars_duplicate_dropped == 0
+
+    # And a replayed print (same minute again) still lands: with no unique
+    # name there is nothing safe to dedupe on. Offline dedupe is the
+    # consumer's call.
+    await runtime._handle_provider_bar(_bar("SPY", ts, close=450.0, bar_type=0, bar_interval=1))
+    assert len(emitted) == 6
 
 
 @pytest.mark.asyncio
@@ -399,10 +440,8 @@ async def test_direct_bars_are_buffered_per_symbol_and_chart() -> None:
 def test_emit_heartbeat_updates_counters() -> None:
     """Covers lines 405-424."""
     runtime = _make_runtime()
-    runtime._counters.ticks_in = 10
     runtime._counters.bars_out = 2
     runtime._emit_heartbeat()
-    assert runtime._counters.last_report_ticks == 10
     assert runtime._counters.last_report_bars == 2
 
 

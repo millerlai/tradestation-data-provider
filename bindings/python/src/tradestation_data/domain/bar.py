@@ -49,6 +49,13 @@ class Bar:
     ``bid`` / ``ask`` are ``InsideBid`` / ``InsideAsk``, or None where the
     publisher had no quote to report. They travel on every point, bars
     included.
+
+    ``ts`` is the DLL's receive-side wall clock (UTC epoch seconds), landed
+    verbatim from the wire. On a tick chart it is the only sub-minute time
+    there is: ``ts_str`` has minute resolution, so every print inside one
+    minute shares a ``bar_time``, and ``ts`` is what orders them — exactly
+    the field that was the tick's timestamp before the shapes merged.
+    None only for rows synthesised off-wire (tests, examples).
     """
 
     symbol: str
@@ -67,6 +74,7 @@ class Bar:
     el_open_interest: int
     bid: float | None = None
     ask: float | None = None
+    ts: float | None = None
 
     @property
     def bar_time_et(self) -> datetime:

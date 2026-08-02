@@ -111,6 +111,12 @@ async def test_every_field_matches_the_contract(case: str) -> None:
         assert event.bar_interval == want["bar_interval"], where
         assert event.category == want["category"], where
 
+        # semantics.md §1 — the receive clock lands verbatim. On a tick chart
+        # it is the only sub-minute ordering the rows have, so a binding that
+        # dropped it could not be told apart from one that kept it without
+        # this line.
+        assert event.ts == pytest.approx(want["ts"]), where
+
         # semantics.md §3 — a quote is absent when the wire says null. Every
         # point carries the pair, bars included.
         if want["bid"] is None:

@@ -36,13 +36,15 @@
   vocabulary. Guessing here would file 5-minute bars under the 1-minute
   partition, which nothing downstream can detect.
 
-  SUB-MINUTE CHARTS ARE DETECTED AND REFUSED: a second-based chart also reports
-  BarType = 1, and can report BarInterval = 1 exactly like a 1-minute chart, so
-  the two numbers cannot tell them apart. Published as 1m, those bars would fill
-  the 1-minute partition with sub-minute data wearing minute-shaped timestamps —
-  and nothing downstream could notice, because TsStr is built from Time, which
-  has minute resolution, so the seconds are gone before the bar leaves this
-  script.
+  SUB-MINUTE AND AGGREGATED-TICK CHARTS ARE DETECTED AND LOGGED — publishing
+  CONTINUES. A second-based chart reports BarType = 1 with BarInterval = 1
+  exactly like a 1-minute chart, and TsStr has minute resolution, so its
+  bars land with minute-shaped timestamps; an N-tick chart's frames each
+  carry a whole aggregated bar. Both used to stop publishing here — this
+  script deciding the data was not worth sending. Now each is announced
+  once in the Print Log, bar_type/bar_interval travel on every frame so a
+  consumer can see what the chart was, and the wire's receive-side ts is
+  what separates same-minute frames.
 
   What survives is the repetition: on a minute chart Date and Time advance every
   bar; on a sub-minute chart consecutive bars share both. This script latches on
@@ -139,7 +141,7 @@ If Enabled and InitDone = False Then Begin
             VersionMismatch = True;
             If LogErrors Then
                 Print("[TS2Python] DLL ABI mismatch: EL_DllVersion=", DllVer,
-                      " but this indicator is built for 1.",
+                      " but this indicator is built for 2.",
                       " Publishing stopped on symbol=", GetSymbolName, ".",
                       " Reinstall TS2Python.dll and re-import the .ELD that",
                       " shipped with it — they are versioned together.");

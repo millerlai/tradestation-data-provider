@@ -14,13 +14,17 @@ wire 上有兩個時間戳，用途**不可互換**：
 
 | 欄位 | 來源 | 正確用途 | 錯誤用途 |
 | --- | --- | --- | --- |
-| `ts` | DLL 收訊端 wall clock（UTC epoch 秒） | **Tick 的事件時間**；延遲量測 | ❌ Bar 邊界 |
-| `ts_str` | EL 原始字串，逐字透傳 | **Bar `bar_time` 的唯一權威來源** | ❌ Tick 時間 |
+| `ts_str` | EL 原始字串，逐字透傳 | **`bar_time` 的唯一權威來源**（每一種圖都是） | ❌ 當成有秒級解析度 |
+| `ts` | DLL 收訊端 wall clock（UTC epoch 秒） | 逐字落地為 `ts` 欄；延遲量測；**tick 圖上同一分鐘內各 frame 的唯一排序依據**；`ts_str` 缺席時的最後手段 | ❌ `bar_time` 的來源（缺席除外） |
+
+**兩個都必須落地。** frame 只有一種形狀，`ts_str` 只有分鐘解析度 —— tick 圖
+（`bar_type` 0）一分鐘內的每一筆成交共用同一個 `bar_time`，把它們分開的資訊只在
+`ts` 裡。丟掉 `ts` 的 binding 存下的 tick 資料無法在分鐘內排序，而那正是舊協定
+tick 的事件時間。
 
 ### 1.1 規則
 
-- **Tick 的時間 = `ts`**（DLL 收訊端 UTC epoch）。
-- **Bar 的 `bar_time` = `ts_str` 解析結果**：以 `yyyy-MM/dd-HH:mm:ss` 格式、
+- **`bar_time` = `ts_str` 解析結果**（每一種圖、每一個 frame 都是同一條規則）：以 `yyyy-MM/dd-HH:mm:ss` 格式、
   **`America/New_York` 時區**解析，再轉 UTC。
   - 必須用 IANA tz database 的 `America/New_York`，**不可用系統本地時區**，也不可用
     固定 UTC 偏移。DLL 主機的系統時區與此無關。
