@@ -235,7 +235,6 @@ class HourlyCsvSink(BaseSink):
 ```python
 class Sink(Protocol):
     name: str
-    def on_tick(self, tick: Tick) -> None: ...
     def on_bar(self, bar: Bar) -> None: ...
     def should_flush(self) -> bool: ...   # 預設 False — 只有 buffered sink 需要 override
     def flush(self) -> None: ...          # 預設 no-op
@@ -255,7 +254,7 @@ def on_spy_bar(bar):
     print(bar.symbol, bar.close)
 
 sink.on("SPY", "bar", on_spy_bar)
-sink.on_any("tick", lambda t: ...)   # 所有 symbol
+sink.on_any("bar", lambda b: ...)   # 所有 symbol
 ```
 
 Callback 在 ingest loop 中**同步**呼叫，請保持輕量（微秒級）。需要做重活就在 callback 內 spawn `asyncio.create_task` 或 thread。Callback 拋 exception 會被 log、隔離，其他 callback 仍會執行。
@@ -320,7 +319,7 @@ bindings/python/                   # 本 binding；repo 根目錄在上兩層
 │   └── symbols.yaml               # symbol universe + 每 symbol 的 session policy
 ├── scripts/                       # 給人用的 CLI 包裝（見上）
 ├── src/tradestation_data/
-│   ├── domain/                    # Bar / Tick —— wire 的值域
+│   ├── domain/                    # Bar —— wire 的值域
 │   ├── wire/                      # frame 解碼、缺漏偵測          [core]
 │   ├── aggregation/               # MarketSnapshot / session policy  [app]
 │   ├── storage/                   # BarWriter / HistoryStore

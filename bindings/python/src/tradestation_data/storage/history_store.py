@@ -75,7 +75,6 @@ class HistoryStore:
 
     Layout, written by BarWriter:
 
-      {root}/ticks/symbol=.../date=.../ticks.parquet
       {root}/bars/bartype=<N>/interval=<M>/symbol=.../date=.../bars.parquet
       {root}/bars/bartype=2/interval=<M>/symbol=.../bars.parquet   — no date=
 

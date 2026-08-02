@@ -244,7 +244,12 @@ def main() -> int:
     )
     ap.add_argument("--start-date", required=True, type=_parse_date)
     ap.add_argument("--end-date", required=True, type=_parse_date)
-    ap.add_argument("--bar-type", type=int, default=1, help="EL BarType, verbatim")
+    ap.add_argument(
+        "--bar-type",
+        type=int,
+        default=1,
+        help="EL BarType. Only 1 (intraday minutes) is supported here.",
+    )
     ap.add_argument("--bar-interval", type=int, default=1, help="EL BarInterval, verbatim")
     ap.add_argument("--start-time", default="09:30")
     ap.add_argument("--end-time", default="16:00")
@@ -292,6 +297,18 @@ def main() -> int:
     try:
         if args.bar_interval < 1:
             print(f"error: --bar-interval must be >= 1, got {args.bar_interval}", file=sys.stderr)
+            return 2
+        if args.bar_type != 1:
+            print(
+                f"error: --bar-type {args.bar_type} is not supported here. This tool "
+                f"derives an expected per-day bar grid, which only exists for intraday "
+                f"minute charts (BarType 1). A daily store (BarType 2) is FLAT -- one "
+                f"file per symbol, no date= level -- so this tool's date-partitioned "
+                f"paths would read every day as FILE_MISSING and its minute grid would "
+                f"invent hundreds of 'missing' bars. A day with no daily bar is visible "
+                f"as a missing row in bars.parquet itself.",
+                file=sys.stderr,
+            )
             return 2
         tf_label = f"bartype={args.bar_type}/interval={args.bar_interval}"
         tf_sec = args.bar_interval * 60

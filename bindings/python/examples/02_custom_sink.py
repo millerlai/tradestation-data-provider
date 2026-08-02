@@ -57,7 +57,6 @@ from tradestation_data.wire.el_subscriber import TradeStationELProvider
 
 @dataclass
 class _Stats:
-    ticks: int = 0
     bars: int = 0
     high: float = float("-inf")
     low: float = float("inf")
@@ -91,6 +90,7 @@ class SessionStatsSink(BaseSink):
         st.bars += 1
         st.high = max(st.high, bar.high)
         st.low = min(st.low, bar.low)
+        st.last = bar.close
         print(
             f"  point closed  {bar.symbol:<6} "
             f"bt={bar.bar_type} iv={bar.bar_interval}  C={bar.close:.2f}"
@@ -111,7 +111,7 @@ class SessionStatsSink(BaseSink):
         for symbol in sorted(self._by_symbol):
             st = self._by_symbol[symbol]
             print(
-                f"{symbol:<6} ticks={st.ticks:<5} bars={st.bars:<4} "
+                f"{symbol:<6} points={st.bars:<4} "
                 f"high={st.high:<8.2f} low={st.low:<8.2f} last={st.last:.2f}"
             )
 
@@ -151,8 +151,8 @@ async def main() -> int:
     # you want from anything that spans an await.
     for symbol in args.symbols:
         view = snapshot.view_of(symbol)
-        if view is not None and view.last_tick is not None:
-            print(f"snapshot {symbol:<6} last tick px={view.last_tick.price:.2f}")
+        if view is not None and view.last_closed_bar is not None:
+            print(f"snapshot {symbol:<6} last close={view.last_closed_bar.close:.2f}")
 
     return 0
 

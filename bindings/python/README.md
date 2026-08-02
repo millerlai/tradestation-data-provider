@@ -238,7 +238,6 @@ The full protocol:
 ```python
 class Sink(Protocol):
     name: str
-    def on_tick(self, tick: Tick) -> None: ...
     def on_bar(self, bar: Bar) -> None: ...
     def should_flush(self) -> bool: ...   # default False — only for buffered sinks
     def flush(self) -> None: ...          # default no-op
@@ -258,7 +257,7 @@ def on_spy_bar(bar):
     print(bar.symbol, bar.close)
 
 sink.on("SPY", "bar", on_spy_bar)
-sink.on_any("tick", lambda t: ...)   # every symbol
+sink.on_any("bar", lambda b: ...)   # every symbol
 ```
 
 Callbacks run synchronously inside the ingest loop — keep them fast (a few microseconds). Spawn `asyncio.create_task` or a thread inside the callback if you need to do real work. A callback that raises is logged and isolated; other callbacks for the same event still fire.
@@ -328,7 +327,7 @@ bindings/python/                   # this binding; repo root is two levels up
 │   └── symbols.yaml               # symbol universe + per-symbol session policy
 ├── scripts/                       # human-facing CLI wrappers (see above)
 ├── src/tradestation_data/
-│   ├── domain/                    # Bar / Tick — the value range of the wire
+│   ├── domain/                    # Bar — the value range of the wire
 │   ├── wire/                      # frame decoding, gap detection  [core]
 │   ├── aggregation/               # MarketSnapshot / session policy   [app]
 │   ├── storage/                   # BarWriter / HistoryStore
