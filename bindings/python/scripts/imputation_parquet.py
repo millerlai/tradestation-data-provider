@@ -78,6 +78,22 @@ def _output_schema(source: pa.Schema) -> pa.Schema:
     return source.append(_IMPUTED_FIELD)
 
 
+def _read_file(path: Path) -> pa.Table:
+    """The file's own columns, without the ones the path implies.
+
+    `pq.read_table()` on a single file under `timeframe=/symbol=/date=` runs
+    hive discovery and hands back those three as real columns — 14, not the 11
+    BAR_SCHEMA declares. Building an output schema from that produced a
+    15-column table while `_build_imputed_row` supplies 12 keys, so every
+    invented bar was written with NULL `timeframe`, `symbol` and `date` next
+    to real values on the rows that came off the wire.
+
+    `ParquetFile.read()` reads the file and nothing else. `bar_writer._rewrite`
+    already does this for the same reason.
+    """
+    return pq.ParquetFile(path).read()
+
+
 def _passthrough_table(path: Path) -> pa.Table:
     """One source day, rows unchanged, with `imputed` = False appended.
 
@@ -92,7 +108,7 @@ def _passthrough_table(path: Path) -> pa.Table:
     12-column files puts the reader back on the schema-drift trap this
     protocol exists to remove.
     """
-    table = pq.read_table(path)
+    table = _read_file(path)
     flags = pa.array([False] * table.num_rows, type=pa.bool_())
     return table.append_column(_IMPUTED_FIELD, flags)
 
@@ -161,7 +177,7 @@ def impute_day(
 
     new_table is None when nothing needed imputation.
     """
-    table = pq.read_table(path)
+    table = _read_file(path)
     rows = table.to_pylist()
     for r in rows:
         ts = r["bucket_start"]
