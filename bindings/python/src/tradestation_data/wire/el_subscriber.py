@@ -597,5 +597,38 @@ def _parse_el_str_as_et(s: str) -> datetime | None:
     except (TypeError, ValueError):
         return None
     aware_et = local.replace(tzinfo=_ET_TZ)
+    _warn_if_dst_ambiguous(aware_et, s)
     utc_dt = aware_et.astimezone(UTC)
     return utc_dt.replace(second=0, microsecond=0)
+
+
+def _warn_if_dst_ambiguous(aware_et: datetime, raw: str) -> None:
+    """Say so when a local time does not name exactly one instant.
+
+    `replace(tzinfo=...)` pins `fold=0`, so the repeated hour on the
+    fall-back date resolves to its FIRST occurrence and the skipped hour on
+    the spring-forward date resolves to an instant that never happened.
+    Neither raises, and both produce a timestamp that looks entirely ordinary.
+
+    fold=0 is kept rather than guessed at, because the wire genuinely cannot
+    settle it: `ts_str` is a local wall-clock string with no offset and no
+    fold bit, so the information required to pick the right instant is not
+    present in the frame. A second binding faces the same choice, which is
+    why the rule is written down in contract/semantics.md §2.0.1 rather than
+    only here. What was wrong was doing it silently.
+
+    Unreachable for a normal US equity session — the extended session runs
+    04:00-20:00 ET and the repeated hour is 01:00-02:00 — but the binding
+    accepts whatever the chart sends, and TradeStation offers 24-hour session
+    templates.
+    """
+    if aware_et.utcoffset() == aware_et.replace(fold=1).utcoffset():
+        return
+    log.warning(
+        "el_timestamp_dst_ambiguous",
+        extra={
+            "ts_str": raw,
+            "resolved_utc": aware_et.astimezone(UTC).isoformat(),
+            "note": "local time maps to two instants (or none); took fold=0",
+        },
+    )

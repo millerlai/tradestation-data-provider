@@ -994,3 +994,31 @@ def test_a_superseded_frame_still_gets_the_protocol_message_not_the_seq_one() ->
     legacy = {"v": 4, "kind": "tick", "seq": 1, "sid": 7001, "ts": TS, "px": 1.0}
     with pytest.raises(ValueError, match="proto=None"):
         provider._parse_payload("SPY", json.dumps(legacy).encode())
+
+
+def test_dst_ambiguous_ts_str_is_reported_not_silently_resolved(caplog) -> None:
+    """The wire cannot settle which of the two 01:30s a bar means.
+
+    `ts_str` is a local wall-clock string with no offset and no fold bit, so
+    on the fall-back date 01:30 ET names two different instants an hour apart
+    and the frame does not say which. fold=0 is kept -- guessing differently
+    would be no better founded -- but doing it silently produced a timestamp
+    that looked entirely ordinary.
+    """
+    provider = TradeStationELProvider(endpoint="inproc://dst-fold")
+    # 2026 DST ends Nov 1; the 01:00-02:00 ET hour repeats.
+    frame = _bar_frame(ts_str="2026-11/01-01:30:00")
+
+    with caplog.at_level("WARNING", logger="tradestation_data.wire.el_subscriber"):
+        bar = provider._parse_payload("SPY", json.dumps(frame).encode())
+
+    assert bar is not None
+    assert any("el_timestamp_dst_ambiguous" in r.message for r in caplog.records)
+
+
+def test_unambiguous_ts_str_says_nothing(caplog) -> None:
+    """Every other day of the year must stay quiet."""
+    provider = TradeStationELProvider(endpoint="inproc://dst-normal")
+    with caplog.at_level("WARNING", logger="tradestation_data.wire.el_subscriber"):
+        provider._parse_payload("SPY", json.dumps(_bar_frame()).encode())
+    assert not [r for r in caplog.records if "dst_ambiguous" in r.message]

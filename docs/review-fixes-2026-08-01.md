@@ -32,7 +32,7 @@ This file is the source of truth for progress. If a session is interrupted:
 | F6 | false signal | `storage/history_store.py:147` | No `BAR_SCHEMA` guard despite docs claiming one; empty vs populated disagree on width | ✅ | `fix(storage): refuse a store whose columns are not this store's` |
 | F7 | wrong data | `scripts/imputation_parquet.py:184` | Imputed rows get NULL `timeframe`/`symbol`/`date`; `_passthrough_table` inherits it | ✅ | `fix(scripts): read the file's own columns, not the path's` |
 | F8 | false signal | `wire/el_subscriber.py:330` | `seq` is schema-required but read with `.get()` and silently skipped | ✅ | `fix(wire): enforce the required seq the schemas already declare` |
-| F9 | rare, plausible | `storage/history_store.py:39` | `replace(tzinfo=)` pins `fold=0` across the DST-ambiguous hour | ⬜ | |
+| F9 | rare, plausible | `storage/history_store.py:39` | `replace(tzinfo=)` pins `fold=0` across the DST-ambiguous hour | ✅ | `fix(time): say so when a local time names two instants, or none` |
 | F10 | test gap | `cpp/src/test_harness.cpp:52` | Fixture + test quantities are mutually derivable, so a column swap passes everything | ⬜ | |
 | F11 | doc wrong | `bindings/python/README.md:286` | Claims no script rewrites the store; `dedupe_bars.py` rewrites in place by default | ⬜ | |
 | F12 | doc wrong | `examples/03_read_history.py:191` | States daily `el_ticks` is a trade count, which the contract marks unconfirmed | ⬜ | |
@@ -93,6 +93,18 @@ path carry the partitioning, as `BarWriter` does.
 The verifier did not show that TradeStation emits a bar inside the repeated
 01:00-02:00 ET hour for any timeframe this binding accepts; pre-market starts at
 04:00 ET. Decide whether it is reachable before spending effort.
+
+**Resolved:** unreachable for a normal equity session (extended is 04:00-20:00
+ET, the repeated hour is 01:00-02:00), but not impossible — the binding does not
+refuse out-of-session bars and TradeStation offers 24-hour session templates.
+`_as_utc` is reachable outright: its input is a caller-supplied bound.
+
+Behaviour deliberately unchanged. `ts_str` has no offset and no fold bit, so the
+frame does not contain what is needed to pick the right instant, and guessing
+the other side would be no better founded. Both sites now detect the case
+(fold=0 and fold=1 disagreeing on the offset is the test) and log it, turning a
+silent wrong answer into a visible one. Written into `contract/semantics.md`
+§2.0.1 because a second binding faces exactly the same undecidable choice.
 
 ### F10 — needs the C++ toolchain
 Fixing the harness means rebuilding the DLL and re-recording all four fixtures,

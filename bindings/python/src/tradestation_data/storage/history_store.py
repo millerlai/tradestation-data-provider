@@ -41,6 +41,22 @@ def _as_utc(value: datetime) -> datetime:
     """
     if value.tzinfo is None:
         value = value.replace(tzinfo=_ET_TZ)
+        # `replace(tzinfo=...)` pins fold=0, so a naive bound inside the
+        # repeated hour on the fall-back date silently means its FIRST
+        # occurrence, and one inside the skipped hour on the spring-forward
+        # date means an instant that never happened. A query bound is the
+        # caller's to disambiguate — they can pass an aware datetime and say
+        # exactly which they meant — so this reports rather than guesses
+        # differently. One day a year, and the numbers look ordinary.
+        if value.utcoffset() != value.replace(fold=1).utcoffset():
+            log.warning(
+                "query_bound_dst_ambiguous",
+                extra={
+                    "bound": value.isoformat(),
+                    "note": "naive local time maps to two instants (or none); "
+                    "took fold=0 — pass an aware datetime to be explicit",
+                },
+            )
     return value.astimezone(UTC)
 
 
