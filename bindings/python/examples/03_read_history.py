@@ -111,7 +111,10 @@ def write_synthetic_store(root: Path, *, minutes: int = 30) -> tuple[int, int]:
 
         # One daily bar. Daily lives in a flat single-file layout, and on a
         # daily chart EasyLanguage's words mean the opposite of the above:
-        # `Volume` is total shares and `Ticks` is a trade count. Still
+        # `Volume` is total shares, and `Ticks` is documented as a trade
+        # count — documented, not confirmed. semantics.md §3.4 has it under
+        # suspicion: across 499 live SPY rows it came back byte-for-byte
+        # equal to `el_volume`, which no trade count would be. Still
         # verbatim — the inversion is a table the consumer reads, not
         # something any layer here reconciles.
         bar_writer.write(
@@ -188,9 +191,11 @@ def main() -> int:
     print("     note the intraday window above does not reach it: anchors differ by tf")
     print(
         f"     el_volume={d['el_volume']:,} (total shares here)  "
-        f"el_ticks={d['el_ticks']:,} (trade count here)"
+        f"el_ticks={d['el_ticks']:,} (documented as a trade count — unconfirmed)"
     )
     print("     the two words swap meaning between intraday and daily: semantics.md 3.4")
+    print("     3.4 also flags daily el_ticks: on live SPY it equalled el_volume exactly,")
+    print("     so do not consume it as a count until that is explained.")
 
     ticks = store.load_ticks(SYMBOL, start, end)
     print(f"\n ticks: {ticks.height} rows, bid/ask preserved: {ticks.row(0, named=True)['bid']}")

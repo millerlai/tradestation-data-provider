@@ -81,7 +81,7 @@ async def main() -> int:
                     f"BAR  {event.symbol:<6} {event.timeframe:>3}  "
                     f"{event.bucket_start_et:%Y-%m-%d %H:%M}  "
                     f"O={event.open:<8.2f} H={event.high:<8.2f} "
-                    f"L={event.low:<8.2f} C={event.close:<8.2f} vol={event.volume}"
+                    f"L={event.low:<8.2f} C={event.close:<8.2f} el_vol={event.el_volume}"
                 )
             else:
                 # bid/ask are absent when there is no quote to report:
@@ -90,7 +90,7 @@ async def main() -> int:
                 print(
                     f"TICK {event.symbol:<6}      "
                     f"{event.timestamp_et:%Y-%m-%d %H:%M:%S}  "
-                    f"px={event.price:<8.2f} vol={event.volume:<6} {quote}"
+                    f"px={event.price:<8.2f} el_vol={event.el_volume:<6} {quote}"
                 )
 
             seen += 1

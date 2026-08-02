@@ -41,9 +41,10 @@ def _row(ts, close, open_=None, el_volume=1000):
         "low": close,
         "close": close,
         "el_volume": el_volume,
-        "el_ticks": el_volume * 2,
-        "el_upticks": el_volume,
-        "el_downticks": el_volume,
+        # Mutually underivable on purpose — see the note in test_bar_writer.py.
+        "el_ticks": el_volume * 2 + 7,
+        "el_upticks": el_volume + 3,
+        "el_downticks": el_volume + 5,
         "el_open_interest": 0,
     }
 
@@ -193,3 +194,45 @@ def test_write_atomic_replaces_file(tmp_path):
     assert pq.read_table(path).num_rows == 2
     # No .tmp left behind
     assert not path.with_suffix(path.suffix + ".tmp").exists()
+
+
+def _write_partitioned(root: Path, rows) -> Path:
+    """A file at the real hive path, so reads can pick up path-derived columns."""
+    path = root / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
+    _write_bars(path, rows)
+    return path
+
+
+def test_imputed_rows_do_not_get_null_partition_keys(tmp_path):
+    """`pq.read_table` on a hive path invents timeframe/symbol/date columns.
+
+    Deriving the output schema from that gave a 15-column table while
+    `_build_imputed_row` supplies 12 keys, so every invented bar was written
+    with NULL partition keys sitting next to real values on the rows that came
+    off the wire. The path carries the partitioning; those columns do not
+    belong in the file.
+    """
+    t0 = datetime(2026, 4, 18, 13, 31, tzinfo=UTC)
+    path = _write_partitioned(tmp_path, [_row(t0, 100.0), _row(t0 + timedelta(minutes=2), 102.0)])
+
+    expected = [t0 + timedelta(minutes=i) for i in range(3)]
+    _b, added, _log, new_table = ip.impute_day(path, expected, "ffill", 60, vp._resolve_tz("UTC"))
+
+    assert added == 1
+    assert new_table is not None
+    for hive_key in ("timeframe", "symbol", "date"):
+        assert hive_key not in new_table.column_names, (
+            f"{hive_key} is implied by the path and must not be a column"
+        )
+    assert new_table.column("imputed").to_pylist() == [False, True, False]
+
+
+def test_passthrough_copy_does_not_get_partition_key_columns(tmp_path):
+    """The same defect, inherited by the unchanged-day copy path."""
+    t0 = datetime(2026, 4, 18, 13, 31, tzinfo=UTC)
+    path = _write_partitioned(tmp_path, [_row(t0, 100.0)])
+
+    table = ip._passthrough_table(path)
+    for hive_key in ("timeframe", "symbol", "date"):
+        assert hive_key not in table.column_names
+    assert table.column("imputed").to_pylist() == [False]

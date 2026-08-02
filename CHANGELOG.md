@@ -9,6 +9,46 @@ changes; patch releases (`0.x.Y`) will not.
 
 ## [Unreleased]
 
+### Fixed — post-merge review of the proto-1 refactor
+
+- **An unparseable `ts_str` is refused instead of silently falling back to the
+  receive clock.** `_parse_bar` treated "the publisher sent no time string" and
+  "the publisher sent a time string we cannot read" as the same state and
+  substituted `ts` for both. `ts` is the DLL's receive clock, and during a
+  TradeStation chart replay a whole session arrives inside one minute — so
+  every bar collapsed onto a single `bucket_start`, the runtime's dedupe kept
+  one, and a trading day became one plausible-looking bar in today's
+  partition. Nothing logged and nothing raised.
+
+  This is the zh-TW `FormatTime("tt")` incident that already cost this repo a
+  day of data, and the same diff that shipped proto 1 removed both of the
+  detectors that used to catch it: the DLL's own `ts_str` parse (deleted with
+  `ts_utc`) and the drift warning it fed. The binding is the only layer left
+  that can notice, so it now refuses the frame and names the field; `events()`
+  logs the payload and the stream continues. An absent `ts_str` still falls
+  back, but says so. Specified in `contract/semantics.md` §1.1.
+
+- **`imputation_parquet.py --output` writes every day in range, not only the
+  ones it filled.** A complete day returned `new_table is None` and was skipped
+  without being copied, so the "imputed copy" was a delta against `--root`. A
+  caller pointing `HistoryStore` at it got zero rows for every complete day and
+  no error, because an empty range is an ordinary answer (§2.4) — a six-month
+  run with three gap days produced a store that was 97% empty and a summary
+  line that read as success. Unchanged days are now copied with `imputed` set
+  to False, so the whole tree carries one schema.
+
+- `examples/01_print_events.py` read `event.volume`, renamed to `el_volume` in
+  this same release. Examples 02-04 were migrated and 01 was missed; it raised
+  `AttributeError` on the first bar.
+
+- `cpp/install-to-tradestation.bat` told the operator to import
+  `EL\TS2Python_Exporter.eld`, which the repo does not ship — `.eld` is
+  TradeStation's exported binary, while what lives here is the EasyLanguage
+  source, compiled in the Development Environment. The operator would fail that
+  step, leave the previously compiled indicator on the chart, and it would hit
+  the `EL_Init` tombstone and stop publishing with only a Print Log line to
+  show for it.
+
 ### Changed — BREAKING: one protocol, `proto` 1, and no derived data
 
 - **BREAKING (wire): the version key is now `proto`, and its only value is `1`.**

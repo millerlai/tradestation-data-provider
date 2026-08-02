@@ -19,9 +19,14 @@ def _bar(symbol: str, bucket: datetime, close: float, *, el_volume: int = 100) -
         low=close - 0.2,
         close=close,
         el_volume=el_volume,
-        el_ticks=el_volume * 2,
-        el_upticks=el_volume,
-        el_downticks=el_volume,
+        # Five values no two of which are equal, and none of which is the sum
+        # or double of any other. Derivable numbers make a column swap
+        # invisible: with el_volume == el_upticks and el_ticks == the sum, a
+        # writer that transposed two of these would round-trip byte-identical
+        # and every assertion here would still pass.
+        el_ticks=el_volume * 2 + 7,
+        el_upticks=el_volume + 3,
+        el_downticks=el_volume + 5,
         el_open_interest=0,
     )
 
@@ -357,3 +362,82 @@ def test_daily_leaves_no_temp_file_behind(tmp_path: Path) -> None:
     with BarWriter(root) as w:
         w.write(_daily(D1, 450.0))
     assert not list(root.rglob("*.tmp"))
+
+
+def test_legacy_schema_partition_does_not_starve_the_other_partitions(tmp_path: Path) -> None:
+    """One unwritable file must cost one series, not the whole run.
+
+    A store written by a release before the el_* columns is the realistic
+    case: `_rewrite` reads it back, the shapes do not match, and before this
+    was isolated the raise aborted `flush()` for every partition ordered
+    after it. The buffer is only cleared on success, so the same exception
+    repeated every cycle while memory grew, and nothing raised anywhere an
+    operator was watching — the heartbeat just stopped counting bars.
+    """
+    import pyarrow as pa
+
+    root = tmp_path / "bars"
+    legacy = root / "timeframe=1d" / "symbol=SPY" / "bars.parquet"
+    legacy.parent.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "bucket_start": pa.array([D1], type=pa.timestamp("us", tz="UTC")),
+                "open": [1.0],
+                "high": [2.0],
+                "low": [0.5],
+                "close": [1.5],
+                "volume": [100],
+                "tick_count": [5],
+                "source": ["tradestation_el"],
+            }
+        ),
+        legacy,
+    )
+
+    with BarWriter(root) as w:
+        w.write(_daily(D1, 450.0))  # lands on the legacy 1d file
+        w.write(_bar("SPY", T0, 450.0))  # a different partition entirely
+
+    # The 1d partition is given up on, but the 1m one is written.
+    intraday = root / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
+    assert intraday.exists(), "an unrelated partition was starved by the bad one"
+    assert pq.read_table(intraday).num_rows == 1
+
+
+def test_legacy_schema_partition_is_reported_with_the_path_and_the_fix(
+    tmp_path: Path, caplog
+) -> None:
+    """The operator's only signal, so it has to name the file and the way out."""
+    import pyarrow as pa
+
+    root = tmp_path / "bars"
+    legacy = root / "timeframe=1d" / "symbol=SPY" / "bars.parquet"
+    legacy.parent.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "bucket_start": pa.array([D1], type=pa.timestamp("us", tz="UTC")),
+                "open": [1.0],
+                "high": [2.0],
+                "low": [0.5],
+                "close": [1.5],
+                "volume": [100],
+                "tick_count": [5],
+                "source": ["x"],
+            }
+        ),
+        legacy,
+    )
+
+    with (
+        caplog.at_level("ERROR", logger="tradestation_data.storage.bar_writer"),
+        BarWriter(root) as w,
+    ):
+        w.write(_daily(D1, 450.0))
+        w.write(_daily(D2, 451.0))  # poisoned now: must not re-report or re-raise
+
+    errors = [r for r in caplog.records if r.message == "bar_partition_unwritable"]
+    assert len(errors) == 1, "poisoned partition must report once, not once per flush"
+    assert "el_volume" in errors[0].error
+    assert str(legacy) == errors[0].path

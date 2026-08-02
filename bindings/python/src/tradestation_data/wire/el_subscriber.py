@@ -16,7 +16,6 @@ from tradestation_data.domain.timeframe import (
     SESSION_ANCHORED_TIMEFRAMES,
     SUPPORTED_TIMEFRAMES,
     align_bucket_start,
-    timeframe_to_minutes,
 )
 from tradestation_data.wire.base import MarketEvent
 
@@ -27,6 +26,13 @@ log = logging.getLogger(__name__)
 # trusting the DLL's mktime() (which would interpret it via the TS host's
 # Windows timezone — wrong whenever the operator's system isn't ET).
 _ET_TZ: ZoneInfo = ZoneInfo("America/New_York")
+
+# EL's TsStr, and the same thing spelled for a human in the refusal message.
+# One constant each so the parser and the error can never describe different
+# formats — an error naming a format the code does not accept is worse than
+# no error at all.
+_EL_TS_FORMAT = "%Y-%m/%d-%H:%M:%S"
+_EL_TS_FORMAT_HUMAN = "yyyy-MM/dd-HH:mm:ss (24-hour)"
 
 # Symbols TradeStation emits as indices / breadth, with no bid/ask/volume
 # semantics. The wire carries bid/ask as plain floats for these (usually 0.0
@@ -218,6 +224,26 @@ class TradeStationELProvider:
         self._subscribed: set[str] = set()
         self._closed = False
         self._seq = _SequenceTracker()
+        self._frames_refused = 0
+
+    @property
+    def frames_refused(self) -> int:
+        """Frames received and thrown away because they could not be parsed.
+
+        Read this WITH `messages_lost`, never instead of it. They answer
+        different questions and the pair is what tells you the link is
+        healthy: `messages_lost` counts frames the publisher sent that never
+        arrived, and a refused frame did arrive — so a stream in which every
+        single frame was refused still reports zero lost, quite correctly,
+        and reads as perfect health on its own.
+
+        That is not hypothetical. The documented upgrade order is binding
+        first, then DLL, so there is a window where the old DLL is still
+        publishing. Its frames carry `seq`/`sid`, so sequence tracking starts
+        normally and reports no loss, while the `proto` gate refuses every
+        one of them and nothing is delivered.
+        """
+        return self._frames_refused
 
     @property
     def gap_detection_available(self) -> bool:
@@ -303,11 +329,39 @@ class TradeStationELProvider:
             try:
                 event = self._parse_payload(symbol, payload_bytes)
             except (ValueError, KeyError, json.JSONDecodeError) as exc:
+                # The expected shape of a bad frame: a refused proto, a
+                # missing quantity, malformed JSON.
+                self._frames_refused += 1
                 log.warning(
                     "Dropping malformed message for symbol=%s: %s (payload=%r)",
                     symbol,
                     exc,
                     payload_bytes[:200],
+                )
+                continue
+            except Exception as exc:
+                # Anything else is either an input shape nobody predicted or a
+                # bug in the parser, and both used to be fatal in the worst
+                # way: the exception left this generator, killed the ingest
+                # task, and `run()` never noticed because it sits on
+                # `self._stop.wait()` and only awaits the tasks after stop is
+                # set. The process kept running, the heartbeat kept logging,
+                # and nothing was ingested again until somebody noticed the
+                # silence. `int(data[name])` on a JSON null raises TypeError;
+                # a payload decoding to a non-object makes `data.get("seq")`
+                # raise AttributeError. Neither was caught.
+                #
+                # One frame must never be able to end the stream. ERROR with
+                # a traceback rather than the WARNING above, because unlike a
+                # malformed frame this may well be our own defect and should
+                # not read as routine.
+                self._frames_refused += 1
+                log.error(
+                    "Dropping unparseable message for symbol=%s: %s (payload=%r)",
+                    symbol,
+                    exc,
+                    payload_bytes[:200],
+                    exc_info=True,
                 )
                 continue
             yield event
@@ -341,6 +395,28 @@ class TradeStationELProvider:
                 f"A missing 'proto' means the publisher predates this protocol; "
                 f"reinstall TS2Python.dll and re-import the .ELD that shipped "
                 f"with it."
+            )
+
+        # `seq` is REQUIRED — both wire schemas say so and the conformance
+        # suite validates the fixtures against them, but nothing enforced it
+        # at runtime: `data.get("seq")` above skips silently when it is
+        # absent. A proto-1 frame without one then parsed normally, `sid`
+        # stayed None, `messages_lost` returned None forever, and the one-shot
+        # warning that used to say so was deleted with
+        # `_warned_no_gap_detection`. An operator running an alternate
+        # publisher — or a DLL build where `reserve_seq` regressed — collects
+        # a full day, reads a `messages_lost` of None as "nothing to report",
+        # and files it verified-complete while high-water-mark drops went
+        # uncounted. That is the conflation §6.6 exists to forbid.
+        #
+        # Checked here rather than beside observe() above so a superseded
+        # publisher's frame — which does carry seq — still gets the protocol
+        # message, which is the one its operator can act on.
+        if "seq" not in data:
+            raise ValueError(
+                f"proto {PROTO_VERSION} payload carries no 'seq'. Every frame in "
+                f"this protocol is sequenced; without it, loss cannot be detected "
+                f"and a clean-looking run would be unverifiable."
             )
 
         kind = data.get("kind")
@@ -377,23 +453,46 @@ class TradeStationELProvider:
         )
 
     def _parse_bar(self, symbol: str, data: dict[str, Any], timeframe: str = "1m") -> Bar:
-        # Priority for bucket_start (UTC):
+        # Priority for bucket_start (UTC) — semantics.md §1.1:
         #   1. ts_str (authoritative) — EL wall-clock string, parsed here
         #      as America/New_York. Zone-correct on any DLL host because
-        #      we never rely on the host's system tz. The publisher no longer
-        #      parses this string at all, so a malformed one arrives intact
-        #      and is caught here rather than upstream.
-        #   2. ts — receive-side wall clock, last-resort only. During
-        #      historical replay every bar shares one ts and would collapse
-        #      onto a single bucket, so this is strictly a fallback for a
-        #      publisher that sent no ts_str.
+        #      we never rely on the host's system tz.
+        #   2. ts — receive-side wall clock, last-resort only, and ONLY when
+        #      the publisher sent no ts_str at all.
+        #
+        # "Absent" and "present but unparseable" are two different states and
+        # must not share a path. The publisher no longer parses ts_str, so the
+        # DLL-side format check that used to catch a bad string is gone; this
+        # is the only place left that can notice. Falling back on a string we
+        # could not read is what makes that failure silent AND wrong: `ts` is
+        # the receive clock, so during a chart replay every bar of a session
+        # arrives within the same minute, collapses onto one bucket_start, and
+        # the runtime's dedupe discards all but one — a whole session reduced
+        # to a single plausible-looking bar in today's partition. That is the
+        # zh-TW FormatTime("tt") incident this repo already shipped once.
         bucket_start: datetime | None = None
 
         ts_str_raw = data.get("ts_str")
         if isinstance(ts_str_raw, str) and ts_str_raw:
             bucket_start = _parse_el_str_as_et(ts_str_raw)
+            if bucket_start is None:
+                # Refuse. events() logs the payload and drops the frame; the
+                # stream survives, and no invented bucket reaches storage.
+                raise ValueError(
+                    f"bar payload carries an unparseable 'ts_str': {ts_str_raw!r}. "
+                    f"Expected {_EL_TS_FORMAT_HUMAN}, read as America/New_York. "
+                    f"A localised or reformatted time string from the indicator "
+                    f"is the usual cause; the DLL no longer validates it."
+                )
 
         if bucket_start is None:
+            # No ts_str at all. §1.1 allows the degradation but requires it be
+            # recorded — an operator seeing this on every frame is looking at a
+            # publisher that will collapse any replay onto one bucket.
+            log.warning(
+                "bar_ts_str_absent_using_recv_clock",
+                extra={"symbol": symbol, "timeframe": timeframe},
+            )
             bucket_start = _floor_to_minute_utc(float(data["ts"]))
 
         # §2 — the wire is right-labelled, the contract is left-labelled.
@@ -406,8 +505,24 @@ class TradeStationELProvider:
         # Session-anchored frames are exempt: align_bucket_start replaces a 1d
         # timestamp with that session's 04:00 ET anchor outright, so a shift
         # here would only move the bar into the previous session.
+        # Step back one MINUTE, not one whole `tf`. The bucket a bar belongs
+        # to is the grid cell holding the instant just before its close, and
+        # subtracting a full interval only finds that cell when the bar
+        # actually spans one. A session-truncated bar does not: a 60-minute
+        # RTH chart is six full bars plus a 15:30-16:00 stub that EL stamps
+        # 16:00, and 16:00 minus 60m is 15:00, which floors onto the
+        # 09:30-anchored hour grid at 14:30 — the *previous* bar's bucket.
+        # `_handle_provider_bar` then reads the stub as an intra-bar refresh
+        # and overwrites the real 14:30-15:30 hour with the half-hour's OHLC
+        # and quantities.
+        #
+        # One minute is exact here rather than approximate: every candidate
+        # is already minute-floored, by `_parse_el_str_as_et` or by
+        # `_floor_to_minute_utc`. For a bar that does span its interval the
+        # answer is identical to subtracting the interval, so this changes
+        # nothing except the truncated case.
         if timeframe not in SESSION_ANCHORED_TIMEFRAMES:
-            bucket_start -= timedelta(minutes=timeframe_to_minutes(timeframe))
+            bucket_start -= timedelta(minutes=1)
 
         # §2.2 — the grid is the contract's, not the publisher's. EL stamps a
         # bar with its chart's own Date/Time, which for a daily bar is nowhere
@@ -467,18 +582,53 @@ def _floor_to_minute_utc(epoch_seconds: float) -> datetime:
 def _parse_el_str_as_et(s: str) -> datetime | None:
     """Parse EL TsStr ``yyyy-MM/dd-HH:mm:ss`` (24-hour) as ET, return
     UTC-aware datetime floored to the minute. Returns None on any parse
-    failure. DST is resolved by ZoneInfo from the parsed local fields.
+    failure — the caller refuses the frame rather than substituting a
+    guess. DST is resolved by ZoneInfo from the parsed local fields.
 
     24-hour format is deliberate: the prior ``hh:mm:ss tt`` format broke
     on zh-TW Windows hosts where ``FormatTime("tt")`` emits localized
     AM/PM ("上午"/"下午") that neither C's sscanf nor Python's %p can
     match — every bar would then fall through to the receive-time ``ts``
-    fallback and collapse onto today's date partition.
+    fallback and collapse onto today's date partition. That fallback is
+    now a refusal, so the same regression fails loudly instead.
     """
     try:
-        local = datetime.strptime(s, "%Y-%m/%d-%H:%M:%S")
+        local = datetime.strptime(s, _EL_TS_FORMAT)
     except (TypeError, ValueError):
         return None
     aware_et = local.replace(tzinfo=_ET_TZ)
+    _warn_if_dst_ambiguous(aware_et, s)
     utc_dt = aware_et.astimezone(UTC)
     return utc_dt.replace(second=0, microsecond=0)
+
+
+def _warn_if_dst_ambiguous(aware_et: datetime, raw: str) -> None:
+    """Say so when a local time does not name exactly one instant.
+
+    `replace(tzinfo=...)` pins `fold=0`, so the repeated hour on the
+    fall-back date resolves to its FIRST occurrence and the skipped hour on
+    the spring-forward date resolves to an instant that never happened.
+    Neither raises, and both produce a timestamp that looks entirely ordinary.
+
+    fold=0 is kept rather than guessed at, because the wire genuinely cannot
+    settle it: `ts_str` is a local wall-clock string with no offset and no
+    fold bit, so the information required to pick the right instant is not
+    present in the frame. A second binding faces the same choice, which is
+    why the rule is written down in contract/semantics.md §2.0.1 rather than
+    only here. What was wrong was doing it silently.
+
+    Unreachable for a normal US equity session — the extended session runs
+    04:00-20:00 ET and the repeated hour is 01:00-02:00 — but the binding
+    accepts whatever the chart sends, and TradeStation offers 24-hour session
+    templates.
+    """
+    if aware_et.utcoffset() == aware_et.replace(fold=1).utcoffset():
+        return
+    log.warning(
+        "el_timestamp_dst_ambiguous",
+        extra={
+            "ts_str": raw,
+            "resolved_utc": aware_et.astimezone(UTC).isoformat(),
+            "note": "local time maps to two instants (or none); took fold=0",
+        },
+    )

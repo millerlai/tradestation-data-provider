@@ -30,8 +30,9 @@ class Tick:
     reconciles them, and this binding must not either. That matters most for
     the first two, which swap meaning by chart type: on an intraday series
     ``el_volume`` is the UP-TICK share volume alone and ``el_ticks`` is the
-    total, while on daily they are total shares and a trade count
-    respectively. A consumer wanting "how much traded" reads the field the
+    total, while on daily they are total shares and — per TradeStation's own
+    documentation, which §3.4 flags as not yet confirmed against the data —
+    a trade count. A consumer wanting "how much traded" reads the field the
     table in contract/semantics.md §3.4 names for its timeframe.
 
     The ``el_`` prefix is deliberate: it is there so a reader looks the word

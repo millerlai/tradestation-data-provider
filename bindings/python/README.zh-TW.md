@@ -24,7 +24,7 @@
 - **開箱即用的 Hive-partitioned Parquet**：內建 `ParquetBarSink` / `ParquetTickSink`，依 timeframe / symbol / 日期各一層目錄。
 - **能在自己程式裡接收資料**：`CallbackSink` 讓你註冊 Python function，依 symbol 或全收，從 ingest loop 同步派發。
 - **從圖表到欄位之間沒有任何加工**：五個量值欄位是 EasyLanguage reserved word 的原文，以 `el_*` 命名，所以你讀到的數字可以直接跟終端機對帳。
-- **Operator 工具**：[`scripts/`](scripts/) 下有完整性驗證、去重、傾印、缺值補全等腳本 —— 全部都是讀取 store，不會改寫它。
+- **Operator 工具**：[`scripts/`](scripts/) 下有完整性驗證、去重、傾印、缺值補全等腳本 —— 除了 `dedupe_bars.py` 會就地改寫（除非加 `--dry-run`），其餘都只讀不寫。
 
 ## 架構
 
@@ -275,12 +275,16 @@ python scripts/run_ingestion.py                                  # 啟動即時 
 python scripts/verify_parquet.py --start-date 2026-03-20 --end-date 2026-04-17
 python scripts/imputation_parquet.py --start-date 2026-03-20 --end-date 2026-04-17 `
   --output data/imputed --dry-run
-python scripts/dedupe_bars.py                                    # 去重複 bar
+python scripts/dedupe_bars.py --dry-run                          # 去重複 bar（先看報告）
 python scripts/dump_parquet.py                                   # 看 parquet 內容
 python ../../contract/tools/record.py                            # 原始 ZMQ wire 檢視
 ```
 
-**這些腳本都不會改寫收集到的 store。** `imputation_parquet.py` 的 `--output` 是必填，
+**其中一個會改寫收集到的 store：`dedupe_bars.py`。** 它會就地取代每一個處理過的分區檔
+（`tmp.replace(path)`），而且 `--dry-run` 是選配 —— 預設跑法就直接改資料。請先用
+`--dry-run` 跑一次讀報告；沒有復原機制。
+
+其餘的只讀不寫。特別是 `imputation_parquet.py` 的 `--output` 是必填，
 它寫到另一個 root、用自己的 schema —— 多一欄 `imputed: bool`，所以補出來的 bar 永遠
 不可能被當成收到的 bar；`HistoryStore` 也會直接拒讀那個目錄，而不是把它當原始資料。
 

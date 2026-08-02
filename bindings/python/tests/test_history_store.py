@@ -30,9 +30,10 @@ def _tick(symbol: str, ts: datetime, price: float, *, el_volume: int = 100) -> T
         timestamp=ts,
         price=price,
         el_volume=el_volume,
-        el_ticks=el_volume * 2,
-        el_upticks=el_volume,
-        el_downticks=el_volume,
+        # Mutually underivable on purpose — see the note in test_bar_writer.py.
+        el_ticks=el_volume * 2 + 7,
+        el_upticks=el_volume + 3,
+        el_downticks=el_volume + 5,
         el_open_interest=0,
         bid=None,
         ask=None,
@@ -240,3 +241,108 @@ def test_et_columns_keep_their_zone_through_every_read_path(tmp_path: Path) -> N
     )
     assert daily.schema["bucket_start_et"].time_zone == "America/New_York"
     assert daily["bucket_start_et"].dt.hour().to_list() == [4]  # the 04:00 ET anchor
+
+
+def test_sealed_day_is_readable_while_the_writer_holds_today_open(tmp_path: Path) -> None:
+    """The promise BarWriter's docstring makes, which the read side broke.
+
+    The writer keeps a ParquetWriter open on the current day, so that file
+    has no footer. `_read` used to glob every `date=` partition and filter on
+    `bucket_start`, a column *inside* each file — so polars had to open all
+    of them, and one open partition made every read of that symbol raise,
+    including reads of days that were sealed and complete.
+    """
+    root = tmp_path
+    writer = BarWriter(root / "bars")
+    try:
+        writer.write(_bar("SPY", T0, 450.0))  # 2026-04-18
+        writer.write(_bar("SPY", T0 + timedelta(days=1), 451.0))  # seals 04-18
+        writer.flush()
+
+        # 04-19 is still open and footerless; 04-18 is sealed and complete.
+        got = HistoryStore(root).load_bars("SPY", T0, T0 + timedelta(hours=1), "5m")
+        assert got.height == 1
+        assert got["close"].to_list() == [450.0]
+    finally:
+        writer.close()
+
+
+def test_range_reaching_into_the_open_day_answers_with_the_sealed_ones(
+    tmp_path: Path, caplog
+) -> None:
+    """Asking for a range that includes the live session is not an error.
+
+    §2.4 makes an ordinary question an ordinary answer. Returning the sealed
+    days and naming what was skipped beats raising about magic bytes.
+    """
+    root = tmp_path
+    writer = BarWriter(root / "bars")
+    try:
+        writer.write(_bar("SPY", T0, 450.0))
+        writer.write(_bar("SPY", T0 + timedelta(days=1), 451.0))
+        writer.flush()
+
+        with caplog.at_level("WARNING", logger="tradestation_data.storage.history_store"):
+            got = HistoryStore(root).load_bars("SPY", T0, T0 + timedelta(days=2), "5m")
+
+        assert got.height == 1, "the sealed day should still come back"
+        assert any(r.message == "history_partition_unreadable_skipped" for r in caplog.records), (
+            "skipping a partition must be reported, never silent"
+        )
+    finally:
+        writer.close()
+
+
+def test_imputation_output_root_is_refused_not_read_as_collected_data(
+    tmp_path: Path,
+) -> None:
+    """The guard CHANGELOG.md and imputation_parquet.py both already claimed.
+
+    Imputed bars are flat O=H=L=C with all five quantities zero. Read back as
+    ordinary rows they are indistinguishable from published ones to any
+    consumer selecting OHLC, which is exactly why imputed output was given a
+    schema of its own -- and that schema is what makes the refusal possible.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from tradestation_data.storage.bar_writer import BAR_SCHEMA
+
+    out = tmp_path / "bars" / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18"
+    out.mkdir(parents=True)
+    row = {
+        "bucket_start": [T0],
+        "bucket_start_et": [T0],
+        "open": [450.0],
+        "high": [450.0],
+        "low": [450.0],
+        "close": [450.0],
+        "el_volume": [0],
+        "el_ticks": [0],
+        "el_upticks": [0],
+        "el_downticks": [0],
+        "el_open_interest": [0],
+        "imputed": [True],
+    }
+    pq.write_table(
+        pa.Table.from_pydict(row, schema=BAR_SCHEMA.append(pa.field("imputed", pa.bool_()))),
+        out / "bars.parquet",
+    )
+
+    with pytest.raises(ValueError, match="imputation output root"):
+        HistoryStore(tmp_path).load_bars("SPY", T0, T0 + timedelta(hours=1), "1m")
+
+
+def test_populated_and_empty_answers_have_identical_columns(tmp_path: Path) -> None:
+    """Width parity is what lets a caller stack a symbol loop with pl.concat.
+
+    Before the column projection, a populated day returned whatever the file
+    held and a quiet day returned BAR_SCHEMA, so the two disagreed the moment
+    a file carried anything extra.
+    """
+    _populate_bars(tmp_path, [_bar("SPY", T0, 450.0)])
+    store = HistoryStore(tmp_path)
+    populated = store.load_bars("SPY", T0, T0 + timedelta(hours=1), "5m")
+    never = store.load_bars("NOSUCH", T0, T0 + timedelta(hours=1), "5m")
+    assert populated.columns == never.columns
+    assert populated.schema == never.schema

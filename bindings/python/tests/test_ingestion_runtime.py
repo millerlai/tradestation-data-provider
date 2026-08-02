@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -21,10 +22,20 @@ async def _publish(pub: zmq.asyncio.Socket, topic: str, payload: dict) -> None:
     await pub.send_multipart([topic.encode(), json.dumps(payload).encode()])
 
 
+# `seq` is required by both wire schemas and enforced by the parser, so every
+# frame here needs one. A shared monotonic counter keeps them unique and rising
+# across a test, which is what the sequence tracker expects — reusing a value
+# would log a regression and muddy the assertions with noise unrelated to what
+# is under test.
+_seq = itertools.count(1)
+
+
 def _tick_payload(ts: float, px: float) -> dict:
     return {
         "proto": 1,
         "kind": "tick",
+        "seq": next(_seq),
+        "sid": 7001,
         "ts": ts,
         "px": px,
         "el_volume": 100,
@@ -44,15 +55,18 @@ def _bar_payload(ts: float, ohlc: tuple[float, float, float, float], el_volume: 
         "proto": 1,
         "kind": "bar",
         "tf": "1m",
+        "seq": next(_seq),
+        "sid": 7001,
         "ts": ts,
         "o": o,
         "h": h,
         "l": low,
         "c": c,
         "el_volume": el_volume,
-        "el_ticks": el_volume * 2,
-        "el_upticks": el_volume,
-        "el_downticks": el_volume,
+        # Mutually underivable on purpose — see the note in test_bar_writer.py.
+        "el_ticks": el_volume * 2 + 7,
+        "el_upticks": el_volume + 3,
+        "el_downticks": el_volume + 5,
         "el_open_interest": 0,
     }
 

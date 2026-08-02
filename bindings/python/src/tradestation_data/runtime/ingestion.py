@@ -116,6 +116,30 @@ class IngestionRuntime:
             asyncio.create_task(self._flush_loop(), name="flush"),
             asyncio.create_task(self._heartbeat_loop(), name="heartbeat"),
         ]
+
+        def _wake_on_task_death(task: asyncio.Task[None]) -> None:
+            """A background loop must never be allowed to die quietly.
+
+            `run()` parks on `_stop.wait()`, so a task that raises leaves the
+            process alive with nothing driving it: the heartbeat keeps
+            logging, the flush loop keeps polling, nothing is ingested, and
+            there is no error line and no non-zero exit. The only symptom is
+            silence. Waking the stop event turns that into an ordinary
+            shutdown, and the `await t` below then reports the real exception
+            through `task_failed`.
+
+            Cancellation is the normal shutdown path, not a death. A task
+            that returns cleanly is left alone deliberately — `_ingest_loop`
+            ends that way when the provider closes, which is expected.
+            """
+            if task.cancelled() or task.exception() is None:
+                return
+            log.error("task_died", extra={"task": task.get_name()})
+            self._stop.set()
+
+        for t in tasks:
+            t.add_done_callback(_wake_on_task_death)
+
         try:
             try:
                 await self._stop.wait()
@@ -308,6 +332,15 @@ class IngestionRuntime:
                 "ticks_per_sec": round(ticks_since / dt, 2),
                 "bars_per_sec": round(bars_since / dt, 2),
                 "symbols_seen": len(self._snapshot.symbols()),
+                # Read together or not at all. `messages_lost` counts frames
+                # the publisher sent that never arrived; a refused frame did
+                # arrive, so a link refusing 100% of its traffic still reports
+                # zero lost and reads as healthy on its own. That is the
+                # documented upgrade window — binding first, then DLL — where
+                # the old publisher's frames carry seq/sid, so gap detection
+                # starts normally while the proto gate throws every one away.
+                "messages_lost": getattr(self._provider, "messages_lost", None),
+                "frames_refused": getattr(self._provider, "frames_refused", None),
             },
         )
         self._counters.last_report_monotonic = now

@@ -24,7 +24,7 @@ This is the **reference binding** for the wire protocol defined in [`contract/`]
 - **Hive-partitioned Parquet out of the box.** Built-in `ParquetBarSink` / `ParquetTickSink`, one directory level per timeframe / symbol / day.
 - **Receive ticks/bars in your own code.** `CallbackSink` lets you register Python functions per symbol or catch-all, dispatched synchronously from the ingest loop.
 - **Nothing between the chart and the column.** The five quantity fields are EasyLanguage's reserved words verbatim, under `el_*` names, so what you read is auditable against the terminal.
-- **Operator tooling.** Verify completeness, dedupe, dump, and impute the resulting store with the scripts under [`scripts/`](scripts/) — all of which read the store rather than rewriting it.
+- **Operator tooling.** Verify completeness, dedupe, dump, and impute the resulting store with the scripts under [`scripts/`](scripts/) — read-only except `dedupe_bars.py`, which rewrites in place unless you pass `--dry-run`.
 - **Checked against the shared contract.** `tests/conformance/` replays recorded DLL output from [`contract/fixtures/`](../../contract/fixtures/) and asserts this binding matches expectations derived independently of it.
 
 ## Architecture
@@ -278,16 +278,20 @@ python scripts/run_ingestion.py                                  # live ingestio
 python scripts/verify_parquet.py --start-date 2026-03-20 --end-date 2026-04-17
 python scripts/imputation_parquet.py --start-date 2026-03-20 --end-date 2026-04-17 `
   --output data/imputed --dry-run
-python scripts/dedupe_bars.py                                    # drop duplicate bars
+python scripts/dedupe_bars.py --dry-run                          # report duplicate bars
 python scripts/dump_parquet.py                                   # inspect a parquet file
 python ../../contract/tools/record.py                            # raw ZMQ wire inspector
 ```
 
-**None of these rewrite the collected store.** `imputation_parquet.py` requires
-`--output` and writes to a separate root under its own schema — one extra
-`imputed: bool` column, so an invented bar can never be mistaken for a received
-one, and `HistoryStore` refuses the directory outright rather than reading it as
-raw data.
+**One of these rewrites the collected store: `dedupe_bars.py`.** It replaces each
+partition file it touches (`tmp.replace(path)`) and `--dry-run` is opt-in, so the
+default run modifies data in place. Run it with `--dry-run` first and read the
+report; there is no undo.
+
+The rest only read. `imputation_parquet.py` in particular requires `--output` and
+writes to a separate root under its own schema — one extra `imputed: bool`
+column, so an invented bar can never be mistaken for a received one, and
+`HistoryStore` refuses the directory outright rather than reading it as raw data.
 
 Two things to know about `verify_parquet.py` in particular:
 
