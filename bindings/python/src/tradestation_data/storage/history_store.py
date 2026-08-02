@@ -9,13 +9,7 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from tradestation_data.domain.timeframe import (
-    SINGLE_FILE_TIMEFRAMES,
-    SUPPORTED_TIMEFRAMES,
-    Timeframe,
-)
 from tradestation_data.storage.bar_writer import BAR_SCHEMA
-from tradestation_data.storage.tick_writer import TICK_SCHEMA
 
 log = logging.getLogger(__name__)
 
@@ -79,11 +73,11 @@ def _empty(schema: pa.Schema, hive: dict[str, _Dtype]) -> pl.DataFrame:
 class HistoryStore:
     """Read-side view over the Parquet store.
 
-    Layout, written by TickWriter / BarWriter:
+    Layout, written by BarWriter:
 
       {root}/ticks/symbol=.../date=.../ticks.parquet
-      {root}/bars/timeframe=<tf>/symbol=.../date=.../bars.parquet
-      {root}/bars/timeframe=1d/symbol=.../bars.parquet    — one file, no date=
+      {root}/bars/bartype=<N>/interval=<M>/symbol=.../date=.../bars.parquet
+      {root}/bars/bartype=2/interval=<M>/symbol=.../bars.parquet   — no date=
 
     THIS CLASS ONLY READS. It does not resample, aggregate, cache, backfill
     or repair. A query with nothing behind it returns zero rows; it never
@@ -98,39 +92,36 @@ class HistoryStore:
 
     def __init__(self, root: Path | str) -> None:
         self._root = Path(root)
-        self._ticks_root = self._root / "ticks"
         self._bars_root = self._root / "bars"
-
-    def load_ticks(self, symbol: str, start: datetime, end: datetime) -> pl.DataFrame:
-        pattern = self._ticks_root / f"symbol={symbol}" / "date=*" / "ticks.parquet"
-        return self._read(
-            pattern,
-            time_column="timestamp",
-            start=start,
-            end=end,
-            schema=TICK_SCHEMA,
-            hive={"symbol": pl.String, "date": pl.Date},
-        )
 
     def load_bars(
         self,
         symbol: str,
         start: datetime,
         end: datetime,
-        timeframe: str | Timeframe,
+        bar_type: int,
+        bar_interval: int,
     ) -> pl.DataFrame:
-        tf = str(timeframe)
-        if tf not in SUPPORTED_TIMEFRAMES:
-            raise ValueError(
-                f"Unsupported timeframe: {tf!r}. Valid: {sorted(SUPPORTED_TIMEFRAMES)}"
-            )
+        """Read one chart's points. The chart is named the way EL names it.
 
-        base = self._bars_root / f"timeframe={tf}" / f"symbol={symbol}"
-        hive: dict[str, _Dtype] = {"timeframe": pl.String, "symbol": pl.String}
-        if tf in SINGLE_FILE_TIMEFRAMES:
-            # One file per symbol, no date= level — a day partition of daily
-            # bars is a single row inside a file whose schema and footer cost
-            # ~2.9 KB regardless.
+        There is no timeframe allow-list to fail against: whatever BarType /
+        BarInterval the publisher sent got stored under that pair, including
+        combinations this binding has no word for.
+        """
+        base = (
+            self._bars_root
+            / f"bartype={bar_type}"
+            / f"interval={bar_interval}"
+            / f"symbol={symbol}"
+        )
+        hive: dict[str, _Dtype] = {
+            "bartype": pl.Int64,
+            "interval": pl.Int64,
+            "symbol": pl.String,
+        }
+        if bar_type == 2:
+            # Daily: one row per day, so a date= level would be one row per
+            # file — 2,903 bytes of schema and footer to carry about 60.
             pattern = base / "bars.parquet"
         else:
             pattern = base / "date=*" / "bars.parquet"
@@ -138,7 +129,7 @@ class HistoryStore:
 
         return self._read(
             pattern,
-            time_column="bucket_start",
+            time_column="bar_time",
             start=start,
             end=end,
             schema=BAR_SCHEMA,

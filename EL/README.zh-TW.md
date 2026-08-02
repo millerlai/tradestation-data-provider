@@ -19,7 +19,7 @@ TradeStation Chart → TS2Python_Exporter.el → TS2Python.dll → ZMQ PUB → s
 ## 部署步驟
 
 > **DLL 與 `.ELD` 是一組的，永遠要一起換。**
-> `EL_PublishTick` 與 `EL_PublishBar` 在協定重寫後沿用原名但**簽章不同**，而
+> `EL_PublishTick` 與 `EL_PublishBar` 曾經在協定重寫後沿用原名但**簽章不同**，而
 > `__stdcall` 由被呼叫端清堆疊，所以簽章不符的呼叫會**損毀堆疊**，不是回傳錯誤。
 > 兩道守衛讓每一種錯配都變成看得懂的失敗：本 indicator 綁定 `EL_Init3`，舊 DLL
 > 沒有這個匯出（Verify 就會失敗）；而新 DLL 把 `EL_Init` / `EL_Init2` 保留為回傳
@@ -127,14 +127,14 @@ subscriber 升級時沒有任何東西會更新它。
 tick series 只有在 `BarInterval = 1` 時才是「一次呼叫一筆成交」。100-tick 圖的每次
 呼叫帶的是一整根 bar：`Close` 是那一百筆的最後一筆，而兩個量能欄位依上表的 intraday
 規則涵蓋全部一百筆 —— `Ticks` 是它們的總成交股數、`Volume` 是其中的上漲部分。兩者
-都不是「100」；intraday 根本沒有任何保留字提供筆數。`EL_PublishTick` 也沒有欄位能
+都不是「100」；intraday 根本沒有任何保留字提供筆數。`bar_interval` 現在會上 wire，說明這次呼叫；舊 wire 沒有欄位能
 說明這次呼叫是一根 bar，於是 Tier 1 會把它記成**單一筆成交，價格是其中一筆、成交量
 卻是一百筆的和** —— 成交量欄位錯約兩個數量級，而且無人能察覺。
 
 與秒級圖不同的是，判斷所需的資訊還在：`BarInterval` 直接說明一次呼叫涵蓋幾筆。
 實機量測：100-tick 圖在 init 時回報 `bar_interval=100.00`、`Ticks = 760951`
 （那一百筆的成交股數，不是 `100`），1-tick 圖回報 `1.00` 並且每筆成交呼叫一次
-`EL_PublishTick`。
+`EL_Publish`。
 
 另外這也表示 `TsStr` 無法區分同一分鐘內的多筆成交：1-tick 圖會連送八次、全部標記
 `19:48:00`，因為 `Time` 只有分鐘解析度。真正區分它們的是 DLL 的收訊端 `ts`，這正是
@@ -144,7 +144,7 @@ tick series 只有在 `BarInterval = 1` 時才是「一次呼叫一筆成交」�
 ### 秒級圖表為何要另外擋
 
 `BarType` 與 `BarInterval` **分不出** 1 秒圖與 1 分鐘圖 —— 兩者都可能回報 `1` / `1`。
-若照 1 分鐘送出，那些 bar 會填進 `bars/timeframe=1m/` 分區，而且下游查不出來：
+若照 1 分鐘送出，那些 bar 會填進 `bartype=1/interval=1/` 分區，而且下游查不出來：
 `TsStr` 由 `Time` 組出，而 `Time` 只有分鐘解析度，**秒在離開 indicator 之前就沒了**。
 
 擋法不依賴任何版本相關常數：分鐘圖的 `Date` / `Time` 每根 bar 都前進，秒級圖表則會在

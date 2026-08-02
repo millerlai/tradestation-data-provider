@@ -22,7 +22,7 @@
 
 namespace {
 
-constexpr int kDllVersion = 1;
+constexpr int kDllVersion = 2;
 
 std::mutex       g_mutex;
 // Raw pointers, never destroyed implicitly. See pin_self_module_once()
@@ -122,42 +122,6 @@ bool to_int64(double v, std::int64_t* out) {
     return true;
 }
 
-// ---- timeframe ------------------------------------------------------------
-//
-// Maps EasyLanguage's BarType / BarInterval onto the wire's `tf` vocabulary,
-// which is the same set of strings the storage layer partitions on.
-//
-// The mapping lives here, not in EasyLanguage, for the same reason quote
-// normalisation does: there is one C ABI and many possible callers, and a
-// rule re-derived per caller is a rule that eventually disagrees with itself.
-//
-// Returns nullptr for anything with no wire representation. Callers must
-// treat that as a hard error rather than guessing — BarType 1 covers every
-// intraday minute chart, so a wrong guess files 5-minute bars under 1m and
-// nothing downstream can tell.
-const char* wire_timeframe(int bar_type, int bar_interval) {
-    if (bar_type == 1) {           // intraday, BarInterval in minutes
-        switch (bar_interval) {
-            case 1:  return "1m";
-            case 5:  return "5m";
-            case 15: return "15m";
-            case 30: return "30m";
-            case 60: return "1h";
-            default: return nullptr;
-        }
-    }
-    // Daily. TradeStation 10 reports BarInterval = 0 on a daily chart, not 1
-    // — measured on a live install, where an SPY daily chart logged
-    // "bar_type=2.00 bar_interval=0.00" and this function refused it with -5.
-    // 1 is accepted alongside it because that is what the ABI has documented
-    // since it shipped, and the DLL sits in installs this repo cannot see.
-    //
-    // Values above 1 are still refused rather than folded into "1d": on
-    // BarType 2 the interval is a day multiplier, so a 2-day chart would
-    // otherwise land in the 1d partition looking exactly like real daily data.
-    if (bar_type == 2 && (bar_interval == 0 || bar_interval == 1)) return "1d";
-    return nullptr;                                        // weekly/monthly/P&F/...
-}
 
 // Pin the DLL into the host process's address space on first successful
 // EL_Init. TradeStation calls FreeLibrary when the user disables or
@@ -289,9 +253,33 @@ TS2P_API int TS2P_CALL EL_Init2(const char* /*zmq_endpoint*/,
 }
 
 TS2P_API int TS2P_CALL EL_PublishTick(
+    const char* /*symbol*/, const char* /*el_timestamp*/, double /*price*/,
+    double /*volume*/, double /*ticks*/, double /*upticks*/,
+    double /*downticks*/, double /*open_interest*/,
+    double /*bid*/, double /*ask*/) {
+    return -6;
+}
+
+TS2P_API int TS2P_CALL EL_PublishBar(
+    const char* /*symbol*/, const char* /*el_timestamp*/,
+    int /*bar_type*/, int /*bar_interval*/,
+    double /*bar_open*/, double /*bar_high*/, double /*bar_low*/,
+    double /*bar_close*/, double /*volume*/, double /*ticks*/,
+    double /*upticks*/, double /*downticks*/, double /*open_interest*/) {
+    return -6;
+}
+
+
+TS2P_API int TS2P_CALL EL_Publish(
     const char* symbol,
     const char* el_timestamp,
-    double      price,
+    int         bar_type,
+    int         bar_interval,
+    int         category,
+    double      bar_open,
+    double      bar_high,
+    double      bar_low,
+    double      bar_close,
     double      volume,
     double      ticks,
     double      upticks,
@@ -323,18 +311,21 @@ TS2P_API int TS2P_CALL EL_PublishTick(
         format_quote(bid_s, sizeof(bid_s), bid);
         format_quote(ask_s, sizeof(ask_s), ask);
 
-        char payload[640];
+        char payload[768];
         const int n = std::snprintf(
             payload, sizeof(payload),
-            "{\"proto\":1,\"kind\":\"tick\",\"seq\":%llu,\"sid\":%llu,"
+            "{\"proto\":2,\"seq\":%llu,\"sid\":%llu,"
             "\"ts\":%.6f,\"ts_str\":\"%s\","
-            "\"px\":%.6f,"
+            "\"bar_type\":%d,\"bar_interval\":%d,\"category\":%d,"
+            "\"o\":%.6f,\"h\":%.6f,\"l\":%.6f,\"c\":%.6f,"
             "\"el_volume\":%lld,\"el_ticks\":%lld,\"el_upticks\":%lld,"
             "\"el_downticks\":%lld,\"el_open_interest\":%lld,"
             "\"bid\":%s,\"ask\":%s}",
             static_cast<unsigned long long>(seq),
             static_cast<unsigned long long>(g_sid),
-            recv_unix_seconds(), ts_str, price,
+            recv_unix_seconds(), ts_str,
+            bar_type, bar_interval, category,
+            bar_open, bar_high, bar_low, bar_close,
             static_cast<long long>(q_volume),
             static_cast<long long>(q_ticks),
             static_cast<long long>(q_upticks),
@@ -356,98 +347,6 @@ TS2P_API int TS2P_CALL EL_PublishTick(
     } catch (...) {
         return -2;
     }
-}
-
-// Shared bar publisher. `tf` must already be a valid wire timeframe.
-static int publish_bar_impl(
-    const char* symbol,
-    const char* el_timestamp,
-    const char* tf,
-    double      bar_open,
-    double      bar_high,
-    double      bar_low,
-    double      bar_close,
-    double      volume,
-    double      ticks,
-    double      upticks,
-    double      downticks,
-    double      open_interest)
-{
-    if (symbol == nullptr) return -4;
-
-    // See EL_PublishTick: narrow before reserving a sequence number.
-    std::int64_t q_volume, q_ticks, q_upticks, q_downticks, q_oi;
-    if (!to_int64(volume,        &q_volume)    ||
-        !to_int64(ticks,         &q_ticks)     ||
-        !to_int64(upticks,       &q_upticks)   ||
-        !to_int64(downticks,     &q_downticks) ||
-        !to_int64(open_interest, &q_oi)) return -4;
-
-    const char* ts_str = (el_timestamp != nullptr) ? el_timestamp : "";
-
-    try {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        if (!g_sock) return -1;
-
-        const std::uint64_t seq = reserve_seq(symbol);
-
-        char payload[768];
-        const int n = std::snprintf(
-            payload, sizeof(payload),
-            "{\"proto\":1,\"kind\":\"bar\",\"tf\":\"%s\",\"seq\":%llu,\"sid\":%llu,"
-            "\"ts\":%.6f,\"ts_str\":\"%s\","
-            "\"o\":%.6f,\"h\":%.6f,\"l\":%.6f,\"c\":%.6f,"
-            "\"el_volume\":%lld,\"el_ticks\":%lld,\"el_upticks\":%lld,"
-            "\"el_downticks\":%lld,\"el_open_interest\":%lld}",
-            tf,
-            static_cast<unsigned long long>(seq),
-            static_cast<unsigned long long>(g_sid),
-            recv_unix_seconds(), ts_str,
-            bar_open, bar_high, bar_low, bar_close,
-            static_cast<long long>(q_volume),
-            static_cast<long long>(q_ticks),
-            static_cast<long long>(q_upticks),
-            static_cast<long long>(q_downticks),
-            static_cast<long long>(q_oi));
-        if (n <= 0 || static_cast<size_t>(n) >= sizeof(payload)) return -4;
-
-        zmq::message_t topic(symbol, std::strlen(symbol));
-        zmq::message_t body(payload, static_cast<size_t>(n));
-
-        const auto r1 = g_sock->send(topic, zmq::send_flags::sndmore);
-        if (!r1) return -2;
-        const auto r2 = g_sock->send(body, zmq::send_flags::none);
-        if (!r2) return -2;
-        return 0;
-    } catch (const zmq::error_t&) {
-        return -2;
-    } catch (...) {
-        return -2;
-    }
-}
-
-TS2P_API int TS2P_CALL EL_PublishBar(
-    const char* symbol,
-    const char* el_timestamp,
-    int         bar_type,
-    int         bar_interval,
-    double      bar_open,
-    double      bar_high,
-    double      bar_low,
-    double      bar_close,
-    double      volume,
-    double      ticks,
-    double      upticks,
-    double      downticks,
-    double      open_interest)
-{
-    const char* tf = wire_timeframe(bar_type, bar_interval);
-    // No guessing. An unmappable interval published as some default would
-    // land in the wrong partition, and nothing downstream could detect it.
-    if (tf == nullptr) return -5;
-    return publish_bar_impl(symbol, el_timestamp, tf,
-                            bar_open, bar_high, bar_low, bar_close,
-                            volume, ticks, upticks, downticks, open_interest);
 }
 
 TS2P_API int TS2P_CALL EL_Shutdown(void) {

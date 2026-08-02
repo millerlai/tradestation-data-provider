@@ -11,10 +11,10 @@
 
 | fixture | expected | 涵蓋 |
 | --- | --- | --- |
-| `smoke.jsonl` | `expected/smoke.json` | tick + bar · per-symbol `seq` · index symbol 的 bid/ask 無效化（§3.2）· bucket 向下取整到分鐘（§2.1）· 右標籤→左標籤（§2） |
+| `smoke.jsonl` | `expected/smoke.json` | tick + bar · per-symbol `seq` · index symbol 的 bid/ask 無效化（§3.2）· bucket 向下取整到分鐘（§2.1）· 時間戳原樣落地（§2） |
 | `noquote.jsonl` | `expected/noquote.json` | 無報價 → wire 上為 `null`（§3.1）。含 **非 index symbol**（SPY）的無報價 tick —— `$TICK` 單獨無法區分 §3.1 與 §3.2 |
-| `bars.jsonl` | `expected/bars.json` | 每一個非 1m 的 `tf`（`5m`/`15m`/`30m`/`1h`/`1d`）· `1d` 錨在 04:00 ET 且**不做**左標籤位移（§2.2）· `1d` 出現兩次，對應 `BarInterval` 的 `0`（TradeStation 10 實測值）與 `1`，wire 上必須無從分辨 · `1d` 帶的是**日線的量值形狀**（`Volume`=總股數、`Ticks`=筆數、`DownTicks`=0），不是盤中形狀 —— §3.4 說明 EL 的保留字在這裡意義互換 · 每個 frame 的 `Ticks` 都**嚴格大於** `UpTicks + DownTicks`，所以「用加總算出 `el_ticks`」的實作會被抓到（§3.4「fixture 抓得到什麼」）· **無法對應的間隔回 `-5` 且不送出**（該 mode 另發了 3 筆被拒，所以 9 次呼叫只有 6 個 frame） |
-| `session.jsonl` | `expected/session.json` | session 首尾兩根 bar，釘住左標籤（§2）。**wire 送 EL 的收盤時間 `09:31` / `16:00`，期望值是左標籤的 `09:30` / `15:59`** —— 右標籤→左標籤的轉換就靠這兩根把關 |
+| `bars.jsonl` | `expected/bars.json` | 每一個 `BarType`/`BarInterval` 組合逐字上 wire · **沒有任何組合被拒收** —— 2 分鐘圖(1/2)、週線(3/1)、2 日(2/2) 以前會被 DLL 回 `-5` 整根不送 · `bar_type=2` 與盤中同一條規則:時間戳原樣落地(§2)
+| `session.jsonl` | `expected/session.json` | session 首尾兩根 bar（§2）。**wire 送 EL 的收盤時間 `09:31` / `16:00`，期望值就是 `09:31` / `16:00`** —— 釘住「publisher 給什麼就存什麼」 |
 
 四份都涵蓋五個 `el_*` 量值原樣落地（§3.4）。harness 用的是內部一致的 intraday 形狀：
 `el_volume == el_upticks`、`el_ticks == el_upticks + el_downticks` —— 那是真實 intraday
@@ -23,7 +23,7 @@
 `*.jsonl` 每行一個 frame：
 
 ```json
-{"topic": "SPY", "payload": "{\"proto\":1,\"kind\":\"tick\",...}"}
+{"topic": "SPY", "payload": "{\"proto\":2,\"seq\":1,\"bar_type\":0,...}"}
 ```
 
 `payload` 是**收到當下的原文**，未經解析或正規化。無法以 UTF-8 解碼的 frame 改記在

@@ -19,11 +19,3 @@ sinks:
       # generic across machines.
       root: data/bars
       compression: zstd
-
-  - name: ticks_parquet
-    class: tradestation_data.sinks.parquet:ParquetTickSink
-    params:
-      root: data/ticks
-      max_buffered_ticks: 10000
-      max_flush_seconds: 30.0
-      compression: zstd

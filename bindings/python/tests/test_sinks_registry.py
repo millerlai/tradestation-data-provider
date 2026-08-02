@@ -22,7 +22,7 @@ from tradestation_data.sinks.registry import (
 def _bar(symbol: str = "SPY") -> Bar:
     return Bar(
         symbol=symbol,
-        bucket_start=datetime(2026, 4, 20, 13, 30, tzinfo=UTC),
+        bar_time=datetime(2026, 4, 20, 13, 30, tzinfo=UTC),
         open=1.0,
         high=2.0,
         low=0.5,
@@ -32,6 +32,9 @@ def _bar(symbol: str = "SPY") -> Bar:
         el_upticks=10,
         el_downticks=10,
         el_open_interest=0,
+        bar_type=1,
+        bar_interval=1,
+        category=2,
     )
 
 

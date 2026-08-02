@@ -10,7 +10,7 @@ import pyarrow.parquet as pq
 def _write_bars(path, timestamps):
     table = pa.table(
         {
-            "bucket_start": pa.array(timestamps, type=pa.timestamp("us", tz="UTC")),
+            "bar_time": pa.array(timestamps, type=pa.timestamp("us", tz="UTC")),
             "close": pa.array([100.0 + i for i in range(len(timestamps))], type=pa.float64()),
         }
     )
@@ -39,7 +39,7 @@ def test_dedupe_file_removes_dups(tmp_path):
     assert before == 5
     assert after == 3
 
-    rewritten = pq.read_table(path).column("bucket_start").to_pylist()
+    rewritten = pq.read_table(path).column("bar_time").to_pylist()
     assert len(rewritten) == 3
     assert rewritten == sorted(rewritten)
 

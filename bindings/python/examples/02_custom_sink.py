@@ -34,7 +34,7 @@ no code change on this side. (The file you are reading cannot be used as that
 target as-is: a module name starting with a digit is not importable with a
 normal `import` statement.)
 
-Keep on_tick / on_bar fast — they run inline in the ingest loop. Anything
+Keep on_bar fast — it runs inline in the ingest loop. Anything
 slow belongs behind should_flush() / flush(), which the runtime drives from
 a separate loop, or off in a task you spawn.
 """
@@ -49,7 +49,6 @@ import _compat
 
 from tradestation_data.aggregation.snapshot import MarketSnapshot
 from tradestation_data.domain.bar import Bar
-from tradestation_data.domain.tick import Tick
 from tradestation_data.runtime.ingestion import IngestionRuntime
 from tradestation_data.sinks import SinkPipeline
 from tradestation_data.sinks.base import BaseSink
@@ -83,13 +82,6 @@ class SessionStatsSink(BaseSink):
 
     def _stats(self, symbol: str) -> _Stats:
         return self._by_symbol.setdefault(symbol, _Stats())
-
-    def on_tick(self, tick: Tick) -> None:
-        st = self._stats(tick.symbol)
-        st.ticks += 1
-        st.last = tick.price
-        st.high = max(st.high, tick.price)
-        st.low = min(st.low, tick.price)
 
     def on_bar(self, bar: Bar) -> None:
         # Every bar arriving here was shipped whole by the EL indicator and

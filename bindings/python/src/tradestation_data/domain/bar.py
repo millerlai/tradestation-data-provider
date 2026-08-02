@@ -6,43 +6,56 @@ from zoneinfo import ZoneInfo
 
 # TradeStation US-equity charts are always America/New_York; downstream
 # analytics keys off session wall-clock (09:30-16:00 ET), so we expose an
-# ET-aware view of ``bucket_start`` as the primary time basis.
+# ET-aware view of ``bar_time`` as the primary time basis.
 _ET_TZ: ZoneInfo = ZoneInfo("America/New_York")
 
 
 @dataclass(frozen=True, slots=True)
 class Bar:
-    """
-    An OHLC bar, exactly as TradeStation published it.
+    """One data point on a TradeStation chart, exactly as it was published.
 
-    Every bar reaching this type came off the wire. Nothing in this binding
-    computes one — no tick aggregation, no rollup from a finer interval — so
-    there is no provenance to record and no derived-versus-native distinction
-    to defend. A consumer that wants 5-minute bars either charts them in
-    TradeStation, or builds them itself from what is stored here.
+    There is one type here, not a Tick and a Bar. TradeStation supplies the
+    same reserved words for a point on any chart — a 1-tick series has
+    Open = High = Low = Close, and a minute chart still answers
+    InsideBid/InsideAsk — so splitting them meant dropping fields the chart
+    had already provided, on a judgement about which numbers were meaningful
+    where. That judgement belongs to the consumer.
 
-    `bucket_start` is UTC and LEFT-labelled: the bar covers
-    ``[bucket_start, bucket_start + timeframe)``. EasyLanguage stamps a bar
-    with its CLOSE time, so the wire is right-labelled and the subscriber
-    steps back one interval before aligning — see contract/semantics.md §2.
-    `bucket_start_et` is the same instant in America/New_York.
+    Nothing in this binding computes a point. No aggregation, no rollup from a
+    finer interval, no bucket grid. A consumer wanting 5-minute bars either
+    charts them in TradeStation or builds them from what is stored here.
 
-    `timeframe` names the interval ("1m", "5m", ...). It is not a cosmetic
-    label: the storage layer partitions on it, so a bar whose timeframe is
-    wrong is filed under the wrong interval where nothing downstream can tell.
-    Per-interval bucket alignment is contract/semantics.md §2.2.
+    ``bar_time`` is the publisher's own timestamp, converted to UTC and
+    floored to the minute — nothing else. EasyLanguage's ``Time`` is the
+    point's CLOSE, so ``bar_time`` is a close time. It is NOT a left edge and
+    is not snapped to any grid: this binding used to do both, and it cost a
+    whole bar a day on a 60-minute chart, because TradeStation restarts its
+    intraday grid at the RTH open and close and two published points could
+    then land on one slot. See contract/semantics.md §2.
 
-    The five ``el_*`` fields are EasyLanguage's reserved words verbatim; see
-    Tick for why they are prefixed and why ``el_volume`` is not the volume on
-    an intraday bar.
+    ``bar_type`` / ``bar_interval`` / ``category`` are EasyLanguage's
+    ``BarType``, ``BarInterval`` and ``Category``, verbatim. Nothing maps them
+    to a timeframe name and nothing refuses a combination it does not
+    recognise; the storage layer partitions on the raw pair. ``category`` says
+    what the symbol is (2 = Stock, 0 = Future, 4 = Index, …) and is what makes
+    contract/semantics.md §3.4 answerable at all — the meaning of the five
+    ``el_*`` words depends on it.
 
-    No bid/ask. A live-quote function describes the moment of the call, which
-    on a bar is its last print rather than the bar, so the wire does not carry
-    one to model.
+    The five ``el_*`` fields are EasyLanguage's reserved words verbatim. The
+    prefix is the point: ``el_volume`` is not "the volume" on an intraday
+    chart, and a column called plain ``volume`` invites exactly the misreading
+    that once cost this repo a systematically halved volume column.
+
+    ``bid`` / ``ask`` are ``InsideBid`` / ``InsideAsk``, or None where the
+    publisher had no quote to report. They travel on every point, bars
+    included.
     """
 
     symbol: str
-    bucket_start: datetime
+    bar_time: datetime
+    bar_type: int
+    bar_interval: int
+    category: int
     open: float
     high: float
     low: float
@@ -52,9 +65,10 @@ class Bar:
     el_upticks: int
     el_downticks: int
     el_open_interest: int
-    timeframe: str = "1m"
+    bid: float | None = None
+    ask: float | None = None
 
     @property
-    def bucket_start_et(self) -> datetime:
-        """Return ``bucket_start`` converted to America/New_York."""
-        return self.bucket_start.astimezone(_ET_TZ)
+    def bar_time_et(self) -> datetime:
+        """Return ``bar_time`` converted to America/New_York."""
+        return self.bar_time.astimezone(_ET_TZ)

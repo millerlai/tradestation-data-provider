@@ -9,25 +9,6 @@ import pytest
 import verify_parquet as vp
 
 
-def test_parse_timeframe_minute():
-    assert vp._parse_timeframe("1m") == ("1m", 60)
-    assert vp._parse_timeframe("5m") == ("5m", 300)
-
-
-def test_parse_timeframe_second_and_hour():
-    assert vp._parse_timeframe("30s") == ("30s", 30)
-    assert vp._parse_timeframe("1h") == ("1h", 3600)
-
-
-def test_parse_timeframe_invalid():
-    with pytest.raises(ValueError):
-        vp._parse_timeframe("5x")
-    with pytest.raises(ValueError):
-        vp._parse_timeframe("abc")
-    with pytest.raises(ValueError):
-        vp._parse_timeframe("-5m")
-
-
 def test_parse_hhmm_variants():
     assert vp._parse_hhmm("09:30") == time(9, 30)
     assert vp._parse_hhmm("16:00:30") == time(16, 0, 30)
@@ -51,7 +32,7 @@ def test_resolve_tz_aliases_and_unknown():
 def test_expected_bars_1m_full_session():
     tz = vp._resolve_tz("ET")
     bars = vp._expected_bars(date(2026, 4, 17), time(9, 30), time(16, 0), 60, tz)
-    # 09:30..15:59 inclusive left-labeled (bucket_start) = 390 bars
+    # 09:30..15:59 inclusive left-labeled (bar_time) = 390 bars
     assert len(bars) == 390
     assert bars[0].astimezone(tz).strftime("%H:%M") == "09:30"
     assert bars[-1].astimezone(tz).strftime("%H:%M") == "15:59"
@@ -96,12 +77,19 @@ def test_fmt_range_empty():
     assert vp._fmt_range([], vp._resolve_tz("UTC"), 3) == ""
 
 
-def _write_day_bars(root: Path, symbol: str, day: date, bucket_starts_utc):
-    p = root / "timeframe=1m" / f"symbol={symbol}" / f"date={day.isoformat()}" / "bars.parquet"
+def _write_day_bars(root: Path, symbol: str, day: date, bar_times_utc):
+    p = (
+        root
+        / "bartype=1"
+        / "interval=1"
+        / f"symbol={symbol}"
+        / f"date={day.isoformat()}"
+        / "bars.parquet"
+    )
     p.parent.mkdir(parents=True, exist_ok=True)
     table = pa.table(
         {
-            "bucket_start": pa.array(bucket_starts_utc, type=pa.timestamp("us", tz="UTC")),
+            "bar_time": pa.array(bar_times_utc, type=pa.timestamp("us", tz="UTC")),
         }
     )
     pq.write_table(table, p, compression="zstd")
@@ -119,7 +107,8 @@ def test_verify_end_to_end(tmp_path):
         symbol="SPY",
         start_date=day,
         end_date=day + timedelta(days=3),  # covers Fri, Sat, Sun, Mon
-        tf_label="1m",
+        bar_type=1,
+        bar_interval=1,
         tf_sec=60,
         start_time=time(9, 30),
         end_time=time(10, 0),

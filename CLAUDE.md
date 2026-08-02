@@ -22,18 +22,29 @@ implementation — this repo has already had a spec drift into describing fields
 no longer emitted, unnoticed, because nothing checked. Anything a second binding would
 have to guess belongs in `contract/semantics.md`, with a fixture.
 
-- **Wire `proto` 1 / DLL ABI 1. There is exactly one of each, and nothing else is
+- **Wire `proto` 2 / DLL ABI 2. There is exactly one of each, and nothing else is
   supported.** The version key is `proto`, not `v`: the superseded wire used `v` and
-  counted to 4, so restarting at 1 under the same key would have made `{"v":1}` a legal
+  counted to 4, so restarting under the same key would have made `{"v":1}` a legal
   opening for two different protocols. A frame without `proto` is simply not this
-  protocol, and `_parse_payload` refuses it with a message naming the fix. **Upgrade DLL
-  and `.ELD` together** — they are separate install steps and the indicator binds
-  `EL_Init3`, which an older DLL does not export.
-- `EL_Init` and `EL_Init2` survive as **tombstones** returning `-6`. They are three lines
-  each and must stay in `TS2Python.def`: `EL_PublishTick` / `EL_PublishBar` kept their
-  names while changing signature, and those are `__stdcall`, so a mismatched call
-  corrupts the stack rather than returning an error. Init is the only interception point —
-  the indicator guards every publish on `InitDone`, which stays False when `InitRC < 0`.
+  protocol, and `_parse_payload` refuses it with a message naming the fix. **Upgrade
+  DLL and `.ELD` together** — they are separate install steps and the indicator binds
+  `EL_Init3` and `EL_Publish`, neither of which an older DLL exports.
+- **One publish export, one frame shape.** `EL_Publish` carries everything
+  TradeStation hands the indicator for a data point: `Date`+`Time`, `BarType`,
+  `BarInterval`, `Category`, OHLC, the five `el_*` words, and `InsideBid`/`InsideAsk`.
+  There is no tick/bar split, no `kind`, and no `tf`.
+
+  The split used to drop fields by chart type — tick sent `Close` alone and no chart
+  identity; bar sent OHLC and no quote. Both were the publisher deciding which numbers
+  were meaningful where, off the wire, where nothing downstream could see the decision.
+  TradeStation supplies the same reserved words on every chart; a 1-tick series has
+  `Open = High = Low = Close`, and that is a fact worth landing.
+- `EL_Init`, `EL_Init2`, `EL_PublishTick` and `EL_PublishBar` survive as **tombstones**
+  returning `-6`. They are three lines each and must stay in `TS2Python.def`: the two
+  publish names once kept their spelling across a signature change, and they are
+  `__stdcall`, so a mismatched call corrupts the stack rather than returning an error.
+  Init is the interception point that matters — the indicator guards every publish on
+  `InitDone`, which stays False when `InitRC < 0`.
 - Python 3.12–3.14, managed with **uv**; all three are in the CI matrix. 3.11 was
   dropped so the Windows event loop can be selected with
   `asyncio.run(loop_factory=...)` (3.12+) instead of the policy API, which 3.14
@@ -46,16 +57,14 @@ have to guess belongs in `contract/semantics.md`, with a fixture.
 - Wrapper scripts in `bindings/python/scripts/` shell out to `uv run` via `_common.py`.
 - `contract/tools/record.py` deliberately imports **no binding** — that independence is
   what qualifies it to record the fixtures every binding is checked against.
-- **No strategy / broker / risk wiring lives here.** `domain/` is `Tick`, `Bar`, and
-  `Timeframe` — the value range of the wire, `tf` included. A new domain type with no
+- **No strategy / broker / risk wiring lives here.** `domain/` is `Bar` and nothing
+  else — one type, because the wire carries one shape. A new domain type with no
   counterpart on the wire means scope is leaking back in.
-- `domain/timeframe.py` is the single source for the timeframe vocabulary: the enum,
-  the minutes table, the wire allow-list (`SUPPORTED_TIMEFRAMES`),
-  `SINGLE_FILE_TIMEFRAMES` (no `date=` level), `SESSION_ANCHORED_TIMEFRAMES` (the 04:00
-  ET anchor, and the frames exempt from the right-to-left label shift), and
-  `align_bucket_start`. Adding an interval should be one edit there, not six scattered
-  ones — and any new interval must divide one hour, or the intraday grid stops surviving
-  DST (`contract/semantics.md` §2.2).
+- **There is no timeframe vocabulary any more.** `domain/timeframe.py`,
+  `align_bucket_start`, `SESSION_ANCHORED_TIMEFRAMES` and the 04:00 ET daily anchor
+  were all deleted. A chart is named by EasyLanguage's own `BarType` / `BarInterval`,
+  verbatim, and the store partitions on that pair — so an interval this binding has no
+  word for (a 2-minute chart, a weekly one) is stored rather than refused.
 
 ## Commands
 
@@ -108,7 +117,7 @@ python contract/tools/record.py --count 6 --quiet --record contract/fixtures/smo
 
 Harness modes: `smoke` (3 topics + one bar), `noquote` (bid/ask absent, the
 history-replay shape, on both an index and a non-index symbol), `bars` (every
-non-1m `tf` plus the `-5` refusal path), `session` (RTH first/last bar),
+every BarType/BarInterval pair, none refused), `session` (RTH first/last bar),
 `stress`, `multithread`. Each fixture's mode and frame count is tabulated in
 `contract/fixtures/README.md`.
 
@@ -123,17 +132,15 @@ rather than widening the filter.
 ```
 TradeStation EL DLL  ──ZMQ PUB──▶  TradeStationELProvider (SUB, asyncio)
                                             │
-                                            ├── Tick  ──▶ MarketSnapshot.on_tick
-                                            │            └──▶ SinkPipeline.on_tick
+                                            │  one frame shape, whatever the chart
+                                            ▼
+                              IngestionRuntime._handle_provider_bar
+                              (intra-bar buffer, dedupe, replace-last)
                                             │
-                                            └── Bar   ──▶ IngestionRuntime._handle_provider_bar
-                                                         (intra-bar buffer, dedupe, replace-last)
-                                                                 │
-                              closed Bar ◀───────────────────────┘
+                          closed point ◀────┘
                                   │
                                   ├──▶ MarketSnapshot.on_bar
                                   ├──▶ SinkPipeline.on_bar  ──┬──▶ ParquetBarSink (default)
-                                  │                           ├──▶ ParquetTickSink (default; ticks only)
                                   │                           ├──▶ InMemorySink / CallbackSink
                                   │                           └──▶ user-defined sinks from sinks.yaml
                                   └──▶ optional on_bar callback
@@ -141,21 +148,21 @@ TradeStation EL DLL  ──ZMQ PUB──▶  TradeStationELProvider (SUB, asynci
 Background loops in IngestionRuntime: ingest / advance (wall-clock) / flush (sinks that advertise it) / heartbeat.
 ```
 
-**Ticks do not become bars.** There is one bar path and TradeStation is on the other
-end of it. Nothing here aggregates, resamples, backfills or caches — see "What this
+**Nothing here builds a point from another.** There is one path and TradeStation is
+on the other end of it. Nothing here aggregates, resamples, backfills or caches — see "What this
 binding does not do" below.
 
 ### Pluggable sinks (`sinks/`)
 
-`IngestionRuntime` writes to a `SinkPipeline` rather than directly to `BarWriter` / `TickWriter`. The pipeline broadcasts every Tick and every closed Bar to every registered sink and **isolates per-sink exceptions** (one bad sink doesn't take down the others). The pipeline is built from `config/sinks.yaml` via `tradestation_data.sinks.registry.build_pipeline_from_config()`; users register custom sinks by pointing the YAML `class:` field at any importable `module:attr` returning a Sink protocol implementation. Built-ins:
+`IngestionRuntime` writes to a `SinkPipeline` rather than directly to `BarWriter`. The pipeline broadcasts every closed point to every registered sink and **isolates per-sink exceptions** (one bad sink doesn't take down the others). The pipeline is built from `config/sinks.yaml` via `tradestation_data.sinks.registry.build_pipeline_from_config()`; users register custom sinks by pointing the YAML `class:` field at any importable `module:attr` returning a Sink protocol implementation. Built-ins:
 
-- `ParquetBarSink`, `ParquetTickSink` — thin adapters over `BarWriter` / `TickWriter` under `storage/`. **Both buffer and both advertise `flush`** — bars used to be written one at a time, which cost one Parquet row group per bar. Both writers also *seal* a partition (flush + close its file) as soon as an event for a later day of the same series arrives: a `ParquetWriter` left open has no footer, so its file is unreadable to every reader until the process stops.
+- `ParquetBarSink` — a thin adapter over `BarWriter` under `storage/`. It buffers and advertises `flush` — bars used to be written one at a time, which cost one Parquet row group per bar. It also *seals* a partition (flush + close its file) on either of two signals: a point for a later day of the same series arrives, or the day is over in ET and nothing has arrived for it in a whole `max_flush_seconds`. A `ParquetWriter` left open has no footer, so its file is unreadable to every reader until then — and the first signal alone leaves the newest day of a finished replay open until Ctrl+C.
 - `InMemorySink` — bounded per-symbol deques; for tests / notebook use only.
 - `CallbackSink` — dynamic Python callback dispatch with per-symbol or catch-all registration. Instances are tracked in a module-level `WeakValueDictionary`; user code does `get_sink(name)` to look up the instance declared in `sinks.yaml` and register handlers on it. `close()` eagerly removes the registry entry so a subsequent `get_sink()` raises `KeyError` immediately, not after GC.
 
-The `tick_writer` / `bar_writer` constructor parameters on `IngestionRuntime` are gone — pass a `SinkPipeline` instead. The `BarWriter` / `TickWriter` classes still live under `storage/` because `ParquetBarSink` / `ParquetTickSink` wrap them; they are *not* the public interface anymore.
+The `tick_writer` / `bar_writer` constructor parameters on `IngestionRuntime` are gone — pass a `SinkPipeline` instead. `BarWriter` still lives under `storage/` because `ParquetBarSink` wraps it; it is *not* the public interface anymore.
 
-The DLL exports `EL_PublishTick` and `EL_PublishBar`; a bar always arrives whole. EL's "Update every tick" mode re-sends the same `(symbol, bucket_start)` many times per minute, so `_handle_provider_bar` buffers the latest per symbol and only emits when the next bucket arrives, on wall-clock advance past `bucket_end + grace`, or on shutdown. `_last_emitted_direct_bucket` blocks history-replay duplicates after a TS chart reload.
+The DLL exports one publisher, `EL_Publish`; a point always arrives whole. EL's "Update every tick" mode re-sends the same `(symbol, bar_time)` many times per minute, so `_handle_provider_bar` buffers the latest per symbol and only emits when the next bucket arrives, on wall-clock advance past `bucket_end + grace`, or on shutdown. `_last_emitted_direct_bucket` blocks history-replay duplicates after a TS chart reload.
 
 ### What this binding does not do
 
@@ -174,16 +181,14 @@ TradeStation never published, and never writes on a read path.
 
 Hive-partitioned Parquet under `data/`. Everything on disk came off the wire:
 
-| Path                                                                | Producer |
-|---------------------------------------------------------------------|----------|
-| `ticks/symbol={SYM}/date={YYYY-MM-DD}/ticks.parquet`                | `ParquetTickSink` (→ `TickWriter`) |
-| `bars/timeframe={tf}/symbol={SYM}/date={YYYY-MM-DD}/bars.parquet`   | `ParquetBarSink` (→ `BarWriter`) |
-| `bars/timeframe=1d/symbol={SYM}/bars.parquet`                       | `ParquetBarSink` — flat, no `date=` level |
+| Path | Producer |
+|---|---|
+| `bars/bartype={N}/interval={M}/symbol={SYM}/date={YYYY-MM-DD}/bars.parquet` | `ParquetBarSink` (→ `BarWriter`) |
+| `bars/bartype=2/interval={M}/symbol={SYM}/bars.parquet` | `ParquetBarSink` — flat, no `date=` level |
 
-`1d` is flat because a day partition of daily bars is one row inside a ~2.9 KB file
-(`SINGLE_FILE_TIMEFRAMES`; the file is rewritten whole on each flush). Any reader
-building a bars path must ask `domain/timeframe.py` which shape applies rather than
-assuming `date=`.
+`BarType 2` (daily) is flat because a day partition of daily bars is one row inside a
+~2.9 KB file; the file is rewritten whole on each flush. Any reader building a bars
+path must branch on `bar_type == 2` rather than assuming `date=`.
 
 `HistoryStore` is the read-side facade — polars `scan_parquet(hive_partitioning=True)`
 over the glob. `BAR_SCHEMA` / `TICK_SCHEMA` carry both a UTC and an
@@ -198,20 +203,33 @@ UTC column against a literal in another zone.
 `el_volume`, `el_ticks`, `el_upticks`, `el_downticks`, `el_open_interest`.** The
 publisher selects nothing and converts nothing; the binding must not either.
 
-**`Volume` and `Ticks` mean opposite things intraday and daily.** Intraday, `Volume` is
-*up-tick share volume only* and `Ticks` is *total share volume*; daily, they swap.
-Confirmed against TradeStation's own reserved-word docs and measured on a live 100-tick
-chart — `contract/semantics.md` §3.4 has the table and the evidence. This is a fact
-about TradeStation, not a thing to fix: the exporter used to swap the fields so `vol`
-would mean one thing everywhere, and `pv` existed solely because that swap happened
-off-wire where no number could reveal it. Both are gone.
+**There are TWO inversions between intraday and daily, not one.** `Volume`/`Ticks` is
+the well-known pair: intraday, `Volume` is *up-tick share volume only* and `Ticks` is
+*total share volume*; daily, they swap. `DownTicks`/`OpenInt` is the second, and it
+runs the other way — intraday `OpenInt` borrows `DownTicks`'s meaning, daily
+`DownTicks` borrows `OpenInt`'s. Both come straight from TradeStation's own
+reserved-word page, transcribed into `contract/semantics.md` §3.4 with the live
+measurements beside them. Do not go looking for these definitions anywhere else, and
+do not re-derive them: §3.4 is the copy.
+
+This is a fact about TradeStation, not a thing to fix: the exporter used to swap the
+fields so `vol` would mean one thing everywhere, and `pv` existed solely because that
+swap happened off-wire where no number could reveal it. Both are gone.
+
+Two consequences worth knowing before reading a column:
+- Measured on live SPY, @ES, VXX and an SPY option, **`el_open_interest` returns
+  `el_downticks` on every intraday chart** whatever the category. It is not open
+  interest there.
+- **A futures daily bar's `el_downticks` IS open interest.** Summing that column
+  across futures dailies sums OI, not volume.
 
 The `el_` prefix is the point. A column called plain `volume` invites the reading that
 already cost this repo a systematically halved volume column, and the numbers looked
 entirely plausible throughout. A consumer wanting "how much traded" reads the field the
-§3.4 table names for its timeframe.
+§3.4 table names for its `bar_type` and `category` — which is why `category` is on
+the wire at all (§3.5).
 
-**Do not "verify" a `1d` bar by summing intraday bars.** The daily figure is the
+**Do not "verify" a daily bar by summing intraday bars.** The daily figure is the
 exchange's official consolidated total (late prints, block trades, dark pool, closing
 cross); intraday is what the live SIP stream happened to carry. Two different
 measurements — §3.4 has the four reasons.
@@ -223,7 +241,7 @@ measurements — §3.4 has the four reasons.
 **These are contract rules, not local choices — `contract/semantics.md` is authoritative
 and every binding must agree. Change them there first.**
 
-- `ts_str` (`yyyy-MM/dd-HH:mm:ss`, 24-hour) is **authoritative** for `Bar.bucket_start`:
+- `ts_str` (`yyyy-MM/dd-HH:mm:ss`, 24-hour) is **authoritative** for `Bar.bar_time`:
   parsed as `America/New_York`, converted to UTC, then **floored to the minute**. The
   flooring is invisible in normal operation because EL sends aligned times; the smoke
   fixture catches it because the harness reuses a tick's `:45` timestamp. `ts` is the
@@ -236,29 +254,37 @@ and every binding must agree. Change them there first.**
   `ZoneInfo`, and the >5s drift warning was the only signal that the two ends disagreed
   about a timezone database. Dropping it was a trade, recorded in `contract/wire.md` —
   an unparseable time string now arrives intact and fails one layer later, here.
-- Bars are **left-labelled**: `bucket_start` covers `[t, t+step)`, so an RTH 1m session
-  runs 09:30…15:59, not 09:31…16:00. **The wire is right-labelled** — EasyLanguage's
-  `Time` is the bar's *close* and the indicator forwards it verbatim — so `_parse_bar`
-  subtracts one `tf` before the grid snap, exempting `SESSION_ANCHORED_TIMEFRAMES`
-  (`1d`), where alignment discards the time-of-day for the 04:00 ET anchor anyway and
-  subtracting would move the bar into the previous session. That step went missing once
-  and every stored 1m file came out as 09:31…16:00: same 390 rows, all values plausible,
-  nothing raised. `contract/fixtures/session.jsonl` is what pins it — it publishes the
-  real 09:31 / 16:00 shape, so a fixture that emits the contract's own labels is not a
-  test, it is a tautology.
-- Ticks use the DLL's receive-side `ts` (UTC epoch) as authoritative.
+- **A bar's time is the publisher's, verbatim.** `ts_str` parses as ET, converts to
+  UTC, floors to the minute, and lands as `bar_time`. There is no shift and no grid
+  snap. EasyLanguage's `Time` is the bar's *close*, so `bar_time` is a close time;
+  a consumer wanting left edges subtracts for itself.
+
+  This binding used to convert: subtract a minute, then snap onto a 09:30-anchored
+  grid. It lost a bar a day. TradeStation restarts its intraday grid at the RTH open
+  and close, so a 60-minute chart on a 06:00 session publishes fifteen bars including
+  two stubs — and closes 09:00 and 09:30 both snapped onto 08:30, the second
+  overwriting the first. No grid can fix it: the segment lengths follow the chart's
+  session template, which the wire does not carry. `contract/semantics.md` §2 has
+  the measurement.
 - `aggregation/session.py` owns session-edge logic. US equity session = 09:30–16:00 ET;
   bars before 04:00 ET belong to the *previous* session. Per-symbol retention via
   `SessionPolicy`: `breadth` indices reset daily, everything else retains 60 min of
   pre-market. Defaults from `symbols.yaml::category`, overrides in `runtime/config.py`.
-- **Quotes are absent in two different ways, and only ticks have them at all.** EL's
+- **Every point carries `bid`/`ask`, and the binding blanks nobody's.** EL's
   `InsideBid`/`InsideAsk` return 0 when there is no quote (historical replay, non-live
-  mode, breadth indices); the DLL normalises non-positive values to JSON `null`.
-  Separately, index/breadth symbols (`DEFAULT_INDEX_SYMBOLS`) may carry live numbers that
-  still mean nothing, and the binding invalidates those. `_quote_or_none()` handles both.
-  **Bars carry no quote** — a live-quote function describes the moment of the call, which
-  on a bar is its last print rather than the bar, so the wire does not send one and `Bar`
-  does not model one.
+  mode, breadth indices); the DLL normalises non-positive values to JSON `null`, so
+  "absent" is spelled once for every caller of the C ABI.
+
+  There used to be a second rule: a hard-coded list of index/breadth symbols whose
+  quotes the binding discarded as meaningless. It was a guess in both directions —
+  `VXX` was on it, and VXX is a tradeable ETN that reported 567,776 shares in one bar,
+  so its real quote was being thrown away. It was also an opinion about what a number
+  means, which is the consumer's to hold. `category` (4 = Index) now travels on every
+  frame, so a consumer wanting that behaviour has a fact to key off.
+
+  Bars used to carry no quote at all, on the grounds that a live-quote function
+  describes the moment of the call rather than the bar. Same problem: true, and not
+  this transport's call to make.
 
 ### Windows-specific event loop
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import pyarrow.parquet as pq
@@ -13,7 +13,7 @@ from tradestation_data.storage import BarWriter
 def _bar(symbol: str, bucket: datetime, close: float, *, el_volume: int = 100) -> Bar:
     return Bar(
         symbol=symbol,
-        bucket_start=bucket,
+        bar_time=bucket,
         open=close - 0.1,
         high=close + 0.2,
         low=close - 0.2,
@@ -28,6 +28,9 @@ def _bar(symbol: str, bucket: datetime, close: float, *, el_volume: int = 100) -
         el_upticks=el_volume + 3,
         el_downticks=el_volume + 5,
         el_open_interest=0,
+        bar_type=1,
+        bar_interval=1,
+        category=2,
     )
 
 
@@ -40,13 +43,13 @@ def test_writer_creates_timeframe_partitioned_file(tmp_path: Path) -> None:
         writer.write(_bar("SPY", T0, 450.0))
         writer.write(_bar("SPY", T0 + timedelta(minutes=1), 450.5))
 
-    expected = root / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
+    expected = root / "bartype=1" / "interval=1" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
     assert expected.exists()
 
     table = pq.read_table(expected)
     assert table.num_rows == 2
     assert {
-        "bucket_start",
+        "bar_time",
         "open",
         "high",
         "low",
@@ -68,9 +71,9 @@ def test_writer_partitions_by_symbol_and_date(tmp_path: Path) -> None:
         writer.write(_bar("SPY", T0 + timedelta(days=1), 451.0))
 
     for p in [
-        root / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet",
-        root / "timeframe=1m" / "symbol=QQQ" / "date=2026-04-18" / "bars.parquet",
-        root / "timeframe=1m" / "symbol=SPY" / "date=2026-04-19" / "bars.parquet",
+        root / "bartype=1" / "interval=1" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet",
+        root / "bartype=1" / "interval=1" / "symbol=QQQ" / "date=2026-04-18" / "bars.parquet",
+        root / "bartype=1" / "interval=1" / "symbol=SPY" / "date=2026-04-19" / "bars.parquet",
     ]:
         assert p.exists(), p
 
@@ -81,7 +84,7 @@ def test_empty_bar_writes_zero_quantities(tmp_path: Path) -> None:
         writer.write(
             Bar(
                 symbol="SPY",
-                bucket_start=T0,
+                bar_time=T0,
                 open=450.0,
                 high=450.0,
                 low=450.0,
@@ -91,9 +94,12 @@ def test_empty_bar_writes_zero_quantities(tmp_path: Path) -> None:
                 el_upticks=0,
                 el_downticks=0,
                 el_open_interest=0,
+                bar_type=1,
+                bar_interval=1,
+                category=2,
             )
         )
-    path = root / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
+    path = root / "bartype=1" / "interval=1" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
     table = pq.read_table(path)
     for column in ("el_volume", "el_ticks", "el_upticks", "el_downticks", "el_open_interest"):
         assert table.column(column).to_pylist() == [0], column
@@ -113,15 +119,15 @@ def test_write_after_close_raises(tmp_path: Path) -> None:
         writer.write(_bar("SPY", T0, 450.0))
 
 
-def test_writer_schema_includes_bucket_start_et(tmp_path: Path) -> None:
+def test_writer_schema_includes_bar_time_et(tmp_path: Path) -> None:
     root = tmp_path / "bars"
     with BarWriter(root) as writer:
         writer.write(_bar("SPY", T0, 450.0))
 
-    path = root / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
+    path = root / "bartype=1" / "interval=1" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
     table = pq.read_table(path)
-    assert "bucket_start_et" in table.column_names
-    et_series = table.column("bucket_start_et").to_pylist()
+    assert "bar_time_et" in table.column_names
+    et_series = table.column("bar_time_et").to_pylist()
     assert len(et_series) == 1
     et0 = et_series[0]
     assert et0.tzinfo is not None
@@ -139,8 +145,12 @@ def test_writer_partitions_by_et_date_not_utc(tmp_path: Path) -> None:
     with BarWriter(root) as writer:
         writer.write(_bar("SPY", late_utc, 450.0))
 
-    et_partition = root / "timeframe=1m" / "symbol=SPY" / "date=2026-04-17" / "bars.parquet"
-    utc_partition = root / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
+    et_partition = (
+        root / "bartype=1" / "interval=1" / "symbol=SPY" / "date=2026-04-17" / "bars.parquet"
+    )
+    utc_partition = (
+        root / "bartype=1" / "interval=1" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
+    )
     assert et_partition.exists()
     assert not utc_partition.exists()
 
@@ -157,7 +167,7 @@ def test_burst_of_bars_becomes_one_row_group(tmp_path: Path) -> None:
         for i in range(60):
             writer.write(_bar("SPY", T0 + timedelta(minutes=i), 450.0 + i))
 
-    path = root / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
+    path = root / "bartype=1" / "interval=1" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
     meta = pq.ParquetFile(path).metadata
     assert meta.num_rows == 60
     assert meta.num_row_groups == 1
@@ -175,7 +185,9 @@ def test_finished_day_is_readable_before_close(tmp_path: Path) -> None:
         # A bar for the next day: day one can never receive another.
         writer.write(_bar("SPY", T0 + timedelta(days=1), 451.0))
 
-        day_one = root / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
+        day_one = (
+            root / "bartype=1" / "interval=1" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
+        )
         table = pq.read_table(day_one)  # would raise without the footer
         assert table.num_rows == 2
     finally:
@@ -194,7 +206,7 @@ def test_late_bar_for_a_sealed_day_does_not_truncate_it(tmp_path: Path, caplog) 
     finally:
         writer.close()
 
-    day_one = root / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
+    day_one = root / "bartype=1" / "interval=1" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
     assert pq.read_table(day_one).num_rows == 1
 
 
@@ -209,7 +221,7 @@ def test_sealing_is_per_symbol_and_timeframe(tmp_path: Path) -> None:
     finally:
         writer.close()
 
-    qqq = root / "timeframe=1m" / "symbol=QQQ" / "date=2026-04-18" / "bars.parquet"
+    qqq = root / "bartype=1" / "interval=1" / "symbol=QQQ" / "date=2026-04-18" / "bars.parquet"
     assert pq.read_table(qqq).num_rows == 2
 
 
@@ -227,22 +239,25 @@ def test_should_flush_triggers_on_buffered_count(tmp_path: Path) -> None:
     writer.close()
 
 
-def test_writer_partitions_on_the_bar_timeframe_not_its_own(tmp_path) -> None:
-    """The bar decides the partition; the constructor arg is only a default.
+def test_writer_partitions_on_the_charts_own_words(tmp_path) -> None:
+    """The point decides the partition, from BarType and BarInterval verbatim.
 
-    Routing on the writer's setting instead would file every interval under
-    whatever it was configured with — the exact corruption `tf` exists to
-    stop.
+    There is no allow-list and no name-mapping in between, so a chart this
+    binding has no word for — a 2-minute series, say — still files under its
+    own pair instead of being refused or defaulted into someone else's.
     """
     from tradestation_data.domain.bar import Bar
 
     root = tmp_path / "bars"
     t = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)
 
-    def _bar(tf: str) -> Bar:
+    def _point(bar_type: int, bar_interval: int) -> Bar:
         return Bar(
             symbol="SPY",
-            bucket_start=t,
+            bar_time=t,
+            bar_type=bar_type,
+            bar_interval=bar_interval,
+            category=2,
             open=1.0,
             high=2.0,
             low=0.5,
@@ -252,18 +267,23 @@ def test_writer_partitions_on_the_bar_timeframe_not_its_own(tmp_path) -> None:
             el_upticks=10,
             el_downticks=10,
             el_open_interest=0,
-            timeframe=tf,
         )
 
     with BarWriter(root) as w:
-        w.write(_bar("1m"))
-        w.write(_bar("5m"))
-        w.write(_bar("1d"))
+        w.write(_point(1, 1))
+        w.write(_point(1, 5))
+        w.write(_point(1, 2))  # no wire name ever existed for this one
+        w.write(_point(2, 1))
 
-    # 1d has no date= level, so its file sits one directory shallower.
-    written = sorted(p.relative_to(root).parts[0] for p in root.rglob("bars.parquet"))
-    assert written == ["timeframe=1d", "timeframe=1m", "timeframe=5m"]
-    assert (root / "timeframe=1d" / "symbol=SPY" / "bars.parquet").exists()
+    written = sorted(
+        str(p.relative_to(root).parent).replace("\\", "/") for p in root.rglob("bars.parquet")
+    )
+    assert written == [
+        "bartype=1/interval=1/symbol=SPY/date=2026-04-20",
+        "bartype=1/interval=2/symbol=SPY/date=2026-04-20",
+        "bartype=1/interval=5/symbol=SPY/date=2026-04-20",
+        "bartype=2/interval=1/symbol=SPY",  # daily: no date= level
+    ]
 
 
 # ---- single-file timeframes (1d) ------------------------------------
@@ -272,7 +292,7 @@ def test_writer_partitions_on_the_bar_timeframe_not_its_own(tmp_path) -> None:
 def _daily(bucket: datetime, close: float) -> Bar:
     return Bar(
         symbol="SPY",
-        bucket_start=bucket,
+        bar_time=bucket,
         open=close - 1,
         high=close + 1,
         low=close - 2,
@@ -282,7 +302,9 @@ def _daily(bucket: datetime, close: float) -> Bar:
         el_upticks=1_000,
         el_downticks=0,
         el_open_interest=0,
-        timeframe="1d",
+        bar_type=2,
+        bar_interval=1,
+        category=2,
     )
 
 
@@ -300,9 +322,9 @@ def test_daily_bars_share_one_file_per_symbol(tmp_path: Path) -> None:
         for i, bucket in enumerate((D1, D2, D3)):
             w.write(_daily(bucket, 450.0 + i))
 
-    flat = root / "timeframe=1d" / "symbol=SPY" / "bars.parquet"
+    flat = root / "bartype=2" / "interval=1" / "symbol=SPY" / "bars.parquet"
     assert flat.exists()
-    assert not list((root / "timeframe=1d").glob("symbol=SPY/date=*"))
+    assert not list((root / "bartype=2" / "interval=1").glob("symbol=SPY/date=*"))
     meta = pq.ParquetFile(flat).metadata
     assert meta.num_rows == 3
     assert meta.num_row_groups == 1
@@ -316,7 +338,7 @@ def test_daily_file_is_readable_after_every_flush(tmp_path: Path) -> None:
     try:
         writer.write(_daily(D1, 450.0))
         writer.flush()
-        flat = root / "timeframe=1d" / "symbol=SPY" / "bars.parquet"
+        flat = root / "bartype=2" / "interval=1" / "symbol=SPY" / "bars.parquet"
         assert pq.read_table(flat).num_rows == 1
 
         writer.write(_daily(D2, 451.0))
@@ -337,7 +359,7 @@ def test_daily_rewrite_keeps_rows_written_by_an_earlier_process(tmp_path: Path) 
     with BarWriter(root) as w:  # a fresh run, as after a restart
         w.write(_daily(D3, 452.0))
 
-    table = pq.read_table(root / "timeframe=1d" / "symbol=SPY" / "bars.parquet")
+    table = pq.read_table(root / "bartype=2" / "interval=1" / "symbol=SPY" / "bars.parquet")
     assert table.num_rows == 3
     assert table.column("close").to_pylist() == pytest.approx([450.0, 451.0, 452.0])
 
@@ -352,7 +374,7 @@ def test_daily_repeated_bucket_keeps_the_later_bar(tmp_path: Path) -> None:
     with BarWriter(root) as w:
         w.write(_daily(D1, 999.0))  # same bucket, re-exported
 
-    table = pq.read_table(root / "timeframe=1d" / "symbol=SPY" / "bars.parquet")
+    table = pq.read_table(root / "bartype=2" / "interval=1" / "symbol=SPY" / "bars.parquet")
     assert table.num_rows == 2
     assert table.column("close").to_pylist() == pytest.approx([999.0, 451.0])
 
@@ -377,12 +399,12 @@ def test_legacy_schema_partition_does_not_starve_the_other_partitions(tmp_path: 
     import pyarrow as pa
 
     root = tmp_path / "bars"
-    legacy = root / "timeframe=1d" / "symbol=SPY" / "bars.parquet"
+    legacy = root / "bartype=2" / "interval=1" / "symbol=SPY" / "bars.parquet"
     legacy.parent.mkdir(parents=True)
     pq.write_table(
         pa.table(
             {
-                "bucket_start": pa.array([D1], type=pa.timestamp("us", tz="UTC")),
+                "bar_time": pa.array([D1], type=pa.timestamp("us", tz="UTC")),
                 "open": [1.0],
                 "high": [2.0],
                 "low": [0.5],
@@ -400,7 +422,7 @@ def test_legacy_schema_partition_does_not_starve_the_other_partitions(tmp_path: 
         w.write(_bar("SPY", T0, 450.0))  # a different partition entirely
 
     # The 1d partition is given up on, but the 1m one is written.
-    intraday = root / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
+    intraday = root / "bartype=1" / "interval=1" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
     assert intraday.exists(), "an unrelated partition was starved by the bad one"
     assert pq.read_table(intraday).num_rows == 1
 
@@ -412,12 +434,12 @@ def test_legacy_schema_partition_is_reported_with_the_path_and_the_fix(
     import pyarrow as pa
 
     root = tmp_path / "bars"
-    legacy = root / "timeframe=1d" / "symbol=SPY" / "bars.parquet"
+    legacy = root / "bartype=2" / "interval=1" / "symbol=SPY" / "bars.parquet"
     legacy.parent.mkdir(parents=True)
     pq.write_table(
         pa.table(
             {
-                "bucket_start": pa.array([D1], type=pa.timestamp("us", tz="UTC")),
+                "bar_time": pa.array([D1], type=pa.timestamp("us", tz="UTC")),
                 "open": [1.0],
                 "high": [2.0],
                 "low": [0.5],
@@ -441,3 +463,128 @@ def test_legacy_schema_partition_is_reported_with_the_path_and_the_fix(
     assert len(errors) == 1, "poisoned partition must report once, not once per flush"
     assert "el_volume" in errors[0].error
     assert str(legacy) == errors[0].path
+
+
+def _five_min(day: int, i: int) -> Bar:
+    t = datetime(2026, 7, day, 13, 30, tzinfo=UTC) + timedelta(minutes=5 * i)
+    return Bar(
+        symbol="SPY",
+        bar_time=t,
+        open=1.0,
+        high=2.0,
+        low=0.5,
+        close=1.5,
+        el_volume=10,
+        el_ticks=27,
+        el_upticks=13,
+        el_downticks=15,
+        el_open_interest=0,
+        bar_type=1,
+        bar_interval=5,
+        category=2,
+    )
+
+
+def test_flush_seals_a_day_that_is_over(tmp_path: Path) -> None:
+    """The newest day of a finished replay must not wait for close().
+
+    A chart loaded with history publishes several days at once. Only the
+    arrival of a LATER day sealed a partition, so the last day held an open
+    pq.ParquetWriter — and a Parquet file has no footer until it is closed,
+    so that day read as corrupt (or as nothing) for the whole run. Ctrl+C
+    was the only thing that finished it.
+    """
+    writer = BarWriter(
+        tmp_path,
+        max_flush_seconds=0.0,
+        today_et=lambda: date(2026, 8, 1),  # both days below are over
+    )
+    for day in (30, 31):
+        for i in range(3):
+            writer.write(_five_min(day, i))
+
+    writer.flush()  # exactly what the runtime's flush loop calls — no close()
+
+    for day in ("2026-07-30", "2026-07-31"):
+        path = tmp_path / "bartype=1" / "interval=5" / "symbol=SPY" / f"date={day}" / "bars.parquet"
+        assert pq.ParquetFile(path).metadata.num_rows == 3, day
+
+
+def test_flush_leaves_today_open(tmp_path: Path) -> None:
+    """Today keeps taking bars, so it must not be sealed.
+
+    pq.ParquetWriter truncates on open, so a partition closed early cannot
+    be resumed — sealing the live day would discard the rest of the session.
+    """
+    writer = BarWriter(
+        tmp_path,
+        max_flush_seconds=0.0,
+        today_et=lambda: date(2026, 7, 31),
+    )
+    for i in range(3):
+        writer.write(_five_min(31, i))
+    writer.flush()
+
+    path = tmp_path / "bartype=1" / "interval=5" / "symbol=SPY" / "date=2026-07-31" / "bars.parquet"
+    assert path.exists()
+    with pytest.raises(Exception):  # noqa: B017 — footerless, the arrow error is incidental
+        pq.ParquetFile(path)
+
+    # Still writable: the session continues and the later bars land.
+    writer.write(_five_min(31, 3))
+    writer.flush()
+    writer.close()
+    assert pq.ParquetFile(path).metadata.num_rows == 4
+
+
+def test_should_flush_reports_a_day_that_is_over(tmp_path: Path) -> None:
+    """With nothing buffered there is still work to do: the footer.
+
+    should_flush() gates the runtime's flush loop, so returning False here
+    would mean flush() is never called and the seal never happens.
+    """
+    writer = BarWriter(tmp_path, max_flush_seconds=0.0, today_et=lambda: date(2026, 7, 31))
+    writer.write(_five_min(31, 0))
+    writer.flush()
+    assert writer.should_flush() is False  # today: still taking bars
+
+    writer._today_et = lambda: date(2026, 8, 1)  # the day rolls over
+    assert writer.should_flush() is True
+    writer.flush()
+    assert writer.should_flush() is False  # sealed, so once only
+    writer.close()
+
+
+def test_a_replay_burst_is_not_sealed_out_from_under_itself(tmp_path: Path) -> None:
+    """The wall clock alone must not seal a day the burst is still filling.
+
+    A chart loaded with five days of history publishes all of them within
+    seconds, and every one of those days is already over. Sealing on the date
+    alone closes a partition mid-burst, and `write` refuses a sealed
+    partition — so a readability problem would have become lost bars.
+
+    The stream's own signal still seals: day 30 finishes the moment day 31
+    appears, which is a fact about the data rather than about the clock.
+    """
+    writer = BarWriter(
+        tmp_path,
+        max_flush_seconds=3600.0,  # nothing has been quiet that long
+        today_et=lambda: date(2026, 8, 1),  # both days below are in the past
+    )
+    for day in (30, 31):
+        for i in range(3):
+            writer.write(_five_min(day, i))
+
+    assert writer.should_flush() is False  # a True here would seal mid-burst
+    writer.flush()
+    writer.write(_five_min(31, 3))  # the rest of the burst still lands
+    writer.close()
+
+    def rows(name: str) -> int:
+        path = (
+            tmp_path / "bartype=1" / "interval=5" / "symbol=SPY" / f"date={name}" / "bars.parquet"
+        )
+        return int(pq.ParquetFile(path).metadata.num_rows)
+
+    assert rows("2026-07-31") == 4
+    assert rows("2026-07-30") == 3  # stream-sealed when day 31 arrived

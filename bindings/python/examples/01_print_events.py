@@ -79,7 +79,7 @@ async def main() -> int:
             if isinstance(event, Bar):
                 print(
                     f"BAR  {event.symbol:<6} {event.timeframe:>3}  "
-                    f"{event.bucket_start_et:%Y-%m-%d %H:%M}  "
+                    f"{event.bar_time_et:%Y-%m-%d %H:%M}  "
                     f"O={event.open:<8.2f} H={event.high:<8.2f} "
                     f"L={event.low:<8.2f} C={event.close:<8.2f} el_vol={event.el_volume}"
                 )

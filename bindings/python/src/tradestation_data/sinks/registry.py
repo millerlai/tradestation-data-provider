@@ -108,7 +108,7 @@ def instantiate_sink(cfg: SinkConfig) -> Sink:
         ) from exc
     if not isinstance(instance, Sink):
         # Sink is a runtime_checkable Protocol — this catches typos like
-        # a class that forgot to implement on_tick / on_bar / close.
+        # a class that forgot to implement on_bar / close.
         raise SinksConfigError(
             f"sink {cfg.name!r}: {cfg.target!r} returned {type(instance).__name__}, "
             "which does not satisfy the Sink protocol"

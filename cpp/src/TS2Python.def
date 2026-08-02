@@ -8,7 +8,7 @@
 ;
 ; Keep this in sync with include/ts2python.h.
 ;
-; EL_Init and EL_Init2 are TOMBSTONES — they return -6 and initialise
+; EL_Init, EL_Init2, EL_PublishTick and EL_PublishBar are TOMBSTONES — they return -6 and initialise
 ; nothing. They must stay listed here. Dropping them would make an .ELD
 ; built against the superseded protocol fail at DefineDLLFunc resolution
 ; with no explanation, whereas returning -6 puts a readable line in
@@ -19,6 +19,7 @@ EXPORTS
     EL_Init3
     EL_Init
     EL_Init2
+    EL_Publish
     EL_PublishTick
     EL_PublishBar
     EL_Shutdown

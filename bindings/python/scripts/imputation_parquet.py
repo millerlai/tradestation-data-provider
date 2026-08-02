@@ -18,7 +18,7 @@ reader that expects BAR_SCHEMA fails loudly rather than silently
 consuming invented rows.
 
 ``--symbol`` is optional: when omitted, every symbol discovered under
-``<root>/timeframe=<tf>/symbol=*/`` is processed. Nothing under ``--root``
+``<root>/bartype=<N>/interval=<M>/symbol=*/`` is processed. Nothing under ``--root``
 is ever modified.
 
 Usage:
@@ -59,7 +59,6 @@ from verify_parquet import (
     _fmt_range,
     _parse_date,
     _parse_hhmm,
-    _parse_timeframe,
     _resolve_tz,
 )
 
@@ -81,7 +80,7 @@ def _output_schema(source: pa.Schema) -> pa.Schema:
 def _read_file(path: Path) -> pa.Table:
     """The file's own columns, without the ones the path implies.
 
-    `pq.read_table()` on a single file under `timeframe=/symbol=/date=` runs
+    `pq.read_table()` on a single file under `bartype=/interval=/symbol=/date=` runs
     hive discovery and hands back those three as real columns — 14, not the 11
     BAR_SCHEMA declares. Building an output schema from that produced a
     15-column table while `_build_imputed_row` supplies 12 keys, so every
@@ -113,13 +112,13 @@ def _passthrough_table(path: Path) -> pa.Table:
     return table.append_column(_IMPUTED_FIELD, flags)
 
 
-def _build_imputed_row(bucket_start: datetime, value: float) -> dict:
+def _build_imputed_row(bar_time: datetime, value: float) -> dict:
     # Every quantity is 0: this bar records no trading, because none was
     # observed. Carrying a neighbour's volume forward would invent activity
     # on top of inventing a price.
     return {
-        "bucket_start": bucket_start,
-        "bucket_start_et": bucket_start.astimezone(_ET_TZ),
+        "bar_time": bar_time,
+        "bar_time_et": bar_time.astimezone(_ET_TZ),
         "open": value,
         "high": value,
         "low": value,
@@ -154,8 +153,8 @@ def _impute_value(
         return None
     if method == "interpolate":
         if prev is not None and nxt is not None:
-            total = (nxt["bucket_start"] - prev["bucket_start"]).total_seconds()
-            elapsed = (missing_ts - prev["bucket_start"]).total_seconds()
+            total = (nxt["bar_time"] - prev["bar_time"]).total_seconds()
+            elapsed = (missing_ts - prev["bar_time"]).total_seconds()
             frac = elapsed / total if total > 0 else 0.0
             return prev["close"] + frac * (nxt["open"] - prev["close"]), ""
         if prev is not None:
@@ -180,22 +179,22 @@ def impute_day(
     table = _read_file(path)
     rows = table.to_pylist()
     for r in rows:
-        ts = r["bucket_start"]
+        ts = r["bar_time"]
         if ts.tzinfo is None:
-            r["bucket_start"] = ts.replace(tzinfo=UTC)
+            r["bar_time"] = ts.replace(tzinfo=UTC)
         else:
-            r["bucket_start"] = ts.astimezone(UTC)
+            r["bar_time"] = ts.astimezone(UTC)
         # Rows that came off the wire. Flagged explicitly rather than left
         # null so "real" and "invented" are never a missing-value question.
         r["imputed"] = False
 
-    by_ts = {r["bucket_start"]: r for r in rows}
+    by_ts = {r["bar_time"]: r for r in rows}
     missing = [t for t in expected_utc if t not in by_ts]
     if not missing:
         return len(rows), 0, [], None
 
-    sorted_rows = sorted(rows, key=lambda r: r["bucket_start"])
-    existing_ts = [r["bucket_start"] for r in sorted_rows]
+    sorted_rows = sorted(rows, key=lambda r: r["bar_time"])
+    existing_ts = [r["bar_time"] for r in sorted_rows]
 
     new_rows: list[dict] = []
     log: list[tuple[datetime, str]] = []
@@ -215,7 +214,7 @@ def impute_day(
         return len(rows), 0, log, None
 
     all_rows = rows + new_rows
-    all_rows.sort(key=lambda r: r["bucket_start"])
+    all_rows.sort(key=lambda r: r["bar_time"])
     new_table = pa.Table.from_pylist(all_rows, schema=_output_schema(table.schema))
     return len(rows), len(new_rows), log, new_table
 
@@ -233,12 +232,13 @@ def main() -> int:
         default=None,
         help=(
             "Symbol (e.g., SPY, $TICK). Quote $-prefixed on shells. "
-            "Omit to impute every symbol found under <root>/timeframe=<tf>/."
+            "Omit to impute every symbol found under <root>/bartype=<N>/interval=<M>/."
         ),
     )
     ap.add_argument("--start-date", required=True, type=_parse_date)
     ap.add_argument("--end-date", required=True, type=_parse_date)
-    ap.add_argument("--timeframe", "--tf", default="1m")
+    ap.add_argument("--bar-type", type=int, default=1, help="EL BarType, verbatim")
+    ap.add_argument("--bar-interval", type=int, default=1, help="EL BarInterval, verbatim")
     ap.add_argument("--start-time", default="09:30")
     ap.add_argument("--end-time", default="16:00")
     ap.add_argument("--tz", default="ET")
@@ -283,7 +283,8 @@ def main() -> int:
     args = ap.parse_args()
 
     try:
-        tf_label, tf_sec = _parse_timeframe(args.timeframe)
+        tf_label = f"bartype={args.bar_type}/interval={args.bar_interval}"
+        tf_sec = args.bar_interval * 60
         start_time = _parse_hhmm(args.start_time)
         end_time = _parse_hhmm(args.end_time)
         tz = _resolve_tz(args.tz)
@@ -317,10 +318,10 @@ def main() -> int:
     if args.symbol is not None:
         symbols = [args.symbol]
     else:
-        symbols = _discover_symbols(args.root, tf_label)
+        symbols = _discover_symbols(args.root, args.bar_type, args.bar_interval)
         if not symbols:
             print(
-                f"error: no symbols found under {args.root}/timeframe={tf_label}/",
+                f"error: no symbols found under {args.root}/bartype={args.bar_type}/interval={args.bar_interval}/",
                 file=sys.stderr,
             )
             return 2
@@ -344,7 +345,8 @@ def main() -> int:
             symbol=sym,
             start_date=args.start_date,
             end_date=args.end_date,
-            tf_label=tf_label,
+            bar_type=args.bar_type,
+            bar_interval=args.bar_interval,
             tf_sec=tf_sec,
             start_time=start_time,
             end_time=end_time,
@@ -380,7 +382,8 @@ def _impute_one_symbol(
     symbol: str,
     start_date: date,
     end_date: date,
-    tf_label: str,
+    bar_type: int,
+    bar_interval: int,
     tf_sec: int,
     start_time: time,
     end_time: time,
@@ -415,7 +418,8 @@ def _impute_one_symbol(
 
         path = (
             root
-            / f"timeframe={tf_label}"
+            / f"bartype={bar_type}"
+            / f"interval={bar_interval}"
             / f"symbol={symbol}"
             / f"date={d.isoformat()}"
             / "bars.parquet"

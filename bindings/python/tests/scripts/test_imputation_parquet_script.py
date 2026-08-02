@@ -13,12 +13,12 @@ import verify_parquet as vp
 _ET = ZoneInfo("America/New_York")
 
 # The shape BarWriter puts on disk. The script reads real partitions, so the
-# fixture has to be one — including bucket_start_et, which the output schema
+# fixture has to be one — including bar_time_et, which the output schema
 # carries through untouched.
 BAR_SCHEMA = pa.schema(
     [
-        pa.field("bucket_start", pa.timestamp("us", tz="UTC"), nullable=False),
-        pa.field("bucket_start_et", pa.timestamp("us", tz="America/New_York"), nullable=False),
+        pa.field("bar_time", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("bar_time_et", pa.timestamp("us", tz="America/New_York"), nullable=False),
         pa.field("open", pa.float64(), nullable=False),
         pa.field("high", pa.float64(), nullable=False),
         pa.field("low", pa.float64(), nullable=False),
@@ -34,8 +34,8 @@ BAR_SCHEMA = pa.schema(
 
 def _row(ts, close, open_=None, el_volume=1000):
     return {
-        "bucket_start": ts,
-        "bucket_start_et": ts.astimezone(_ET),
+        "bar_time": ts,
+        "bar_time_et": ts.astimezone(_ET),
         "open": open_ if open_ is not None else close,
         "high": close,
         "low": close,
@@ -198,7 +198,7 @@ def test_write_atomic_replaces_file(tmp_path):
 
 def _write_partitioned(root: Path, rows) -> Path:
     """A file at the real hive path, so reads can pick up path-derived columns."""
-    path = root / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
+    path = root / "bartype=1" / "interval=1" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
     _write_bars(path, rows)
     return path
 

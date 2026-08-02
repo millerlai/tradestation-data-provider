@@ -15,18 +15,17 @@ wire 上有兩個時間戳，用途**不可互換**：
 | 欄位 | 來源 | 正確用途 | 錯誤用途 |
 | --- | --- | --- | --- |
 | `ts` | DLL 收訊端 wall clock（UTC epoch 秒） | **Tick 的事件時間**；延遲量測 | ❌ Bar 邊界 |
-| `ts_str` | EL 原始字串，逐字透傳 | **Bar `bucket_start` 的唯一權威來源** | ❌ Tick 時間 |
+| `ts_str` | EL 原始字串，逐字透傳 | **Bar `bar_time` 的唯一權威來源** | ❌ Tick 時間 |
 
 ### 1.1 規則
 
 - **Tick 的時間 = `ts`**（DLL 收訊端 UTC epoch）。
-- **Bar 的 `bucket_start` = `ts_str` 解析結果**：以 `yyyy-MM/dd-HH:mm:ss` 格式、
+- **Bar 的 `bar_time` = `ts_str` 解析結果**：以 `yyyy-MM/dd-HH:mm:ss` 格式、
   **`America/New_York` 時區**解析，再轉 UTC。
   - 必須用 IANA tz database 的 `America/New_York`，**不可用系統本地時區**，也不可用
     固定 UTC 偏移。DLL 主機的系統時區與此無關。
-  - 解析出來的是 bar 的**收盤**時間（EL 的 `Time`），**還不是** `bucket_start`：
-    必須再依 §2 減去一個 `tf` 換成左標籤，然後依 §2.2 對齊格線。只做到解析就寫入，
-    整條序列會靜默偏移一格。
+  - 解析出來的就是 bar 的時間,**原樣使用**。EL 的 `Time` 是收盤時間,所以
+    `bar_time` 也是收盤時間 —— 不減、不對齊。要左緣標籤的消費端自己換算(§2)。
 - **`ts_str` 缺席與解析失敗是兩種不同的狀態，binding 必須分開處理。**
 
   | 狀態 | 行為 | 為什麼 |
@@ -35,7 +34,7 @@ wire 上有兩個時間戳，用途**不可互換**：
   | 欄位有值但解析不了 | **必須拒收整個 frame 並記錄**，不得退回 `ts` | publisher 送了壞資料。這時退回 `ts` 產生的不是降級，是**錯誤且看不出來的**資料 |
 
   拒收那條是被實際事故逼出來的。`ts` 是收訊時鐘，而歷史回放時整個 session 的 bar 在
-  同一瞬間送達 —— 全部 floor 到同一分鐘、塌成同一個 `bucket_start`，runtime 的去重
+  同一瞬間送達 —— 全部 floor 到同一分鐘、塌成同一個 `bar_time`，runtime 的去重
   再把它們收成一根。一個交易日變成一根「每個數字都合理」的 bar，落在今天的分區裡。
   zh-TW 主機的 `FormatTime("tt")` 就讓這件事真的發生過。
 
@@ -57,44 +56,46 @@ wire 上有兩個時間戳，用途**不可互換**：
 
 ---
 
-## 2. Bar 用左標籤
+## 2. Bar 的時間就是 publisher 給的時間
 
-`bucket_start` 表示區間 **`[t, t+step)`**（半開）。
-
-US RTH 09:30–16:00 的 1m session 產生 **390** 根 bar：
+**`bar_time` = `ts_str` 逐字解析的結果,不做任何位移或對齊。**
 
 ```
-bucket_start:  09:30, 09:31, …, 15:58, 15:59
-                 ↑                        ↑
-              第一根                   最後一根，涵蓋 [15:59, 16:00)
+EL 的 Time  →  ts_str  →  以 America/New_York 解析 → 轉 UTC → 秒歸零  →  bar_time
 ```
 
-**不是** 09:31 … 16:00。
+EasyLanguage 的 `Time` 是 bar 的**收盤**時間,所以 `bar_time` 也是收盤時間。想要左緣
+標籤(`[t, t+step)`)的消費端自己減 —— 那是消費端的事,不是這條傳輸鏈的事。
 
-### 2.0 右標籤 → 左標籤的換算規則
+### 2.0 為什麼不在這裡換成左標籤
 
-wire 送的是**收盤**時間。`bucket_start` 是「涵蓋收盤前一瞬間的那一格」，換算方式是
-**往前退一分鐘再對齊格線**，不是往前退一整個 `tf`：
+本文件曾經要求 binding 把右標籤換成左標籤:先減一分鐘,再對齊一條錨在 09:30 ET 的
+格線。**那條規則已經移除,而且不可以再加回來。**
+
+理由是它會**吃掉資料**,而且不會有任何錯誤浮現:
+
+TradeStation 的盤中格線在 **RTH 開盤與收盤各重啟一次**。一張 session 設為
+06:00–20:00 的 60 分鐘圖,一天發出 **15 根**,其中兩根是殘根:
 
 ```
-bucket_start = align_bucket_start(ts_str - 1 minute, tf)
+06:00–07:00  07:00–08:00  08:00–09:00  09:00–09:30 ←殘根(盤前段尾)
+09:30–10:30  10:30–11:30  11:30–12:30  12:30–13:30  13:30–14:30  14:30–15:30
+15:30–16:00 ←殘根(RTH 段尾)
+16:00–17:00  17:00–18:00  18:00–19:00  19:00–20:00
 ```
 
-**為什麼不是減一個 `tf`。** 那個寫法預設每根 bar 都涵蓋完整的一個間隔，而
-session 被截斷的 bar 不是。RTH 是 09:30–16:00，所以 1h 圖產生的是六根完整的
-bar **加上一根 15:30–16:00 的殘根**，EL 給它的收盤時間是 `16:00`。
+> **實測(2026-08-02,live SPY 2026-07-31)**:收盤 `09:00`(完整的 08:00–09:00)與
+> 收盤 `09:30`(09:00–09:30 殘根)減一分鐘後對齊小時格線,**雙雙落在 08:30**。
+> reference binding 的 `_handle_provider_bar` 把後到的視為 intra-bar 更新,整根
+> 08:00–09:00 被半小時的數字取代 —— **15 根發出、14 根落地,每天如此**。磁碟上
+> `el_volume == 128573` 的列數是 0。
 
-| 收盤 | 減一個 `tf` | 對齊後 | 減一分鐘 | 對齊後 |
-| --- | --- | --- | --- | --- |
-| 15:30 | 14:30 | **14:30** ✅ | 15:29 | **14:30** ✅ |
-| 16:00 | 15:00 | **14:30** ❌ 撞上前一根 | 15:59 | **15:30** ✅ |
+**沒有任何格線能修好它。** 區段長度是 `[session起點, 09:30)`、`[09:30, 16:00)`、
+`[16:00, session結束)`,而 session 起點是使用者的 chart 設定 —— **wire 上沒有這個
+資訊,binding 永遠推算不出來**。上例三段是 210 / 390 / 240 分鐘,只有 60 不整除前
+兩段,所以 5m / 15m / 30m 全部倖存、只有 1h 壞掉,壞了很久沒人發現。
 
-減一整個 `tf` 會讓殘根落在前一根的格子上。消費端若把 bucket 相同的 bar 視為
-同一根的更新（本 repo 的 reference binding 就是這樣做的），完整那一小時的 OHLC
-與五個量值會被半小時的殘根覆蓋掉，而且不會有任何錯誤。
-
-一分鐘在這裡是精確值而非近似：所有候選時間都已經被 floor 到分鐘（§2.1）。對於
-真的涵蓋完整間隔的 bar，兩種算法答案相同 —— 只有被截斷的情況會不一樣。
+publisher 送出的時間本來就是對的。這一層的工作是**不要弄壞它**。
 
 ### 2.0.1 DST 折疊時刻：wire 無法表達，binding 必須說出來
 
@@ -114,9 +115,6 @@ bar **加上一根 15:30–16:00 的殘根**，EL 給它的收盤時間是 `16:0
 但 binding 不會拒收 session 以外的 bar，而 TradeStation 也提供 24 小時的 session
 template，所以這條規則不能省。
 
-`SESSION_ANCHORED_TIMEFRAMES`（目前只有 `1d`）**不做這個位移**：§2.2 的對齊會直接
-把時間換成該 session 的 04:00 ET 錨點，先減再對齊只會把 bar 推到前一個 session。
-
 > 這條是被真實 bug 逼出來的：`verify_parquet.py` 的 `_expected_bars()` 曾產生右標籤
 > 序列，導致完整 session 被誤判為缺漏。左/右標籤是市場資料最典型的靜默錯誤 ——
 > 兩邊都「看起來對」，只差一根。
@@ -127,7 +125,7 @@ template，所以這條規則不能省。
 > 右標籤的 bar 就這樣一路寫進了 Parquet。fixture 的職責是複現 publisher，不是
 > 複述 spec。
 
-### 2.1 `bucket_start` 必須向下取整到分鐘
+### 2.1 `bar_time` 必須向下取整到分鐘
 
 解析 `ts_str` 得到 UTC 時間後，**秒與微秒一律歸零**。
 
@@ -142,77 +140,15 @@ EL 正常情況下送出的就是分鐘對齊的時間，所以取整通常是 n
 > 比對手寫期望值時抓出來的 —— 照當時的規格實作，新 binding 會產出 `17:30:45Z`
 > 而非 `17:30:00Z`，與 reference binding 不一致。
 
-### 2.2 bucket 錨定於 session
-
-**bucket 的格線錨在交易時段，不是 Unix epoch。** 但 intraday 與 daily 用**不同的
-劃格空間**，理由見下。
-
-| timeframe | 錨點 | 劃格空間 | 產生的邊界 |
-| --- | --- | --- | --- |
-| `1m` `5m` `15m` `30m` `1h` | **09:30 ET**（RTH 開盤） | **UTC**（原點 = 某個 09:30 ET 對應的 UTC 瞬間） | …09:30, 09:35 … / 09:30, 10:30 … |
-| `1d` | **04:00 ET**（延長時段起點，見 §4） | **ET 牆鐘** | 04:00 → 次日 04:00 |
-
-#### 為何不能用 epoch 錨定
-
-直接對 UTC 時間做 epoch 錨定的分桶（多數時序函式的預設），在短週期上**恰好正確**
-—— ET 偏移是整小時，而 09:30 又是 30 分的倍數。但兩個長週期會錯：
-
-| timeframe | epoch 錨定的後果 |
-| --- | --- |
-| `1h` | 產生 09:00 ET 桶，RTH 首根只涵蓋 09:30–10:00 —— **半根 bar 掛著整根的時間戳**，下游無從分辨 |
-| `1d` | 依 UTC 午夜切分，而 UTC 午夜正是 **20:00 ET，延長時段的結束點**，盤後成交會被推到隔天 |
-
-#### 為何 intraday 用 UTC 原點而非 ET 牆鐘
-
-錨點是 09:30 ET，但**格線本身必須在 UTC 上鋪**。原因是 DST 折疊區：
-
-- 回撥日（例：2025-11-02），`01:15 EDT` 與 `01:15 EST` 相差整整一小時，
-  牆鐘讀數卻一模一樣。在 ET 空間分桶會把兩者併進同一個桶，
-  產出一根**橫跨兩個真實小時的「1h」bar**。
-- 前撥日（例：2025-03-09），`03:15 EDT` 在 ET 空間會被標到 `03:30`，
-  **`bucket_start` 比它所含的資料還晚**，直接違反 §2 的 `[t, t+step)`。
-
-而 UTC 原點不會讓格線相對交易時段偏移：`1m`/`5m`/`15m`/`30m`/`1h` **都整除 DST 的
-一小時位移**，所以同一條 UTC 格線在 EST 與 EDT 都恰好落在 09:30 ET。
-（這也是為什麼新增 timeframe 時，「是否整除一小時」是必須檢查的條件；
-`4h` 之類不整除的區間需要另外定義規則。）
-
-#### 為何 `1d` 反而必須用 ET 牆鐘
-
-日曆日一年有兩天是 23 或 25 小時，固定的 UTC 位移表達不了。
-`1d` 因此在 ET 空間分桶；這是安全的，因為 **04:00 ET 落在折疊區之外**
-（轉換發生於 02:00 ET），邊界轉回 UTC 時不存在模糊。
-
-#### bar 的對齊由 binding 負責
-
-wire 的 `ts_str` 是 EL 圖表自己的 `Date`/`Time`，**不保證落在上述格線上**
-（日線圖尤其不會是 04:00 ET）。因此：
-
-> **binding 必須把每一根 bar 的 `bucket_start` 向下取整到該 `tf` 的格線。**
-
-不這麼做，同一個交易日可能在 `timeframe=1d` 分區裡出現兩列不同時間戳的同一根日線，
-而任何 `bucket_start` 上的 join 都會重複計數。
-
-> **已確認（2026-07-26，live TradeStation）**：EasyLanguage 的 `Time` 是 bar 的
-> **收盤**時間，`ts_str` 又由它逐字組成，所以 wire 上的 `ts_str` 一律是**右標籤**。
->
-> 偏移是整整一格，不是能被向下取整吸收的秒數差：一份 live 採集的 1m SPY 檔案落地成
-> 09:31…16:00 共 390 根，恰好是 §2 明令禁止的那個序列。根數相同、數值合理，所以沒有
-> 任何一層報錯。
->
-> 因此 **binding 必須在對齊前先減去一個 `tf`**。`1d` 這類 session 錨定的 interval
-> 例外，而且必須例外：對齊本身已經丟棄時分秒改用 04:00 ET，若先減一天，只會把 bar
-> 記到前一個交易日。
-
 ### 2.3 讀取端的時區語意：對外一律 ET，UTC 只是內部絕對時間
 
-儲存層兩份都留（`bucket_start` UTC + `bucket_start_et` ET），但那是**儲存**的事。
+儲存層兩份都留（`bar_time` UTC + `bar_time_et` ET），但那是**儲存**的事。
 對呼叫端而言，這是一個美股的 API：規則時段、假日、盤前盤後、`date=` 分區全都以
 `America/New_York` 定義，沒有人在做美股時心裡換算 UTC。
 
 1. **讀取 API 收到的 naive datetime 一律解讀為 `America/New_York`。**
    帶時區的輸入照它自己的時區處理 —— 那沒有歧義，不需要預設值。
-2. **UTC 只用於內部：** 絕對時間的儲存與 §2.2 的 bucket 格線。這些都不該外洩成呼叫端
+2. **UTC 只用於內部：** 絕對時間的儲存。這些都不該外洩成呼叫端
    必須自己換算的負擔。
 3. **以「日」為單位的參數（CLI 的 `--start-date` 之類）指的是 ET 日曆日**，不是 UTC 午夜。
 
@@ -297,10 +233,42 @@ TradeStation 官方定義（股票商品，[EL 保留字文件][elvol]）：
 
 | EL 保留字 | **intraday**（分鐘 / tick / volume bar） | **daily 以上** |
 | --- | --- | --- |
-| `Volume` | **只有上漲 tick 的成交股數** | 總成交股數 |
-| `Ticks` | **總成交股數** | 總 tick 數 |
-| `UpTicks` | 上漲 tick 成交股數 | 總成交股數 |
-| `DownTicks` | 下跌 tick 成交股數 | 0 |
+| `Volume` | **只有上漲 tick 的成交股數／口數** | 總成交股數／口數 |
+| `Ticks` | **總成交股數／口數** | 總 tick 數 **或「Volume 與 Open Interest 之和」** |
+| `UpTicks` | 上漲 tick 的成交股數／口數 | 總成交股數／口數 |
+| `DownTicks` | 下跌 tick 的成交股數／口數 | **0**（股票／外匯）／ **Open Interest**（期貨） |
+| `OpenInt` | **0**（股票／外匯）／ **下跌 tick 的量**（期貨） | **Open Interest**（期貨）／ 其餘為 0 |
+
+以上五列逐字取自 TradeStation 官方頁面 [EasyLanguage words related to Ticks, Volume &
+Open Interest][elvol]。**不要再去別處推測這五個字的語意,也不要重問** —— 那一頁是唯一
+權威,而它已經被抄進這張表。
+
+**互換有兩組,不是一組。** `Volume` / `Ticks` 是眾所周知的那一組;`DownTicks` /
+`OpenInt` 是第二組,而且方向相反 —— intraday 時 `OpenInt` 借用 `DownTicks` 的意義
+(僅期貨),daily 時 `DownTicks` 借用 `OpenInt` 的意義(僅期貨)。**本文件曾經只寫
+第一組**,第二組是 2026-08-02 對照原頁補上的。
+
+> **實測(2026-08-02,live SPY / @ES / VXX / SPY 選擇權,盤中圖)**
+>
+> | 商品 | `Category` | `openint` | `downticks` | 與上表 |
+> | --- | --- | --- | --- | --- |
+> | `@ES` 期貨 | 0 | 1,370 | 1,370 | **相符** —— 期貨盤中 `OpenInt` 官方定義就是下跌 tick 的量 |
+> | `SPY` 股票 | 2 | 33,109 | 33,109 | **不符** —— 表上寫 0,實際回傳 `DownTicks` |
+> | `VXX` 股票 | 2 | 582,719 | 582,719 | 同上 |
+> | `SPY 選擇權` | 3 | 158 | 158 | 同上 |
+>
+> 亦即 **`OpenInt` 在盤中圖上一律回傳 `DownTicks` 的值,與商品類別無關**。期貨那一列
+> 是文件行為;股票那三列是文件沒說、但實際如此。publisher 與 binding 都逐字轉發,
+> 所以落地的 `el_open_interest` 在盤中圖上就是 `el_downticks` 的複本。
+>
+> 這也解釋了本文件先前標為「存疑」的 `1d` `el_ticks`:**股票日線的 `Ticks` 是
+> 「Volume 與 Open Interest 之和」**,而股票的 OI 為 0,所以它恆等於 `el_volume`
+> ——SPY 499 個日線列全部成立。**它從來不是筆數**,不可當成交筆數使用。
+
+**期貨日線的 `el_downticks` 是未平倉量。** 任何對 `el_downticks` 做加總的消費端,
+在期貨日線上加總到的是 OI,不是成交量。危險性與 Volume/Ticks 那一組完全相同。
+
+**wire 上必須有 `category`,消費端才查得動這張表。** 見 §3.5。
 
 [elvol]: https://help.tradestation.com/10_00/eng/tsdevhelp/elword/el_definitions/easylanguage_words_related_to_ticks,_volume_&_open_interest.htm
 
@@ -360,6 +328,37 @@ binding 會以為「fixture 全過」等於「五個欄位都對」：
 最後一列不是 fixture 的疏漏。上表裡 TradeStation 在 **intraday 與 daily 兩種régime**
 都把 `Volume` 和 `UpTicks` 定義成同一個數字，所以真實資料本身就無法區分這兩欄的互換 ——
 沒有任何錄製得出來的 frame 能證明實作讀對了欄位。這一欄只能靠讀 code 保證。
+
+### 3.5 `category` —— 查 §3.4 那張表的鑰匙
+
+§3.4 的每一列都分「股票／外匯」與「期貨」,§3.2 的報價無效化只對指數成立,而 **wire
+上必須說得出一根 frame 來自哪一類商品**,否則消費端無從查表,binding 只能靠硬編碼的
+代碼清單猜——而猜錯不會有任何錯誤浮現。
+
+EasyLanguage 的 `Category` 保留字提供這個事實。官方值(取值前必須先指派給數值變數,
+`Value1 = Category;`):
+
+| 值 | 意義 | 值 | 意義 | 值 | 意義 |
+| --- | --- | --- | --- | --- | --- |
+| 0 | Future | 8 | Index Option | 14 | Composite |
+| 1 | Future Option | 9 | Cash | 18 | Stock CFD |
+| 2 | Stock | 10 | Bond | 19 | Forex CFD |
+| 3 | Stock Option | 11 | Spread | 20 | Index CFD |
+| 4 | Index | 12 | Forex | 21 | Future CFD |
+| 5 | Currency Option | 13 | CPC Symbol | | |
+| 6 | Mutual Fund | 7 | Money Market Fund | | |
+
+**publisher 不得用 `Category` 做任何分支。** 它和其他保留字一樣逐字轉發。若指標依它
+決定「送 `OpenInt` 還是送 0」,落地的 0 就分不出是 TradeStation 說的還是指標填的
+——那正是已被移除的 `pv` / `publisher_version` 的成因(見 `EL/TS2Python_Exporter.el`
+量值註解)。判斷屬於消費端與本文件。
+
+> **實測(2026-08-02,live)**:`SPY`=2、`@ES`=0、`VXX`=**2**、`SPY 260803C745`=3、
+> `$TICK` / `$VIX.X` / `$ADD` / `$VOLD` / `$TRIN` 全部 =4 且五個量值皆為 0。
+>
+> `VXX` 是 `2 (Stock)` 而非 Index —— 它是可交易的 ETN,實測單根 bar 有 567,776 的
+> 成交量。reference binding 的 `DEFAULT_INDEX_SYMBOLS` 把它列為指數,因而**正在丟棄
+> VXX 真實的 bid/ask**。這正是硬編碼清單必然出的錯:清單是猜的,`category` 不是。
 
 #### `1d` 的量與 intraday 加總對不上，而且本來就不該相等
 

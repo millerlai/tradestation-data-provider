@@ -24,11 +24,11 @@ flowchart TB
         direction TB
         TS["TradeStation Desktop"]
         EL["EL Exporter Indicator"]
-        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 1"]
+        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 2"]
         TS --> EL --> DLL
     end
     subgraph CON["Contract — 真正的產品"]
-        WIRE["wire proto 1<br/>2-frame ZMQ · JSON"]
+        WIRE["wire proto 2<br/>2-frame ZMQ · JSON"]
         SEM["semantics.md<br/>schema 表達不了的規則"]
         FIX["conformance fixtures"]
     end

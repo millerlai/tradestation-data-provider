@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Drop duplicate (symbol, bucket_start) rows from Hive-partitioned bar Parquet.
+"""Drop duplicate (symbol, bar_time) rows from Hive-partitioned bar Parquet.
 
 TradeStation's historical replay occasionally re-emits identical bars
 after a chart reload. The ingestion runtime now de-duplicates live
@@ -28,7 +28,7 @@ def dedupe_file(path: Path, *, dry_run: bool) -> tuple[int, int]:
     """Return (rows_before, rows_after). No write if already unique."""
     table = pq.read_table(path)
     n_before = table.num_rows
-    ts = table.column("bucket_start").to_pylist()
+    ts = table.column("bar_time").to_pylist()
     seen: set = set()
     keep_mask = []
     for t in ts:

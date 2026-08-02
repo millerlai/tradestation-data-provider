@@ -5,6 +5,7 @@ import itertools
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pyarrow.parquet as pq
 import pytest
@@ -12,9 +13,10 @@ import zmq
 import zmq.asyncio
 
 from tradestation_data.aggregation import MarketSnapshot
+from tradestation_data.domain.bar import Bar
 from tradestation_data.runtime import IngestionRuntime
 from tradestation_data.sinks import SinkPipeline
-from tradestation_data.sinks.parquet import ParquetBarSink, ParquetTickSink
+from tradestation_data.sinks.parquet import ParquetBarSink
 from tradestation_data.wire.el_subscriber import TradeStationELProvider
 
 
@@ -27,37 +29,32 @@ async def _publish(pub: zmq.asyncio.Socket, topic: str, payload: dict) -> None:
 # across a test, which is what the sequence tracker expects — reusing a value
 # would log a regression and muddy the assertions with noise unrelated to what
 # is under test.
+_ET = ZoneInfo("America/New_York")
 _seq = itertools.count(1)
 
 
-def _tick_payload(ts: float, px: float) -> dict:
-    return {
-        "proto": 1,
-        "kind": "tick",
-        "seq": next(_seq),
-        "sid": 7001,
-        "ts": ts,
-        "px": px,
-        "el_volume": 100,
-        "el_ticks": 180,
-        "el_upticks": 100,
-        "el_downticks": 80,
-        "el_open_interest": 0,
-        "bid": None,
-        "ask": None,
-    }
-
-
-def _bar_payload(ts: float, ohlc: tuple[float, float, float, float], el_volume: int) -> dict:
-    """A proto-1 bar frame. `ts` is right-labelled — EL stamps the close."""
+def _bar_payload(
+    ts: float,
+    ohlc: tuple[float, float, float, float],
+    el_volume: int,
+    *,
+    ts_str: str | None = None,
+    bar_type: int = 1,
+    bar_interval: int = 1,
+) -> dict:
+    """A proto-2 frame. `ts_str` is EL's close time and lands verbatim."""
     o, h, low, c = ohlc
+    if ts_str is None:
+        ts_str = datetime.fromtimestamp(ts, UTC).astimezone(_ET).strftime("%Y-%m/%d-%H:%M:%S")
     return {
-        "proto": 1,
-        "kind": "bar",
-        "tf": "1m",
+        "proto": 2,
         "seq": next(_seq),
         "sid": 7001,
         "ts": ts,
+        "ts_str": ts_str,
+        "bar_type": bar_type,
+        "bar_interval": bar_interval,
+        "category": 2,
         "o": o,
         "h": h,
         "l": low,
@@ -68,78 +65,9 @@ def _bar_payload(ts: float, ohlc: tuple[float, float, float, float], el_volume: 
         "el_upticks": el_volume + 3,
         "el_downticks": el_volume + 5,
         "el_open_interest": 0,
+        "bid": None,
+        "ask": None,
     }
-
-
-@pytest.mark.asyncio
-async def test_runtime_pipes_ticks_to_snapshot_and_storage(
-    zmq_inproc_bus,
-    tmp_path: Path,
-) -> None:
-    """Ticks reach the snapshot and the tick sink — and produce no bar.
-
-    A bar sink is wired up precisely so the absence is asserted rather than
-    assumed: nothing in this binding builds a bar from ticks, so a bars
-    partition appearing here would mean a derivation crept back in.
-    """
-    ctx, pub, endpoint = zmq_inproc_bus
-    provider = TradeStationELProvider(endpoint=endpoint, context=ctx)
-    snap = MarketSnapshot()
-    pipeline = SinkPipeline(
-        [
-            ParquetTickSink(
-                name="ticks_parquet",
-                root=tmp_path / "ticks",
-                max_buffered_ticks=1,
-                max_flush_seconds=3600,
-            ),
-            ParquetBarSink(name="bars_parquet", root=tmp_path / "bars"),
-        ]
-    )
-
-    observed_bars: list = []
-    runtime = IngestionRuntime(
-        provider=provider,
-        symbols=["SPY"],
-        snapshot=snap,
-        sinks=pipeline,
-        on_bar=lambda b: observed_bars.append(b),
-        heartbeat_interval=3600,
-        flush_poll_interval=0.02,
-        advance_interval=0.02,
-    )
-    task = asyncio.create_task(runtime.run())
-    await asyncio.sleep(0)  # let subscription settle
-
-    bucket1 = datetime(2026, 4, 18, 13, 30, 0, tzinfo=UTC).timestamp()
-    bucket2 = datetime(2026, 4, 18, 13, 31, 0, tzinfo=UTC).timestamp()
-    for ts, px in ((bucket1 + 1, 450.0), (bucket1 + 30, 450.5), (bucket2 + 1, 451.0)):
-        await _publish(pub, "SPY", _tick_payload(ts, px))
-
-    for _ in range(200):
-        state = snap.state_of("SPY")
-        if state is not None and state.last_tick is not None:
-            break
-        await asyncio.sleep(0.01)
-
-    # Snapshot sees the ticks; no bar was ever published, so it has none.
-    state = snap.state_of("SPY")
-    assert state is not None
-    assert state.last_tick is not None
-    assert state.last_tick.price == pytest.approx(451.0)
-    assert state.last_closed_bar is None
-    assert observed_bars == []
-
-    runtime.stop()
-    await asyncio.wait_for(task, timeout=2.0)
-
-    # Tick parquet written
-    tick_file = tmp_path / "ticks" / "symbol=SPY" / "date=2026-04-18" / "ticks.parquet"
-    assert tick_file.exists()
-    assert pq.read_table(tick_file).num_rows == 3
-
-    # Nothing derived a bar from them.
-    assert not list((tmp_path / "bars").rglob("bars.parquet"))
 
 
 @pytest.mark.asyncio
@@ -189,7 +117,7 @@ async def test_runtime_preserves_published_bar_ohlc(
     assert bar.el_volume == 12000
     # ts 13:30:30 floors to 13:30, then steps back one interval: §2 labels a
     # bar by its left edge, while the wire stamps it at the close.
-    assert bar.bucket_start == datetime(2026, 4, 20, 13, 29, 0, tzinfo=UTC)
+    assert bar.bar_time == datetime(2026, 4, 20, 13, 30, 0, tzinfo=UTC)
 
     # Snapshot accepted the bar.
     state = snap.state_of("SPY")
@@ -202,7 +130,13 @@ async def test_runtime_preserves_published_bar_ohlc(
     assert runtime._counters.ticks_in == 0
 
     bar_file = (
-        tmp_path / "bars" / "timeframe=1m" / "symbol=SPY" / "date=2026-04-20" / "bars.parquet"
+        tmp_path
+        / "bars"
+        / "bartype=1"
+        / "interval=1"
+        / "symbol=SPY"
+        / "date=2026-04-20"
+        / "bars.parquet"
     )
     assert bar_file.exists()
     assert pq.read_table(bar_file).num_rows == 1
@@ -257,7 +191,7 @@ async def test_runtime_replaces_intra_bar_updates_and_drops_stale_bars(
     # First bucket emitted carries the last refresh's OHLC (replace-last).
     assert len(observed) == 1, f"intra-bar updates not collapsed: observed={len(observed)}"
     first = observed[0]
-    assert first.bucket_start == datetime(2026, 4, 20, 13, 29, 0, tzinfo=UTC)
+    assert first.bar_time == datetime(2026, 4, 20, 13, 30, 0, tzinfo=UTC)
     assert first.high == pytest.approx(450.75)
     assert first.close == pytest.approx(450.40)
     assert first.el_volume == 12000
@@ -279,36 +213,21 @@ async def test_runtime_replaces_intra_bar_updates_and_drops_stale_bars(
     # stop() drains the still-buffered 13:30 bar via _drain_direct_bars().
     assert len(observed) == 2
     second = observed[1]
-    assert second.bucket_start == datetime(2026, 4, 20, 13, 30, 0, tzinfo=UTC)
+    assert second.bar_time == datetime(2026, 4, 20, 13, 31, 0, tzinfo=UTC)
     assert second.close == pytest.approx(450.55)
     assert runtime._counters.bars_direct_in == 2
 
     bar_file = (
-        tmp_path / "bars" / "timeframe=1m" / "symbol=SPY" / "date=2026-04-20" / "bars.parquet"
+        tmp_path
+        / "bars"
+        / "bartype=1"
+        / "interval=1"
+        / "symbol=SPY"
+        / "date=2026-04-20"
+        / "bars.parquet"
     )
     assert bar_file.exists()
     assert pq.read_table(bar_file).num_rows == 2
-
-
-@pytest.mark.asyncio
-async def test_runtime_stops_cleanly_without_ticks(zmq_inproc_bus, tmp_path: Path) -> None:
-    ctx, _pub, endpoint = zmq_inproc_bus
-    provider = TradeStationELProvider(endpoint=endpoint, context=ctx)
-    runtime = IngestionRuntime(
-        provider=provider,
-        symbols=["SPY"],
-        snapshot=MarketSnapshot(),
-        heartbeat_interval=3600,
-        flush_poll_interval=0.05,
-        advance_interval=0.05,
-    )
-    task = asyncio.create_task(runtime.run())
-    await asyncio.sleep(0.1)
-    runtime.stop()
-    await asyncio.wait_for(task, timeout=2.0)
-
-
-# ---- unit tests on private handlers (no ZMQ) -------------------------------
 
 
 class _StubProvider:
@@ -338,12 +257,19 @@ def _make_runtime(**kwargs) -> IngestionRuntime:
     )
 
 
-def _bar(symbol: str, ts: datetime, close: float = 450.0, timeframe: str = "1m") -> Bar:  # noqa: F821
+def _bar(
+    symbol: str,
+    ts: datetime,
+    close: float = 450.0,
+    *,
+    bar_type: int = 1,
+    bar_interval: int = 1,
+) -> Bar:
     from tradestation_data.domain.bar import Bar
 
     return Bar(
         symbol=symbol,
-        bucket_start=ts,
+        bar_time=ts,
         open=close - 0.1,
         high=close + 0.2,
         low=close - 0.2,
@@ -353,7 +279,9 @@ def _bar(symbol: str, ts: datetime, close: float = 450.0, timeframe: str = "1m")
         el_upticks=100,
         el_downticks=80,
         el_open_interest=0,
-        timeframe=timeframe,
+        bar_type=bar_type,
+        bar_interval=bar_interval,
+        category=2,
     )
 
 
@@ -392,38 +320,6 @@ async def test_bar_sink_failure_logged(caplog) -> None:
 
 
 @pytest.mark.asyncio
-async def test_tick_sink_failure_logged(caplog) -> None:
-    """A sink that raises in on_tick is caught at the pipeline level and logged."""
-    import logging
-
-    from tradestation_data.domain.tick import Tick
-    from tradestation_data.sinks.base import BaseSink
-
-    class _BadTickSink(BaseSink):
-        name = "bad_tick"
-
-        def on_tick(self, tick):
-            raise RuntimeError("write fail")
-
-    runtime = _make_runtime(sinks=SinkPipeline([_BadTickSink()]))
-    tick = Tick(
-        symbol="SPY",
-        timestamp=datetime(2026, 4, 20, 13, 30, tzinfo=UTC),
-        price=450.0,
-        el_volume=100,
-        el_ticks=180,
-        el_upticks=100,
-        el_downticks=80,
-        el_open_interest=0,
-        bid=None,
-        ask=None,
-    )
-    with caplog.at_level(logging.ERROR):
-        await runtime._handle_tick(tick)
-    assert any("sink_on_tick_failed" in r.message for r in caplog.records)
-
-
-@pytest.mark.asyncio
 async def test_handle_provider_bar_drops_reordered_stale_bar() -> None:
     """Covers line 300-301: bar.bucket_start < current.bucket_start."""
     runtime = _make_runtime()
@@ -451,26 +347,26 @@ async def test_advance_direct_bars_flushes_after_grace(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_direct_bar_close_deadline_follows_its_own_timeframe() -> None:
-    """A 5m bucket must not be closed one minute in.
+async def test_direct_bar_close_deadline_follows_the_charts_interval() -> None:
+    """A 5-minute point must not be closed one minute in.
 
     A fixed one-minute deadline would emit OHLC covering only the first of
-    the bucket's five minutes, then discard every later update as a
-    duplicate — leaving bars/timeframe=5m/ full of minute bars with no error
-    anywhere.
+    the point's five minutes, then discard every later update as a
+    duplicate — leaving interval=5 full of minute bars with no error
+    anywhere. The deadline comes from EL's own BarInterval.
     """
     runtime = _make_runtime()
     ts = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)
-    await runtime._handle_provider_bar(_bar("SPY", ts, timeframe="5m"))
+    await runtime._handle_provider_bar(_bar("SPY", ts, bar_interval=5))
 
     assert runtime._advance_direct_bars(ts + timedelta(minutes=1, seconds=5)) == []
     ready = runtime._advance_direct_bars(ts + timedelta(minutes=5, seconds=5))
     assert len(ready) == 1
-    assert ready[0].timeframe == "5m"
+    assert ready[0].bar_interval == 5
 
 
 @pytest.mark.asyncio
-async def test_direct_bars_are_buffered_per_symbol_and_timeframe() -> None:
+async def test_direct_bars_are_buffered_per_symbol_and_chart() -> None:
     """One topic now carries every interval the user has a chart open on.
 
     Keyed on symbol alone, the 1m bar below would evict the buffered 5m bar,
@@ -482,22 +378,22 @@ async def test_direct_bars_are_buffered_per_symbol_and_timeframe() -> None:
     emitted: list = []
     runtime._on_bar = emitted.append
 
-    await runtime._handle_provider_bar(_bar("SPY", open_5m, close=1.0, timeframe="5m"))
+    await runtime._handle_provider_bar(_bar("SPY", open_5m, close=1.0, bar_interval=5))
     # A 1-minute bar for the *next* minute on the same topic.
     await runtime._handle_provider_bar(
-        _bar("SPY", open_5m + timedelta(minutes=1), close=2.0, timeframe="1m")
+        _bar("SPY", open_5m + timedelta(minutes=1), close=2.0, bar_interval=1)
     )
     assert emitted == [], "the 5m bucket must not be closed by 1m traffic"
 
     # The 5m bucket keeps taking intra-bar refreshes.
-    await runtime._handle_provider_bar(_bar("SPY", open_5m, close=9.0, timeframe="5m"))
+    await runtime._handle_provider_bar(_bar("SPY", open_5m, close=9.0, bar_interval=5))
     assert runtime._counters.bars_duplicate_dropped == 0
     assert runtime._counters.bars_direct_updated == 1
 
     ready = runtime._advance_direct_bars(open_5m + timedelta(minutes=5, seconds=5))
-    by_tf = {b.timeframe: b for b in ready}
-    assert by_tf["5m"].close == 9.0, "final 5m OHLC must be the last refresh"
-    assert by_tf["1m"].close == 2.0
+    by_interval = {b.bar_interval: b for b in ready}
+    assert by_interval[5].close == 9.0, "final 5-minute OHLC must be the last refresh"
+    assert by_interval[1].close == 2.0
 
 
 def test_emit_heartbeat_updates_counters() -> None:
@@ -594,14 +490,18 @@ async def test_ingest_loop_returns_when_stop_set_mid_stream() -> None:
             pass
 
         async def events(self):
-            from tradestation_data.domain.tick import Tick
-
             while True:
-                # After first yield, set stop so the post-handle check fires.
-                yield Tick(
+                # After the first yield, set stop so the post-handle check fires.
+                yield Bar(
                     symbol="SPY",
-                    timestamp=datetime(2026, 4, 20, 13, 30, tzinfo=UTC),
-                    price=450.0,
+                    bar_time=datetime(2026, 4, 20, 13, 30, tzinfo=UTC),
+                    bar_type=1,
+                    bar_interval=1,
+                    category=2,
+                    open=450.0,
+                    high=450.0,
+                    low=450.0,
+                    close=450.0,
                     el_volume=1,
                     el_ticks=2,
                     el_upticks=1,
@@ -625,7 +525,7 @@ async def test_ingest_loop_returns_when_stop_set_mid_stream() -> None:
     )
     stop_event_ref.append(runtime._stop)
     await asyncio.wait_for(runtime.run(), timeout=2.0)
-    assert runtime._counters.ticks_in >= 1
+    assert runtime._counters.bars_direct_in >= 1
 
 
 @pytest.mark.asyncio

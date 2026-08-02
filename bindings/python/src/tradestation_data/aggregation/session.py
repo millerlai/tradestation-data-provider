@@ -24,7 +24,7 @@ NY = ZoneInfo("America/New_York")
 SESSION_OPEN_LOCAL = time(9, 30)
 SESSION_CLOSE_LOCAL = time(16, 0)
 
-# Bars with bucket_start before 04:00 ET are treated as belonging to the
+# Bars with bar_time before 04:00 ET are treated as belonging to the
 # *previous* session — TradeStation's extended session runs 04:00→20:00 ET.
 # We never receive overnight futures data, so this line keeps pre-market
 # bars (04:00→09:30) attached to the upcoming regular session.

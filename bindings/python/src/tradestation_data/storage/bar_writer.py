@@ -3,28 +3,37 @@ from __future__ import annotations
 import logging
 import os
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import polars as pl
 import pyarrow as pa
 import pyarrow.parquet as pq
 
 from tradestation_data.domain.bar import Bar
-from tradestation_data.domain.timeframe import SINGLE_FILE_TIMEFRAMES
 
 log = logging.getLogger(__name__)
 
+_ET_TZ = ZoneInfo("America/New_York")
+
+
+def _today_et() -> date:
+    """The current US trading calendar day, which is what `date=` names."""
+    return datetime.now(_ET_TZ).date()
+
+
 BAR_SCHEMA: pa.Schema = pa.schema(
     [
-        # bucket_start (UTC) and bucket_start_et (America/New_York) describe
+        # bar_time (UTC) and bar_time_et (America/New_York) describe
         # the same instant in different zones; both are persisted so tooling
         # can filter on either without a runtime conversion. ET is the
         # authoritative basis for session-time decisions downstream.
-        pa.field("bucket_start", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("bar_time", pa.timestamp("us", tz="UTC"), nullable=False),
         pa.field(
-            "bucket_start_et",
+            "bar_time_et",
             pa.timestamp("us", tz="America/New_York"),
             nullable=False,
         ),
@@ -44,13 +53,21 @@ BAR_SCHEMA: pa.Schema = pa.schema(
         pa.field("el_upticks", pa.int64(), nullable=False),
         pa.field("el_downticks", pa.int64(), nullable=False),
         pa.field("el_open_interest", pa.int64(), nullable=False),
+        # EL's Category, and the quote pair. category is what makes the
+        # el_* words readable at all (semantics.md 3.4/3.5); bid/ask arrive
+        # on every point and are stored on every point. bar_type and
+        # bar_interval are not columns because they ARE the partition path.
+        pa.field("category", pa.int64(), nullable=False),
+        pa.field("bid", pa.float64(), nullable=True),
+        pa.field("ask", pa.float64(), nullable=True),
     ]
 )
 
 
 @dataclass(slots=True)
 class _Partition:
-    timeframe: str
+    bar_type: int
+    bar_interval: int
     symbol: str
     # None for a SINGLE_FILE_TIMEFRAMES series: one file per symbol, with no
     # date= level and therefore no day boundary to seal on.
@@ -66,13 +83,23 @@ class _Partition:
     # confines the damage to one series: without this, one such file takes
     # down every partition ordered after it, forever.
     poisoned: bool = False
+    # When the last bar arrived, for the elapsed-day seal. A replay of five
+    # days delivers all of them within seconds, so "this day is over by the
+    # wall clock" alone would seal a partition the burst is still filling
+    # and the rest of its bars would be refused.
+    last_write_monotonic: float | None = None
 
     @property
     def rewrites(self) -> bool:
         return self.day is None
 
     def path(self, root: Path) -> Path:
-        base = root / f"timeframe={self.timeframe}" / f"symbol={self.symbol}"
+        base = (
+            root
+            / f"bartype={self.bar_type}"
+            / f"interval={self.bar_interval}"
+            / f"symbol={self.symbol}"
+        )
         if self.day is None:
             return base / "bars.parquet"
         return base / f"date={self.day.isoformat()}" / "bars.parquet"
@@ -82,14 +109,14 @@ class BarWriter:
     """
     Tier 2 bar cache writer.
 
-    Layout: `{root}/timeframe={tf}/symbol={SYM}/date={YYYY-MM-DD}/bars.parquet`,
+    Layout: `{root}/bartype={N}/interval={M}/symbol={SYM}/date={YYYY-MM-DD}/bars.parquet`,
     except for `SINGLE_FILE_TIMEFRAMES` (`1d`), which drop the `date=` level
-    and keep one `{root}/timeframe=1d/symbol={SYM}/bars.parquet` per symbol.
+    and keep one `{root}/bartype=2/interval={M}/symbol={SYM}/bars.parquet` per symbol.
     A day partition of daily bars holds exactly one row, and a closed Parquet
     file costs ~2.9 KB of schema and footer regardless — 2,903 bytes to carry
     about 60. Those files are **rewritten whole on every flush**: the rows
     already on disk are read back, merged with the new ones (later wins on a
-    repeated `bucket_start`, which is what a chart reload sends), sorted, and
+    repeated `bar_time`, which is what a chart reload sends), sorted, and
     written to a temporary file that replaces the old one atomically. That is
     affordable because the file is small — twenty years of one symbol is
     ~5,000 rows — and it means the file is complete and readable after every
@@ -100,7 +127,7 @@ class BarWriter:
     say which interval it is; before that, mislabelled bars were
     indistinguishable from real 1-minute data downstream.
 
-    Buffered, with the same two flush triggers as `TickWriter`:
+    Buffered, with two flush triggers:
 
       - `max_buffered_bars`  : total buffered bars across all partitions
       - `max_flush_seconds`  : time since the oldest buffered bar arrived
@@ -114,13 +141,31 @@ class BarWriter:
     cache the unbuffered version promised (and Tier-1 ticks can rebuild
     intraday bars anyway).
 
-    A day partition is **sealed** when a bar for a later day of the same
-    (timeframe, symbol) arrives: its buffer is flushed and its file
-    closed. Without that, a `ParquetWriter` stays open until `close()` and
-    its file has no footer — unreadable to every reader, however long the
+    A day partition is **sealed** — buffer flushed, file closed — on either
+    of two signals, and it needs both:
+
+      1. a bar for a **later day** of the same (timeframe, symbol) arrives;
+      2. the day is **over in ET** and nothing has arrived for it in a whole
+         `max_flush_seconds`.
+
+    Without sealing, a `ParquetWriter` stays open until `close()` and its
+    file has no footer — unreadable to every reader, however long the
     process runs. A daily chart replaying two years used to leave 499 such
-    files behind, all of them 943 bytes of unreadable prefix. Rewritten
-    partitions never need sealing: every flush leaves a complete file.
+    files behind, all of them 943 bytes of unreadable prefix.
+
+    (1) alone leaves the **newest** day of a finished replay open forever,
+    because no later day is ever coming: a chart loaded with five days
+    published all five, sealed four, and the fifth only became readable on
+    Ctrl+C. (2) alone would seal a day mid-burst — a replay delivers five
+    already-past days within seconds — and `write` refuses a sealed
+    partition, so a readability problem would become lost bars. The quiet
+    period is what separates "this day is over" from "this day has stopped
+    arriving".
+
+    Today's partition is never sealed by (2): more bars are coming, and
+    `pq.ParquetWriter` truncates on open, so it cannot be closed and
+    resumed. Rewritten partitions never need sealing at all — every flush
+    leaves a complete file.
     """
 
     def __init__(
@@ -130,13 +175,17 @@ class BarWriter:
         max_buffered_bars: int = 1_000,
         max_flush_seconds: float = 60.0,
         compression: str = "zstd",
+        today_et: Callable[[], date] = _today_et,
     ) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
         self._max_bars = max_buffered_bars
         self._max_seconds = max_flush_seconds
         self._compression = compression
-        self._partitions: dict[tuple[str, str, date | None], _Partition] = {}
+        # Injected so the elapsed-day seal can be tested without waiting for
+        # midnight. Nothing else reads a clock here.
+        self._today_et = today_et
+        self._partitions: dict[tuple[int, int, str, date | None], _Partition] = {}
         self._buffered_bars = 0
         self._oldest_buffer_monotonic: float | None = None
         self._closed = False
@@ -144,18 +193,28 @@ class BarWriter:
     def write(self, bar: Bar) -> None:
         if self._closed:
             raise RuntimeError("BarWriter is closed")
-        timeframe = bar.timeframe
-        # Partition on the ET calendar date so all bars from one US trading
-        # session land in a single date= directory, regardless of the UTC
-        # rollover (which splits a session at 19:00/20:00 ET otherwise).
-        # Coarse timeframes have no date= level at all.
-        partition_day = None if timeframe in SINGLE_FILE_TIMEFRAMES else bar.bucket_start_et.date()
-        key = (timeframe, bar.symbol, partition_day)
+        # Partition on EasyLanguage's own BarType/BarInterval, not on a name
+        # this binding derived from them. The DLL used to map the pair to
+        # "5m"/"1d"/... and refuse anything it could not name, so a 2-minute
+        # chart published nothing at all. The raw pair files everything and
+        # names nothing.
+        #
+        # The ET calendar date keeps one US trading session in one date=
+        # directory, regardless of the UTC rollover (which would split a
+        # session at 19:00/20:00 ET). BarType 2 is the daily chart: one row
+        # per day, so a date= level would be one row per file.
+        partition_day = None if bar.bar_type == 2 else bar.bar_time_et.date()
+        key = (bar.bar_type, bar.bar_interval, bar.symbol, partition_day)
         part = self._partitions.get(key)
         if part is None:
             if partition_day is not None:
-                self._seal_earlier_days(timeframe, bar.symbol, partition_day)
-            part = _Partition(timeframe=timeframe, symbol=bar.symbol, day=partition_day)
+                self._seal_earlier_days(bar.bar_type, bar.bar_interval, bar.symbol, partition_day)
+            part = _Partition(
+                bar_type=bar.bar_type,
+                bar_interval=bar.bar_interval,
+                symbol=bar.symbol,
+                day=partition_day,
+            )
             self._partitions[key] = part
         elif part.sealed:
             # Reopening would truncate a finished day. Losing one late bar
@@ -164,7 +223,8 @@ class BarWriter:
                 "bar_partition_sealed",
                 extra={
                     "symbol": bar.symbol,
-                    "timeframe": timeframe,
+                    "bar_type": bar.bar_type,
+                    "bar_interval": bar.bar_interval,
                     "date": part.day.isoformat() if part.day else "",
                 },
             )
@@ -175,11 +235,17 @@ class BarWriter:
             # that cannot happen.
             return
         part.buffer.append(bar)
+        part.last_write_monotonic = time.monotonic()
         self._buffered_bars += 1
         if self._oldest_buffer_monotonic is None:
             self._oldest_buffer_monotonic = time.monotonic()
 
     def should_flush(self) -> bool:
+        # A day that is over needs sealing even with nothing buffered — its
+        # bars may all have been written already, and what is missing is the
+        # footer, which only close() writes.
+        if self._has_elapsed_open_day():
+            return True
         if self._buffered_bars == 0:
             return False
         if self._buffered_bars >= self._max_bars:
@@ -189,7 +255,7 @@ class BarWriter:
         return (time.monotonic() - self._oldest_buffer_monotonic) >= self._max_seconds
 
     def flush(self) -> int:
-        total = 0
+        total = self._seal_elapsed_days()
         for part in self._partitions.values():
             total += self._flush_partition(part)
         return total
@@ -229,7 +295,8 @@ class BarWriter:
                 "bar_partition_unwritable",
                 extra={
                     "symbol": part.symbol,
-                    "timeframe": part.timeframe,
+                    "bar_type": part.bar_type,
+                    "bar_interval": part.bar_interval,
                     "date": part.day.isoformat() if part.day else "",
                     "path": str(path),
                     "bars_dropped": n,
@@ -249,7 +316,7 @@ class BarWriter:
 
         Reading the existing rows back is what makes a restart safe: this
         file is the only copy of a native daily bar, and pq.write_table
-        truncates. A repeated `bucket_start` keeps the later row — that is
+        truncates. A repeated `bar_time` keeps the later row — that is
         a chart reload re-sending days we already have, and the fresher
         copy is the one TradeStation just adjusted.
         """
@@ -258,7 +325,7 @@ class BarWriter:
         frames = [incoming]
         if path.exists():
             # ParquetFile, not read_table: this path sits under
-            # timeframe=/symbol=, and read_table runs hive discovery on those
+            # bartype=/interval=/symbol=, and read_table runs hive discovery on those
             # and hands back two extra dictionary columns, which
             # pl.concat(how="vertical") rejects as a width mismatch.
             existing = pl.from_arrow(pq.ParquetFile(path).read())
@@ -286,8 +353,8 @@ class BarWriter:
             frames = [existing, incoming]
         merged = (
             pl.concat(frames, how="vertical")
-            .unique(subset=["bucket_start"], keep="last", maintain_order=True)
-            .sort("bucket_start")
+            .unique(subset=["bar_time"], keep="last", maintain_order=True)
+            .sort("bar_time")
         )
         # Write beside the target and rename over it: a crash mid-write
         # would otherwise leave a truncated file where the only copy was.
@@ -295,7 +362,7 @@ class BarWriter:
         pq.write_table(merged.to_arrow().cast(BAR_SCHEMA), tmp, compression=self._compression)
         os.replace(tmp, path)
 
-    def _seal_earlier_days(self, timeframe: str, symbol: str, day: date) -> None:
+    def _seal_earlier_days(self, bar_type: int, bar_interval: int, symbol: str, day: date) -> None:
         """Finish every earlier day of the same (timeframe, symbol).
 
         A partition whose day has rolled over will never take another bar,
@@ -306,13 +373,71 @@ class BarWriter:
         for part in self._partitions.values():
             if part.sealed or part.day is None:
                 continue
-            if part.timeframe != timeframe or part.symbol != symbol or part.day >= day:
+            if (
+                part.bar_type != bar_type
+                or part.bar_interval != bar_interval
+                or part.symbol != symbol
+                or part.day >= day
+            ):
                 continue
-            self._flush_partition(part)
-            if part.writer is not None:
-                part.writer.close()
-                part.writer = None
-            part.sealed = True
+            self._seal(part)
+
+    def _has_elapsed_open_day(self) -> bool:
+        today = self._today_et()
+        return any(self._is_finished(part, today) for part in self._partitions.values())
+
+    def _is_finished(self, part: _Partition, today: date) -> bool:
+        """Whether this day is over AND has stopped arriving.
+
+        Both halves are load-bearing. The wall clock alone is not enough: a
+        chart replaying five days publishes all of them within seconds, so
+        sealing on "the date is in the past" would close a partition the
+        burst is still filling, and `write` refuses a sealed partition —
+        turning a readability problem into lost bars.
+
+        Quiet for one whole flush interval is the same bound the buffer
+        already runs on, and a replay burst finishes orders of magnitude
+        inside it.
+        """
+        if part.sealed or part.day is None or part.day >= today:
+            return False
+        if part.last_write_monotonic is None:
+            return False
+        return (time.monotonic() - part.last_write_monotonic) >= self._max_seconds
+
+    def _seal_elapsed_days(self) -> int:
+        """Finish every `date=` partition whose ET day is already over.
+
+        `_seal_earlier_days` only fires when a bar for a LATER day arrives,
+        so the newest day of a finished replay never seals. A chart loaded
+        with five days of history publishes all five, seals four, and leaves
+        the fifth holding an open `pq.ParquetWriter` — whose file has no
+        footer, and therefore reads as "Parquet magic bytes not found in
+        footer" to every reader, for as long as the process runs. Ctrl+C was
+        the only thing that finished it, which is how it was found.
+
+        The flush loop already runs; this rides on it. A day strictly before
+        today in ET will take no more bars, so closing it costs nothing.
+
+        Today's partition is deliberately left open: more bars are coming,
+        and `pq.ParquetWriter` truncates on open, so it cannot be closed now
+        and resumed later.
+        """
+        today = self._today_et()
+        written = 0
+        for part in self._partitions.values():
+            if self._is_finished(part, today):
+                written += self._seal(part)
+        return written
+
+    def _seal(self, part: _Partition) -> int:
+        """Flush a partition, close its file, and refuse it any more bars."""
+        written = self._flush_partition(part)
+        if part.writer is not None:
+            part.writer.close()
+            part.writer = None
+        part.sealed = True
+        return written
 
     def close(self) -> None:
         if self._closed:
@@ -336,8 +461,8 @@ class BarWriter:
 def _bars_to_table(bars: list[Bar]) -> pa.Table:
     return pa.Table.from_pydict(
         {
-            "bucket_start": [b.bucket_start for b in bars],
-            "bucket_start_et": [b.bucket_start_et for b in bars],
+            "bar_time": [b.bar_time for b in bars],
+            "bar_time_et": [b.bar_time_et for b in bars],
             "open": [b.open for b in bars],
             "high": [b.high for b in bars],
             "low": [b.low for b in bars],
@@ -347,6 +472,9 @@ def _bars_to_table(bars: list[Bar]) -> pa.Table:
             "el_upticks": [b.el_upticks for b in bars],
             "el_downticks": [b.el_downticks for b in bars],
             "el_open_interest": [b.el_open_interest for b in bars],
+            "category": [b.category for b in bars],
+            "bid": [b.bid for b in bars],
+            "ask": [b.ask for b in bars],
         },
         schema=BAR_SCHEMA,
     )

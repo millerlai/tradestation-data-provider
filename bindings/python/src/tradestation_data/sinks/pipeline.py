@@ -4,7 +4,6 @@ import logging
 from collections.abc import Iterable, Iterator
 
 from tradestation_data.domain.bar import Bar
-from tradestation_data.domain.tick import Tick
 from tradestation_data.sinks.base import Sink
 
 log = logging.getLogger(__name__)
@@ -45,19 +44,6 @@ class SinkPipeline:
         return None
 
     # ---- event dispatch --------------------------------------------------
-
-    def on_tick(self, tick: Tick) -> None:
-        for sink in self._sinks:
-            try:
-                sink.on_tick(tick)
-            except Exception:
-                log.exception(
-                    "sink_on_tick_failed",
-                    extra={
-                        "sink": getattr(sink, "name", type(sink).__name__),
-                        "symbol": tick.symbol,
-                    },
-                )
 
     def on_bar(self, bar: Bar) -> None:
         for sink in self._sinks:

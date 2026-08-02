@@ -67,7 +67,7 @@ TA 的 `IngestionRuntime` 多出 3 個方法：`_run_strategy_cycle`、`_call_on
 
 | 項目 | 處置 |
 | --- | --- |
-| `TA/EL/TS2Python_Exporter.el` | **搬到 dp**（architecture.md 提案 A）。TA 那份撤除。**已完成** —— dp 的 `EL/` 就是那份，且已隨 proto 1 改寫。 |
+| `TA/EL/TS2Python_Exporter.el` | **搬到 dp**（architecture.md 提案 A）。TA 那份撤除。**已完成** —— dp 的 `EL/` 就是那份，且已隨 proto 2 改寫。 |
 | `TA/docs/design.md` §3.1–3.4 / §5 · `error_codes.md` | provider 相關段落搬到 dp。**已完成** —— 現在是 `dp/contract/{wire,semantics,error_codes}.md`；`cpp/README.md` 的斷鏈也已修掉。 |
 | `TA/providers/tradestation_webapi.py` | 36 行 `NotImplementedError` stub。搬到 dp（屬 TradeStation 的第二種接入方式）。 |
 | `TA/EL/monarch`（submodule） | **留在 TA**，是策略相關。 |
@@ -196,13 +196,13 @@ providers,runtime}`，統計範圍含 `src/`、`tests/`、`scripts/`）。
 
 | 選項 | 內容 | 評估 |
 | --- | --- | --- |
-| **(a) TA 改用 dp 的 SinkPipeline**（建議） | `tick_writer`/`bar_writer` → `ParquetTickSink`/`ParquetBarSink`；`strategy`/`broker`/`risk` 移出到 TA 自己的 orchestrator，透過 `on_bar` 掛入 | runtime 真正共用一份。dp 維持 data-collection-only。改動最大 |
+| **(a) TA 改用 dp 的 SinkPipeline**（建議） | `tick_writer`/`bar_writer` → `ParquetBarSink`（tick sink 已隨 tick/bar 合併移除）；`strategy`/`broker`/`risk` 移出到 TA 自己的 orchestrator，透過 `on_bar` 掛入 | runtime 真正共用一份。dp 維持 data-collection-only。改動最大 |
 | (b) dp 開放 hook 供注入 | dp 的 `IngestionRuntime` 加泛型 bar hook 鏈 | dp 要接受策略導向的抽象，違反 §1.3 Non-Goals |
 | (c) 只共用 domain/aggregation/storage/providers | `runtime/` 不進 submodule | 改動最小，但 runtime 仍是兩份會各自 drift 的程式碼 |
 
 **建議 (a)。** dp 的 `sinks/parquet.py` docstring 已寫明其設計意圖：
 
-> "These are thin adapters over `BarWriter` / `TickWriter` … They exist so the
+> "A thin adapter over `BarWriter` … It exists so the
 > sink-driven runtime can keep doing **exactly what the old `tick_writer` /
 > `bar_writer` parameters did**, just behind the `Sink` protocol."
 
@@ -223,11 +223,11 @@ providers,runtime}`，統計範圍含 `src/`、`tests/`、`scripts/`）。
 
 `seq`（per-symbol 單調遞增）與 `sid`（publisher session id）已是 wire 的必備欄位。
 原本寫的是「將於 wire v2 加入、ABI 升至 7」，那個版本序列後來被 proto-1 重寫取代：
-現在是 **wire `proto` 1 / DLL ABI 1**，兩者都只有一個版本，更舊的一律拒收。
+現在是 **wire `proto` 2 / DLL ABI 2**，兩者都只有一個版本，更舊的一律拒收。
 
 TA 側需配合的事項：
 
-- 部署的 `TS2Python.dll` 需為 **ABI 1**，且 **`.ELD` 必須同時更新** —— indicator 綁
+- 部署的 `TS2Python.dll` 需為 **ABI 2**，且 **`.ELD` 必須同時更新** —— indicator 綁
   `EL_Init3`，舊 DLL 沒有這個匯出。`scripts/deploy_dll.py` 的部署驗證應檢查
   `EL_DllVersion() == 1`。
 - 不相容的組合不會降級，而是**明確拒收**：舊 payload 沒有 `proto` 欄位，binding 直接

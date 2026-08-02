@@ -25,8 +25,6 @@ import pytest
 import zmq
 
 from conftest import CONTRACT_DIR, load_case
-from tradestation_data.domain.bar import Bar
-from tradestation_data.domain.tick import Tick
 from tradestation_data.wire.el_subscriber import TradeStationELProvider
 
 # One protocol, one set of fixtures. The superseded wire versions are gone
@@ -101,105 +99,100 @@ async def test_every_field_matches_the_contract(case: str) -> None:
         for q in EL_QUANTITIES:
             assert getattr(event, q) == want[q], f"{where}: {q}"
 
-        if want["kind"] == "tick":
-            assert isinstance(event, Tick), where
-            assert _iso(event.timestamp) == want["timestamp"], where
-            assert event.price == pytest.approx(want["price"]), where
+        assert _iso(event.bar_time) == want["bar_time"], where
+        assert event.open == pytest.approx(want["open"]), where
+        assert event.high == pytest.approx(want["high"]), where
+        assert event.low == pytest.approx(want["low"]), where
+        assert event.close == pytest.approx(want["close"]), where
 
-            # semantics.md §3 — a quote is absent when the wire says null and
-            # when the symbol is on the index list. Both paths end here.
-            if want["bid"] is None:
-                assert event.bid is None, f"{where}: bid must be absent"
-                assert event.ask is None, f"{where}: ask must be absent"
-            else:
-                assert event.bid == pytest.approx(want["bid"]), where
-                assert event.ask == pytest.approx(want["ask"]), where
+        # The chart's own words decide the storage partition, so a wrong one
+        # is silent corruption rather than a cosmetic slip.
+        assert event.bar_type == want["bar_type"], where
+        assert event.bar_interval == want["bar_interval"], where
+        assert event.category == want["category"], where
+
+        # semantics.md §3 — a quote is absent when the wire says null. Every
+        # point carries the pair, bars included.
+        if want["bid"] is None:
+            assert event.bid is None, f"{where}: bid must be absent"
         else:
-            assert isinstance(event, Bar), where
-            assert _iso(event.bucket_start) == want["bucket_start"], where
-            assert event.open == pytest.approx(want["open"]), where
-            assert event.high == pytest.approx(want["high"]), where
-            assert event.low == pytest.approx(want["low"]), where
-            assert event.close == pytest.approx(want["close"]), where
-            # The interval the bar covers decides its storage partition, so a
-            # wrong one is silent corruption rather than a cosmetic slip.
-            assert event.timeframe == want["timeframe"], where
+            assert event.bid == pytest.approx(want["bid"]), where
+        if want["ask"] is None:
+            assert event.ask is None, f"{where}: ask must be absent"
+        else:
+            assert event.ask == pytest.approx(want["ask"]), where
 
 
 @pytest.mark.parametrize("case", CASES)
-def test_bars_carry_no_quote_anywhere(case: str) -> None:
-    """A bar quote is not a thing in this protocol — on the wire or in here.
+def test_every_point_carries_the_quote_pair(case: str) -> None:
+    """bid/ask travel on every frame, whatever the chart is.
 
-    A live-quote function describes the moment of the call, which on a bar is
-    its last print rather than the bar. The frames must not carry one and the
-    domain type must not model one, so a binding has nothing to decide.
+    They used to be sent only on a tick chart, because a live-quote function
+    describes the moment of the call rather than the bar. That is a statement
+    about what the number MEANS, and the publisher does not get to make those
+    — a consumer that agrees can ignore the field.
     """
     import json as _json
 
-    frames, expected = load_case(case)
+    frames, _expected = load_case(case)
     for topic, payload in frames:
         raw = _json.loads(payload)
-        if raw.get("kind") == "bar":
-            assert "bid" not in raw and "ask" not in raw, f"{case} {topic}"
-    for want in expected["events"]:
-        if want["kind"] == "bar":
-            assert "bid" not in want and "ask" not in want
+        assert "bid" in raw and "ask" in raw, f"{case} {topic}"
 
 
-def test_index_symbol_bid_ask_differs_from_the_wire() -> None:
-    """Guard the guard: prove the null-ing is a real transform, not a no-op.
+def test_the_binding_blanks_nobodys_quote(case_symbol: str = "VXX") -> None:
+    """What the wire says about a quote is what lands. Nothing is discarded.
 
-    If the DLL ever started sending nulls itself, the assertion above would
-    still pass while the rule it is meant to protect had quietly stopped
-    being exercised.
+    There used to be a hard-coded list of index / breadth symbols whose
+    bid/ask were nulled at parse time because their live numbers "mean
+    nothing". `VXX` was on that list, and VXX is a tradeable ETN — measured
+    live, 567,776 shares in one bar and a real two-sided quote. The list was
+    a guess in both directions, and the judgement it encoded belongs to the
+    consumer, who now has `category` to make it with.
     """
-    frames, expected = load_case("smoke")
-    vxx_frames = [(t, p) for t, p in frames if t == "VXX"]
-    assert vxx_frames, "fixture no longer contains an index symbol"
-
     import json as _json
 
-    for _topic, payload in vxx_frames:
+    frames, expected = load_case("smoke")
+    rows = [(t, p) for t, p in frames if t == case_symbol]
+    assert rows, "fixture no longer contains this symbol"
+
+    for _topic, payload in rows:
         raw = _json.loads(payload)
         assert raw["bid"] is not None and raw["bid"] != 0.0
-        assert raw["ask"] is not None and raw["ask"] != 0.0
 
-    vxx_expected = [e for e in expected["events"] if e["symbol"] == "VXX"]
-    assert all(e["bid"] is None and e["ask"] is None for e in vxx_expected)
+    want = [e for e in expected["events"] if e["symbol"] == case_symbol]
+    assert all(e["bid"] is not None for e in want), "a real quote must survive"
 
 
-def test_non_index_symbol_carries_an_absent_quote_on_the_wire() -> None:
-    """§3.1 has to be reachable without §3.2 rescuing the binding.
-
-    A fixture whose only quote-less frames are breadth indices cannot tell a
-    compliant binding from one that ignores the wire entirely: §3.2 blanks
-    those symbols regardless. SPY is not on the index list, so it is the
-    frame that actually tests the rule.
-    """
+def test_an_absent_quote_is_null_on_the_wire_and_none_here() -> None:
+    """§3.1 — the publisher spells "no quote" as null, and it lands as None."""
     import json as _json
 
     frames, expected = load_case("noquote")
     spy = [(t, p) for t, p in frames if t == "SPY"]
     assert spy, "fixture lost its non-index symbol"
-    for _topic, payload in spy:
-        raw = _json.loads(payload)
-        if raw["kind"] == "tick":
-            assert raw["bid"] is None, "wire no longer spells an absent quote as null"
-    for want in expected["events"]:
-        if want["symbol"] == "SPY" and want["kind"] == "tick":
-            assert want["bid"] is None and want["ask"] is None
+    assert any(_json.loads(p)["bid"] is None for _t, p in spy)
+    assert any(e["bid"] is None for e in expected["events"] if e["symbol"] == "SPY")
 
 
-def test_session_edges_are_left_labelled() -> None:
-    """§2 — an RTH 1m session runs 09:30 … 15:59, and 16:00 is not a bar.
+def test_session_edges_keep_the_publisher_s_own_times() -> None:
+    """§2 — a bar's timestamp lands exactly as TradeStation sent it.
 
-    Right-labelling passes every other fixture here and differs by exactly one
-    bar, which is what makes it the classic silent market-data bug.
+    The fixture publishes the session's first and last 1m bar as EL stamps
+    them, 09:31 and 16:00. Both arrive unchanged.
+
+    This test used to require 09:30 / 15:59: the binding shifted every bar
+    back a minute and snapped it onto a grid, to turn EL's close time into a
+    left label. That conversion was this binding's invention and it is gone.
+    It was also lossy — on a 60-minute chart two published bars could snap
+    onto one slot and the earlier one was overwritten. Whoever wants left
+    labels now derives them downstream, where the chart's session template is
+    known.
     """
     _frames, expected = load_case("session")
-    buckets = [e["bucket_start"] for e in expected["events"]]
-    # 13:30Z / 19:59Z == 09:30 / 15:59 ET on 2026-04-20 (EDT).
-    assert buckets == ["2026-04-20T13:30:00Z", "2026-04-20T19:59:00Z"]
+    buckets = [e["bar_time"] for e in expected["events"]]
+    # 13:31Z / 20:00Z == 09:31 / 16:00 ET on 2026-04-20 (EDT).
+    assert buckets == ["2026-04-20T13:31:00Z", "2026-04-20T20:00:00Z"]
 
 
 @pytest.mark.parametrize("case", CASES)
@@ -219,9 +212,9 @@ def test_every_frame_declares_this_protocol(case: str) -> None:
     import json as _json
 
     frames, expected = load_case(case)
-    assert expected["proto"] == 1
+    assert expected["proto"] == 2
     for _topic, payload in frames:
-        assert _json.loads(payload)["proto"] == 1
+        assert _json.loads(payload)["proto"] == 2
 
 
 # ---- rules that only exist on the public receive path ----------------------
@@ -243,20 +236,23 @@ async def test_prefix_matched_topic_is_dropped() -> None:
     assert {e.symbol for e in events} == {"SPY"}
 
 
-async def test_unknown_kind_is_skipped_and_the_stream_continues() -> None:
-    """An unrecognised `kind` is logged and skipped, never raised.
+async def test_a_frame_missing_a_required_field_is_skipped_not_fatal() -> None:
+    """A frame this binding cannot read is logged and skipped, never raised.
 
     Only `events()` satisfies this; `_parse_payload` raises by design. A suite
     that stopped at the parser could not tell the two apart.
+
+    There is no `kind` to be unknown any more — one frame shape means the way
+    a frame can be unreadable is a field that is not there.
     """
     frames, _expected = load_case("smoke")
     bogus = (
         "SPY",
-        b'{"proto":1,"kind":"depth","seq":99,"sid":1,"ts":1.0,"ts_str":""}',
+        b'{"proto":2,"seq":99,"sid":1,"ts":1.0,"ts_str":""}',
     )
     events, _ = await _decode_all([bogus, *frames])
 
-    assert len(events) == len(frames), "the unknown frame must not take the stream down"
+    assert len(events) == len(frames), "the unreadable frame must not take the stream down"
 
 
 async def test_a_frame_from_a_superseded_publisher_is_refused_not_misread() -> None:
@@ -284,8 +280,8 @@ async def test_a_frame_from_a_superseded_publisher_is_refused_not_misread() -> N
 
 
 def _schema_path_for(payload: dict[str, Any]) -> str:
-    """One protocol, so the schemas sit at contract/ root with no version dir."""
-    return f"{payload['kind']}.schema.json"
+    """One protocol and one frame shape, so one schema at the contract root."""
+    return "point.schema.json"
 
 
 @pytest.mark.parametrize("case", CASES)

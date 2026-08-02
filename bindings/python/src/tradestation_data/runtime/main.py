@@ -40,7 +40,7 @@ from tradestation_data.sinks import (
     build_pipeline_from_config,
 )
 from tradestation_data.sinks.base import BaseSink
-from tradestation_data.sinks.parquet import ParquetBarSink, ParquetTickSink
+from tradestation_data.sinks.parquet import ParquetBarSink
 from tradestation_data.storage.bar_writer import BAR_SCHEMA, _bars_to_table
 from tradestation_data.wire.el_subscriber import TradeStationELProvider
 
@@ -224,7 +224,6 @@ def _build_default_pipeline(data_root: Path) -> SinkPipeline:
     return SinkPipeline(
         [
             ParquetBarSink(name="bars_parquet", root=data_root / "bars"),
-            ParquetTickSink(name="ticks_parquet", root=data_root / "ticks"),
         ]
     )
 

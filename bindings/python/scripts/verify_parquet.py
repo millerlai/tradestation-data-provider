@@ -7,7 +7,7 @@ actually stored on disk. Reports files that are missing, files that are
 incomplete, and the specific gaps within each day.
 
 `--symbol` is optional: when omitted, every symbol discovered under
-``<root>/timeframe=<tf>/symbol=*/`` is verified and a cross-symbol
+``<root>/bartype=<N>/interval=<M>/symbol=*/`` is verified and a cross-symbol
 summary table is printed at the end.
 
 TWO CAVEATS, BOTH DELIBERATE.
@@ -29,7 +29,7 @@ Usage:
   python scripts/verify_parquet.py --symbol SPY \\
       --start-date 2026-03-20 --end-date 2026-04-17
 
-  # All symbols under data/bars/timeframe=1m/
+  # All symbols under data/bars/bartype=1/interval=1/
   python scripts/verify_parquet.py \\
       --start-date 2026-03-20 --end-date 2026-04-17
 
@@ -59,24 +59,6 @@ _TZ_ALIASES = {
     "TPE": "Asia/Taipei",
     "TW": "Asia/Taipei",
 }
-
-
-def _parse_timeframe(s: str) -> tuple[str, int]:
-    """Return (canonical_label, seconds). Accepts '1m', '5m', '1h', '30s'."""
-    s = s.strip().lower()
-    if not s or not s[-1].isalpha():
-        raise ValueError(f"timeframe must end with a unit (s/m/h): {s!r}")
-    unit = s[-1]
-    try:
-        n = int(s[:-1])
-    except ValueError as e:
-        raise ValueError(f"timeframe magnitude not an int: {s!r}") from e
-    if n <= 0:
-        raise ValueError(f"timeframe must be positive: {s!r}")
-    mult = {"s": 1, "m": 60, "h": 3600}.get(unit)
-    if mult is None:
-        raise ValueError(f"timeframe unit must be s/m/h: {s!r}")
-    return f"{n}{unit}", n * mult
 
 
 def _parse_hhmm(s: str) -> time:
@@ -111,8 +93,8 @@ def _expected_bars(
 ) -> list[datetime]:
     """Left-labeled bucket starts for a session. 1m 09:30-16:00 → [09:30..15:59].
 
-    Matches ``BAR_SCHEMA.bucket_start`` semantics: bucket = [t, t+step), so
-    a US RTH 09:30-16:00 session yields ``bucket_start`` values starting at
+    Matches ``BAR_SCHEMA.bar_time`` semantics: bucket = [t, t+step), so
+    a US RTH 09:30-16:00 session yields ``bar_time`` values starting at
     09:30 and ending at 15:59 (last bucket covers [15:59, 16:00)).
     """
     start_dt = datetime.combine(day, start).replace(tzinfo=tz)
@@ -180,12 +162,12 @@ def _fmt_range(
 
 
 def _load_day(path: Path) -> list[datetime] | None:
-    """Return list of stored bucket_start UTC datetimes; None if unreadable."""
+    """Return list of stored bar_time UTC datetimes; None if unreadable."""
     try:
-        table = pq.read_table(path, columns=["bucket_start"])
+        table = pq.read_table(path, columns=["bar_time"])
     except Exception:
         return None
-    ts = table.column("bucket_start").to_pylist()
+    ts = table.column("bar_time").to_pylist()
     out: list[datetime] = []
     for t in ts:
         if t is None:
@@ -201,7 +183,8 @@ def verify(
     symbol: str,
     start_date: date,
     end_date: date,
-    tf_label: str,
+    bar_type: int,
+    bar_interval: int,
     tf_sec: int,
     start_time: time,
     end_time: time,
@@ -223,7 +206,8 @@ def verify(
 
         path = (
             root
-            / f"timeframe={tf_label}"
+            / f"bartype={bar_type}"
+            / f"interval={bar_interval}"
             / f"symbol={symbol}"
             / f"date={d.isoformat()}"
             / "bars.parquet"
@@ -284,12 +268,18 @@ def main() -> int:
         default=None,
         help=(
             "Symbol (e.g., SPY, $TICK). Quote $-prefixed on shells. "
-            "Omit to verify every symbol found under <root>/timeframe=<tf>/."
+            "Omit to verify every symbol found under <root>/bartype=<N>/interval=<M>/."
         ),
     )
     ap.add_argument("--start-date", required=True, type=_parse_date, help="Inclusive (YYYY-MM-DD).")
     ap.add_argument("--end-date", required=True, type=_parse_date, help="Inclusive (YYYY-MM-DD).")
-    ap.add_argument("--timeframe", "--tf", default="1m", help="e.g., 1m, 5m, 1h (default: 1m).")
+    ap.add_argument("--bar-type", type=int, default=1, help="EL BarType, verbatim (default: 1).")
+    ap.add_argument(
+        "--bar-interval",
+        type=int,
+        default=1,
+        help="EL BarInterval, verbatim. For BarType 1 this is the minutes.",
+    )
     ap.add_argument(
         "--start-time", default="09:30", help="Session start HH:MM in --tz (default: 09:30)."
     )
@@ -328,7 +318,8 @@ def main() -> int:
     args = ap.parse_args()
 
     try:
-        tf_label, tf_sec = _parse_timeframe(args.timeframe)
+        tf_label = f"bartype={args.bar_type}/interval={args.bar_interval}"
+        tf_sec = args.bar_interval * 60
         start_time = _parse_hhmm(args.start_time)
         end_time = _parse_hhmm(args.end_time)
         tz = _resolve_tz(args.tz)
@@ -357,10 +348,10 @@ def main() -> int:
     if args.symbol is not None:
         symbols = [args.symbol]
     else:
-        symbols = _discover_symbols(args.root, tf_label)
+        symbols = _discover_symbols(args.root, args.bar_type, args.bar_interval)
         if not symbols:
             print(
-                f"error: no symbols found under {args.root}/timeframe={tf_label}/",
+                f"error: no symbols found under {args.root}/bartype={args.bar_type}/interval={args.bar_interval}/",
                 file=sys.stderr,
             )
             return 2
@@ -385,7 +376,8 @@ def main() -> int:
             symbol=sym,
             start_date=args.start_date,
             end_date=args.end_date,
-            tf_label=tf_label,
+            bar_type=args.bar_type,
+            bar_interval=args.bar_interval,
             tf_sec=tf_sec,
             start_time=start_time,
             end_time=end_time,
@@ -418,8 +410,8 @@ def main() -> int:
     return 0 if overall_bad == 0 else 1
 
 
-def _discover_symbols(root: Path, tf_label: str) -> list[str]:
-    base = root / f"timeframe={tf_label}"
+def _discover_symbols(root: Path, bar_type: int, bar_interval: int) -> list[str]:
+    base = root / f"bartype={bar_type}" / f"interval={bar_interval}"
     if not base.exists():
         return []
     out: list[str] = []
