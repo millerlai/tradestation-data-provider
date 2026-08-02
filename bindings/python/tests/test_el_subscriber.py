@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 import zmq
@@ -868,6 +869,65 @@ async def test_non_object_payload_drops_the_frame_instead_of_killing_the_stream(
 
     assert event.price == pytest.approx(453.0)
     assert any("Dropping unparseable message" in r.message for r in caplog.records)
+
+    await gen.aclose()
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_session_truncated_hour_bar_keeps_its_own_bucket(zmq_inproc_bus) -> None:
+    """A 60-minute RTH chart ends in a half-hour stub, and it is not the 14:30 bar.
+
+    RTH is 09:30-16:00, so a 1h chart yields six full bars plus 15:30-16:00,
+    which EasyLanguage stamps Time=1600. Subtracting a whole interval put that
+    stub at 15:00, which floors onto the 09:30-anchored hour grid at 14:30 —
+    colliding with the real 14:30-15:30 bar. `_handle_provider_bar` reads a
+    matching bucket as an intra-bar refresh, so the full hour's OHLC and all
+    five quantities were replaced by the stub's.
+    """
+    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
+    # The real 14:30-15:30 hour, then the stub. Both in ET on the wire.
+    await _publish(pub, "SPY", _bar_frame("1h", seq=1, ts_str="2026-04/20-15:30:00"))
+    await _publish(pub, "SPY", _bar_frame("1h", seq=2, ts_str="2026-04/20-16:00:00"))
+
+    gen = provider.events()
+    full = await asyncio.wait_for(anext(gen), timeout=1.0)
+    stub = await asyncio.wait_for(anext(gen), timeout=1.0)
+
+    et = ZoneInfo("America/New_York")
+    assert full.bucket_start.astimezone(et).strftime("%H:%M") == "14:30"
+    assert stub.bucket_start.astimezone(et).strftime("%H:%M") == "15:30"
+    assert full.bucket_start != stub.bucket_start, (
+        "the stub must not land on the preceding hour's bucket"
+    )
+
+    await gen.aclose()
+    await provider.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tf", "close_et", "expected_et"),
+    [
+        ("1m", "09:31:00", "09:30"),
+        ("1m", "16:00:00", "15:59"),
+        ("5m", "09:35:00", "09:30"),
+        ("5m", "16:00:00", "15:55"),
+        ("1h", "10:30:00", "09:30"),
+        ("30m", "16:00:00", "15:30"),
+    ],
+)
+async def test_full_bars_label_exactly_as_before(
+    zmq_inproc_bus, tf: str, close_et: str, expected_et: str
+) -> None:
+    """A bar that spans its whole interval is unaffected by the stub fix."""
+    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
+    await _publish(pub, "SPY", _bar_frame(tf, ts_str=f"2026-04/20-{close_et}"))
+
+    gen = provider.events()
+    bar = await asyncio.wait_for(anext(gen), timeout=1.0)
+    et = ZoneInfo("America/New_York")
+    assert bar.bucket_start.astimezone(et).strftime("%H:%M") == expected_et
 
     await gen.aclose()
     await provider.close()

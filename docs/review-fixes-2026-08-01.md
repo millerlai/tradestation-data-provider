@@ -27,7 +27,7 @@ This file is the source of truth for progress. If a session is interrupted:
 | F1 | data loss | `storage/bar_writer.py:226` | One legacy-schema partition aborts every flush for the whole run | ✅ | `fix(storage): confine an unwritable partition to its own series` |
 | F2 | data loss | `wire/el_subscriber.py:305` | `TypeError` from a bad frame kills the ingest task; process still reports healthy | ✅ | `fix(wire): drop an unparseable frame instead of ending the stream` |
 | F3 | blocks reads | `storage/history_store.py:147` | Still-open footerless partition makes every read of that symbol raise | ✅ | `fix(storage): select partitions by path before opening them` |
-| F4 | data loss | `wire/el_subscriber.py:410` | 1h RTH stub bar collides with, and overwrites, the preceding hour | ⬜ | |
+| F4 | data loss | `wire/el_subscriber.py:410` | 1h RTH stub bar collides with, and overwrites, the preceding hour | ✅ | `fix(wire): label a bar from the minute before its close, not one whole tf` |
 | F5 | false signal | `wire/el_subscriber.py:332` | `messages_lost` reports 0 when 100% of frames were refused | ⬜ | |
 | F6 | false signal | `storage/history_store.py:147` | No `BAR_SCHEMA` guard despite docs claiming one; empty vs populated disagree on width | ⬜ | |
 | F7 | wrong data | `scripts/imputation_parquet.py:184` | Imputed rows get NULL `timeframe`/`symbol`/`date`; `_passthrough_table` inherits it | ⬜ | |

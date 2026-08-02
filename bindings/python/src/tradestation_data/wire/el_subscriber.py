@@ -16,7 +16,6 @@ from tradestation_data.domain.timeframe import (
     SESSION_ANCHORED_TIMEFRAMES,
     SUPPORTED_TIMEFRAMES,
     align_bucket_start,
-    timeframe_to_minutes,
 )
 from tradestation_data.wire.base import MarketEvent
 
@@ -462,8 +461,24 @@ class TradeStationELProvider:
         # Session-anchored frames are exempt: align_bucket_start replaces a 1d
         # timestamp with that session's 04:00 ET anchor outright, so a shift
         # here would only move the bar into the previous session.
+        # Step back one MINUTE, not one whole `tf`. The bucket a bar belongs
+        # to is the grid cell holding the instant just before its close, and
+        # subtracting a full interval only finds that cell when the bar
+        # actually spans one. A session-truncated bar does not: a 60-minute
+        # RTH chart is six full bars plus a 15:30-16:00 stub that EL stamps
+        # 16:00, and 16:00 minus 60m is 15:00, which floors onto the
+        # 09:30-anchored hour grid at 14:30 — the *previous* bar's bucket.
+        # `_handle_provider_bar` then reads the stub as an intra-bar refresh
+        # and overwrites the real 14:30-15:30 hour with the half-hour's OHLC
+        # and quantities.
+        #
+        # One minute is exact here rather than approximate: every candidate
+        # is already minute-floored, by `_parse_el_str_as_et` or by
+        # `_floor_to_minute_utc`. For a bar that does span its interval the
+        # answer is identical to subtracting the interval, so this changes
+        # nothing except the truncated case.
         if timeframe not in SESSION_ANCHORED_TIMEFRAMES:
-            bucket_start -= timedelta(minutes=timeframe_to_minutes(timeframe))
+            bucket_start -= timedelta(minutes=1)
 
         # §2.2 — the grid is the contract's, not the publisher's. EL stamps a
         # bar with its chart's own Date/Time, which for a daily bar is nowhere
