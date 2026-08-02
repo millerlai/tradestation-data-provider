@@ -346,6 +346,21 @@ intraday/daily 對照是否成立需要用 `LogPublish` 自行實測。
 > SPY 日線 499 筆中兩者逐位元組相同。推測是 TradeStation 的日線來源未提供 tick count
 > 而以總量填充，尚未證實。在證實之前，`1d` 的 `el_ticks` 不應被當成筆數使用。
 
+#### fixture 抓得到什麼、抓不到什麼
+
+規則 2（原樣落地）在 conformance 上只有一部分可驗證，這件事必須寫下來，否則下一個
+binding 會以為「fixture 全過」等於「五個欄位都對」：
+
+| 錯誤實作 | fixture 抓得到嗎 |
+| --- | --- |
+| 用 `el_upticks + el_downticks` 算出 `el_ticks` | ✅ 抓得到 —— 價格不變的成交兩邊都不算，所以 `Ticks` 嚴格大於兩者之和；fixture 刻意讓它不相等 |
+| `el_ticks` 與 `el_downticks` 互換 | ✅ 抓得到 |
+| **`el_volume` 與 `el_upticks` 互換** | ❌ **抓不到，而且永遠抓不到** |
+
+最後一列不是 fixture 的疏漏。上表裡 TradeStation 在 **intraday 與 daily 兩種régime**
+都把 `Volume` 和 `UpTicks` 定義成同一個數字，所以真實資料本身就無法區分這兩欄的互換 ——
+沒有任何錄製得出來的 frame 能證明實作讀對了欄位。這一欄只能靠讀 code 保證。
+
 #### `1d` 的量與 intraday 加總對不上，而且本來就不該相等
 
 把一天的 intraday bar 加總，**不會**等於同一天 `1d` bar 的量。兩者是不同口徑的兩份

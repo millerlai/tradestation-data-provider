@@ -41,9 +41,10 @@ def _row(ts, close, open_=None, el_volume=1000):
         "low": close,
         "close": close,
         "el_volume": el_volume,
-        "el_ticks": el_volume * 2,
-        "el_upticks": el_volume,
-        "el_downticks": el_volume,
+        # Mutually underivable on purpose — see the note in test_bar_writer.py.
+        "el_ticks": el_volume * 2 + 7,
+        "el_upticks": el_volume + 3,
+        "el_downticks": el_volume + 5,
         "el_open_interest": 0,
     }
 

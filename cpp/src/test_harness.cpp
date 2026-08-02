@@ -42,15 +42,33 @@ struct Options {
     int         warmup_ms = 250;
 };
 
-// Quantities in the shape EasyLanguage hands over on an intraday chart:
-// Volume is the up-tick share volume (so it equals UpTicks), Ticks is the
-// total (so it equals UpTicks + DownTicks). Keeping the synthetic numbers
-// internally consistent means a fixture recorded from this harness still
-// demonstrates the relationship a binding must not try to "fix".
+// Quantities in the shape EasyLanguage hands over — which is not ONE shape.
+// The reserved words swap meaning between intraday and daily (semantics.md
+// §3.4), and daily is the only place the flip happens:
+//
+//   intraday   Volume = up-tick share volume    Ticks = total share volume
+//   daily      Volume = total share volume      Ticks = trade count
+//                                               DownTicks = 0
+//
+// Publishing the intraday shape on a `1d` bar is what this fixture used to
+// do, and it teaches the next binding author the wrong thing about precisely
+// the frame where the meaning inverts.
+//
+// Within each shape, Ticks is deliberately GREATER than UpTicks + DownTicks:
+// a trade that leaves the price unchanged is counted in neither, so the sum
+// is a lower bound, not an identity. It used to hold exactly, which made a
+// binding that COMPUTED el_ticks indistinguishable from one that read it —
+// every fixture passed either way.
+//
+// `Volume == UpTicks` is not a choice and cannot be broken here: TradeStation
+// defines them as the same number in BOTH regimes. No fixture can catch a
+// binding that transposes those two fields. Stated so the gap is known rather
+// than assumed covered.
 struct Quantities { double volume, ticks, upticks, downticks, open_interest; };
-constexpr Quantities kTickQty = {100.0, 180.0, 100.0,  80.0, 0.0};
-constexpr Quantities kBarQty  = {12000.0, 21000.0, 12000.0, 9000.0, 0.0};
-constexpr Quantities kNoQty   = {0.0, 0.0, 0.0, 0.0, 0.0};   // breadth indices
+constexpr Quantities kTickQty  = {100.0, 195.0, 100.0, 80.0, 0.0};
+constexpr Quantities kBarQty   = {12000.0, 22500.0, 12000.0, 9000.0, 0.0};
+constexpr Quantities kDailyQty = {88400000.0, 612345.0, 88400000.0, 0.0, 0.0};
+constexpr Quantities kNoQty    = {0.0, 0.0, 0.0, 0.0, 0.0};   // breadth indices
 
 Options parse_args(int argc, char** argv) {
     Options o;
@@ -201,11 +219,14 @@ int run_bars(const Options& o) {
         {2,  1,  "1d (BarInterval 1 — what the ABI documented first)"},
     };
     for (const auto& c : mappable) {
+        // BarType 2 is the daily chart, where the reserved words carry the
+        // other meaning entirely — see the note on kDailyQty.
+        const Quantities& q = (c.bar_type == 2) ? kDailyQty : kBarQty;
         const int rc = EL_PublishBar("SPY", ts_el, c.bar_type, c.bar_interval,
                                      450.10, 450.75, 449.80, 450.40,
-                                     kBarQty.volume, kBarQty.ticks,
-                                     kBarQty.upticks, kBarQty.downticks,
-                                     kBarQty.open_interest);
+                                     q.volume, q.ticks,
+                                     q.upticks, q.downticks,
+                                     q.open_interest);
         if (rc != 0) {
             std::fprintf(stderr, "[harness] EL_PublishBar(%s) rc=%d\n", c.label, rc);
             return 3;

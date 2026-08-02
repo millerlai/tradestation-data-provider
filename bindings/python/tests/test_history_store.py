@@ -30,9 +30,10 @@ def _tick(symbol: str, ts: datetime, price: float, *, el_volume: int = 100) -> T
         timestamp=ts,
         price=price,
         el_volume=el_volume,
-        el_ticks=el_volume * 2,
-        el_upticks=el_volume,
-        el_downticks=el_volume,
+        # Mutually underivable on purpose — see the note in test_bar_writer.py.
+        el_ticks=el_volume * 2 + 7,
+        el_upticks=el_volume + 3,
+        el_downticks=el_volume + 5,
         el_open_interest=0,
         bid=None,
         ask=None,

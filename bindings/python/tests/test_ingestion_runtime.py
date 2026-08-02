@@ -63,9 +63,10 @@ def _bar_payload(ts: float, ohlc: tuple[float, float, float, float], el_volume: 
         "l": low,
         "c": c,
         "el_volume": el_volume,
-        "el_ticks": el_volume * 2,
-        "el_upticks": el_volume,
-        "el_downticks": el_volume,
+        # Mutually underivable on purpose — see the note in test_bar_writer.py.
+        "el_ticks": el_volume * 2 + 7,
+        "el_upticks": el_volume + 3,
+        "el_downticks": el_volume + 5,
         "el_open_interest": 0,
     }
 

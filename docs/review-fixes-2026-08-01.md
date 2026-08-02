@@ -33,7 +33,7 @@ This file is the source of truth for progress. If a session is interrupted:
 | F7 | wrong data | `scripts/imputation_parquet.py:184` | Imputed rows get NULL `timeframe`/`symbol`/`date`; `_passthrough_table` inherits it | ✅ | `fix(scripts): read the file's own columns, not the path's` |
 | F8 | false signal | `wire/el_subscriber.py:330` | `seq` is schema-required but read with `.get()` and silently skipped | ✅ | `fix(wire): enforce the required seq the schemas already declare` |
 | F9 | rare, plausible | `storage/history_store.py:39` | `replace(tzinfo=)` pins `fold=0` across the DST-ambiguous hour | ✅ | `fix(time): say so when a local time names two instants, or none` |
-| F10 | test gap | `cpp/src/test_harness.cpp:52` | Fixture + test quantities are mutually derivable, so a column swap passes everything | ⬜ | |
+| F10 | test gap | `cpp/src/test_harness.cpp:52` | Fixture + test quantities are mutually derivable, so a column swap passes everything | ✅ | `test(contract): make the quantity fixtures able to fail` |
 | F11 | doc wrong | `bindings/python/README.md:286` | Claims no script rewrites the store; `dedupe_bars.py` rewrites in place by default | ⬜ | |
 | F12 | doc wrong | `examples/03_read_history.py:191` | States daily `el_ticks` is a trade count, which the contract marks unconfirmed | ⬜ | |
 
@@ -112,6 +112,28 @@ then re-deriving the `expected/*.json` by hand (the repo rule: expectations must
 never be generated from the code under test). Heavier than the rest. The Python
 half — test helpers using mutually derivable quantities — can be fixed
 independently and is worth doing first.
+
+**Resolved, with the finding partly corrected.** §3.4's own table says
+TradeStation defines `Volume` and `UpTicks` as the same number in *both*
+regimes, so `el_volume == el_upticks` is a fact about the data, not a shortcut
+the harness took — no fixture can ever catch a binding that transposes those
+two. That limit is now written into §3.4 instead of being assumed covered.
+
+What was genuinely fixable, and was:
+
+- `Ticks == UpTicks + DownTicks` held in every frame. It is not an EL law — a
+  trade at an unchanged price is counted in neither, so the sum is a lower
+  bound. Now strictly greater.
+- `bars.jsonl` published *intraday*-shaped quantities on its two `1d` frames,
+  which is also a faithfulness bug: §3.4 has daily `Volume` = total share
+  volume, `Ticks` = trade count, `DownTicks` = 0. New `kDailyQty` in the
+  harness.
+- Four Python test helpers built quantities as `(V, 2V, V, V, 0)`.
+
+Verified by mutating `_quantities` and re-running conformance: computing
+`el_ticks` from the sum → 4 failed; transposing `el_ticks`/`el_downticks` →
+4 failed; transposing `el_volume`/`el_upticks` → still 30 passed, as predicted
+and as documented.
 
 ## Verification gate
 

@@ -19,9 +19,14 @@ def _bar(symbol: str, bucket: datetime, close: float, *, el_volume: int = 100) -
         low=close - 0.2,
         close=close,
         el_volume=el_volume,
-        el_ticks=el_volume * 2,
-        el_upticks=el_volume,
-        el_downticks=el_volume,
+        # Five values no two of which are equal, and none of which is the sum
+        # or double of any other. Derivable numbers make a column swap
+        # invisible: with el_volume == el_upticks and el_ticks == the sum, a
+        # writer that transposed two of these would round-trip byte-identical
+        # and every assertion here would still pass.
+        el_ticks=el_volume * 2 + 7,
+        el_upticks=el_volume + 3,
+        el_downticks=el_volume + 5,
         el_open_interest=0,
     )
 
