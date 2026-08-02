@@ -224,6 +224,26 @@ class TradeStationELProvider:
         self._subscribed: set[str] = set()
         self._closed = False
         self._seq = _SequenceTracker()
+        self._frames_refused = 0
+
+    @property
+    def frames_refused(self) -> int:
+        """Frames received and thrown away because they could not be parsed.
+
+        Read this WITH `messages_lost`, never instead of it. They answer
+        different questions and the pair is what tells you the link is
+        healthy: `messages_lost` counts frames the publisher sent that never
+        arrived, and a refused frame did arrive — so a stream in which every
+        single frame was refused still reports zero lost, quite correctly,
+        and reads as perfect health on its own.
+
+        That is not hypothetical. The documented upgrade order is binding
+        first, then DLL, so there is a window where the old DLL is still
+        publishing. Its frames carry `seq`/`sid`, so sequence tracking starts
+        normally and reports no loss, while the `proto` gate refuses every
+        one of them and nothing is delivered.
+        """
+        return self._frames_refused
 
     @property
     def gap_detection_available(self) -> bool:
@@ -311,6 +331,7 @@ class TradeStationELProvider:
             except (ValueError, KeyError, json.JSONDecodeError) as exc:
                 # The expected shape of a bad frame: a refused proto, a
                 # missing quantity, malformed JSON.
+                self._frames_refused += 1
                 log.warning(
                     "Dropping malformed message for symbol=%s: %s (payload=%r)",
                     symbol,
@@ -334,6 +355,7 @@ class TradeStationELProvider:
                 # a traceback rather than the WARNING above, because unlike a
                 # malformed frame this may well be our own defect and should
                 # not read as routine.
+                self._frames_refused += 1
                 log.error(
                     "Dropping unparseable message for symbol=%s: %s (payload=%r)",
                     symbol,

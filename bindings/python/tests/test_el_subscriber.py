@@ -931,3 +931,38 @@ async def test_full_bars_label_exactly_as_before(
 
     await gen.aclose()
     await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_refused_frames_are_counted_separately_from_lost_ones(
+    zmq_inproc_bus,
+) -> None:
+    """A link refusing everything reports zero lost, and that is correct.
+
+    The documented upgrade order is binding first, then DLL, so there is a
+    window where the old publisher is still running. Its frames carry
+    seq/sid, so sequence tracking starts and reports no loss, while the proto
+    gate throws every frame away and nothing is delivered. `messages_lost`
+    answers "sent but never arrived" and these arrived, so 0 is the honest
+    answer -- it is just not the whole answer. `frames_refused` is the rest
+    of it, and the two must be read together.
+    """
+    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
+    assert provider.frames_refused == 0
+
+    for seq in (1, 2, 3):
+        await _publish(pub, "SPY", _tick_frame(seq=seq, proto=99))
+    await _publish(pub, "SPY", _tick_frame(seq=4, px=450.0))
+
+    gen = provider.events()
+    event = await asyncio.wait_for(anext(gen), timeout=1.0)
+
+    assert event.price == pytest.approx(450.0)
+    assert provider.frames_refused == 3, "every refused frame must be counted"
+    assert provider.messages_lost == 0, (
+        "refused frames arrived, so nothing was lost -- that is why the "
+        "refusal count has to exist alongside it"
+    )
+
+    await gen.aclose()
+    await provider.close()

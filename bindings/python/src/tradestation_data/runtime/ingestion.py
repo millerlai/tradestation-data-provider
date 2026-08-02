@@ -332,6 +332,15 @@ class IngestionRuntime:
                 "ticks_per_sec": round(ticks_since / dt, 2),
                 "bars_per_sec": round(bars_since / dt, 2),
                 "symbols_seen": len(self._snapshot.symbols()),
+                # Read together or not at all. `messages_lost` counts frames
+                # the publisher sent that never arrived; a refused frame did
+                # arrive, so a link refusing 100% of its traffic still reports
+                # zero lost and reads as healthy on its own. That is the
+                # documented upgrade window — binding first, then DLL — where
+                # the old publisher's frames carry seq/sid, so gap detection
+                # starts normally while the proto gate throws every one away.
+                "messages_lost": getattr(self._provider, "messages_lost", None),
+                "frames_refused": getattr(self._provider, "frames_refused", None),
             },
         )
         self._counters.last_report_monotonic = now
