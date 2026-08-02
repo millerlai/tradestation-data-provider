@@ -35,7 +35,7 @@ This file is the source of truth for progress. If a session is interrupted:
 | F9 | rare, plausible | `storage/history_store.py:39` | `replace(tzinfo=)` pins `fold=0` across the DST-ambiguous hour | ✅ | `fix(time): say so when a local time names two instants, or none` |
 | F10 | test gap | `cpp/src/test_harness.cpp:52` | Fixture + test quantities are mutually derivable, so a column swap passes everything | ✅ | `test(contract): make the quantity fixtures able to fail` |
 | F11 | doc wrong | `bindings/python/README.md:286` | Claims no script rewrites the store; `dedupe_bars.py` rewrites in place by default | ✅ | `docs(readme): name the one script that rewrites the store` |
-| F12 | doc wrong | `examples/03_read_history.py:191` | States daily `el_ticks` is a trade count, which the contract marks unconfirmed | ⬜ | |
+| F12 | doc wrong | `examples/03_read_history.py:191` | States daily `el_ticks` is a trade count, which the contract marks unconfirmed | ✅ | `docs(example): stop asserting daily el_ticks is a trade count` |
 
 Legend: ⬜ not started · 🔄 in progress · ✅ done · ⏸️ deferred (reason in notes)
 
