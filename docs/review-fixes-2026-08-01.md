@@ -29,7 +29,7 @@ This file is the source of truth for progress. If a session is interrupted:
 | F3 | blocks reads | `storage/history_store.py:147` | Still-open footerless partition makes every read of that symbol raise | ✅ | `fix(storage): select partitions by path before opening them` |
 | F4 | data loss | `wire/el_subscriber.py:410` | 1h RTH stub bar collides with, and overwrites, the preceding hour | ✅ | `fix(wire): label a bar from the minute before its close, not one whole tf` |
 | F5 | false signal | `wire/el_subscriber.py:332` | `messages_lost` reports 0 when 100% of frames were refused | ✅ | `feat(wire): count refused frames alongside lost ones` |
-| F6 | false signal | `storage/history_store.py:147` | No `BAR_SCHEMA` guard despite docs claiming one; empty vs populated disagree on width | ⬜ | |
+| F6 | false signal | `storage/history_store.py:147` | No `BAR_SCHEMA` guard despite docs claiming one; empty vs populated disagree on width | ✅ | `fix(storage): refuse a store whose columns are not this store's` |
 | F7 | wrong data | `scripts/imputation_parquet.py:184` | Imputed rows get NULL `timeframe`/`symbol`/`date`; `_passthrough_table` inherits it | ⬜ | |
 | F8 | false signal | `wire/el_subscriber.py:330` | `seq` is schema-required but read with `.get()` and silently skipped | ⬜ | |
 | F9 | rare, plausible | `storage/history_store.py:39` | `replace(tzinfo=)` pins `fold=0` across the DST-ambiguous hour | ⬜ | |

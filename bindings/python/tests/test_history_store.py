@@ -290,3 +290,58 @@ def test_range_reaching_into_the_open_day_answers_with_the_sealed_ones(
         )
     finally:
         writer.close()
+
+
+def test_imputation_output_root_is_refused_not_read_as_collected_data(
+    tmp_path: Path,
+) -> None:
+    """The guard CHANGELOG.md and imputation_parquet.py both already claimed.
+
+    Imputed bars are flat O=H=L=C with all five quantities zero. Read back as
+    ordinary rows they are indistinguishable from published ones to any
+    consumer selecting OHLC, which is exactly why imputed output was given a
+    schema of its own -- and that schema is what makes the refusal possible.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from tradestation_data.storage.bar_writer import BAR_SCHEMA
+
+    out = tmp_path / "bars" / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18"
+    out.mkdir(parents=True)
+    row = {
+        "bucket_start": [T0],
+        "bucket_start_et": [T0],
+        "open": [450.0],
+        "high": [450.0],
+        "low": [450.0],
+        "close": [450.0],
+        "el_volume": [0],
+        "el_ticks": [0],
+        "el_upticks": [0],
+        "el_downticks": [0],
+        "el_open_interest": [0],
+        "imputed": [True],
+    }
+    pq.write_table(
+        pa.Table.from_pydict(row, schema=BAR_SCHEMA.append(pa.field("imputed", pa.bool_()))),
+        out / "bars.parquet",
+    )
+
+    with pytest.raises(ValueError, match="imputation output root"):
+        HistoryStore(tmp_path).load_bars("SPY", T0, T0 + timedelta(hours=1), "1m")
+
+
+def test_populated_and_empty_answers_have_identical_columns(tmp_path: Path) -> None:
+    """Width parity is what lets a caller stack a symbol loop with pl.concat.
+
+    Before the column projection, a populated day returned whatever the file
+    held and a quiet day returned BAR_SCHEMA, so the two disagreed the moment
+    a file carried anything extra.
+    """
+    _populate_bars(tmp_path, [_bar("SPY", T0, 450.0)])
+    store = HistoryStore(tmp_path)
+    populated = store.load_bars("SPY", T0, T0 + timedelta(hours=1), "5m")
+    never = store.load_bars("NOSUCH", T0, T0 + timedelta(hours=1), "5m")
+    assert populated.columns == never.columns
+    assert populated.schema == never.schema

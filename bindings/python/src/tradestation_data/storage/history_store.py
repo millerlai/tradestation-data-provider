@@ -160,12 +160,11 @@ class HistoryStore:
             return _empty(schema, hive)
 
         try:
-            return (
-                pl.scan_parquet([p.as_posix() for p in paths], hive_partitioning=True)
-                .filter(pl.col(time_column).is_between(lo, hi))
-                .sort(time_column)
-                .collect()
-            )
+            return _collect(paths, time_column, lo, hi, schema, hive)
+        except _ForeignStoreError:
+            # Not a partition problem — the caller is pointed at something
+            # that is not this store. Let it out.
+            raise
         except Exception:
             # A partition inside the requested range is still being written,
             # so it has no footer. Answer with the readable ones rather than
@@ -184,12 +183,59 @@ class HistoryStore:
                 "history_partition_unreadable_skipped",
                 extra={"skipped": [str(p) for p in skipped]},
             )
-            return (
-                pl.scan_parquet([p.as_posix() for p in readable], hive_partitioning=True)
-                .filter(pl.col(time_column).is_between(lo, hi))
-                .sort(time_column)
-                .collect()
-            )
+            return _collect(readable, time_column, lo, hi, schema, hive)
+
+
+class _ForeignStoreError(ValueError):
+    """The path holds Parquet, but not this store's Parquet."""
+
+
+def _collect(
+    paths: list[Path],
+    time_column: str,
+    lo: datetime,
+    hi: datetime,
+    schema: pa.Schema,
+    hive: dict[str, _Dtype],
+) -> pl.DataFrame:
+    """Read the given partitions, refusing anything that is not this store.
+
+    The column check is the guard CHANGELOG.md and imputation_parquet.py both
+    claimed already existed. It did not: `_read` scanned and filtered whatever
+    the path held, and `BAR_SCHEMA` was used only to shape the *empty* frame.
+    Two consequences, both silent.
+
+    Point this at an imputation output root and every invented bar — flat
+    O=H=L=C with all five quantities zero — comes back as an ordinary row,
+    indistinguishable from a published one to any consumer selecting OHLC.
+    That is the whole reason imputed output was given a schema of its own.
+
+    And the two answers disagreed on width: a populated day returned the
+    file's columns (plus `imputed`), while a quiet day returned BAR_SCHEMA
+    without it, so stacking a symbol loop with `pl.concat` raised on the first
+    quiet day — the exact pattern `test_empty_and_populated_answers_share_one_schema`
+    exists to protect.
+    """
+    lf = pl.scan_parquet([p.as_posix() for p in paths], hive_partitioning=True)
+
+    want = [f.name for f in schema] + list(hive)
+    got = lf.collect_schema().names()
+    extra = [c for c in got if c not in want]
+    missing = [c for c in want if c not in got]
+    if extra or missing:
+        detail = "imputed" in extra and (
+            " The `imputed` column means this is an imputation output root, "
+            "which holds invented bars and must not be read as collected data."
+        )
+        raise _ForeignStoreError(
+            f"{paths[0].parent} does not hold this store's schema: "
+            f"unexpected {extra}, missing {missing}."
+            f"{detail or ''}"
+        )
+
+    return (
+        lf.select(want).filter(pl.col(time_column).is_between(lo, hi)).sort(time_column).collect()
+    )
 
 
 def _files_in_range(pattern: Path, lo: datetime, hi: datetime) -> list[Path]:
