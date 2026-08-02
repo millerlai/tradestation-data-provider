@@ -966,3 +966,31 @@ async def test_refused_frames_are_counted_separately_from_lost_ones(
 
     await gen.aclose()
     await provider.close()
+
+
+def test_proto1_frame_without_seq_is_refused() -> None:
+    """Both schemas mark `seq` required; nothing enforced it at runtime.
+
+    A frame without one parsed normally, `sid` stayed None, and
+    `messages_lost` returned None forever -- which an operator reads as
+    "nothing to report" while PUB/SUB high-water-mark drops go uncounted.
+    §6.6 exists to forbid exactly that conflation.
+    """
+    provider = TradeStationELProvider(endpoint="inproc://no-seq")
+    frame = _tick_frame()
+    del frame["seq"]
+    with pytest.raises(ValueError, match="no 'seq'"):
+        provider._parse_payload("SPY", json.dumps(frame).encode())
+
+
+def test_a_superseded_frame_still_gets_the_protocol_message_not_the_seq_one() -> None:
+    """Ordering check: the message an operator can act on must win.
+
+    A superseded publisher's frames DO carry seq, so they reach the seq check
+    only if the proto gate let them past -- which it must not. Getting "no
+    seq" here would point the operator at the wrong problem entirely.
+    """
+    provider = TradeStationELProvider(endpoint="inproc://legacy-order")
+    legacy = {"v": 4, "kind": "tick", "seq": 1, "sid": 7001, "ts": TS, "px": 1.0}
+    with pytest.raises(ValueError, match="proto=None"):
+        provider._parse_payload("SPY", json.dumps(legacy).encode())

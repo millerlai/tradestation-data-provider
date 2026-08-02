@@ -397,6 +397,28 @@ class TradeStationELProvider:
                 f"with it."
             )
 
+        # `seq` is REQUIRED — both wire schemas say so and the conformance
+        # suite validates the fixtures against them, but nothing enforced it
+        # at runtime: `data.get("seq")` above skips silently when it is
+        # absent. A proto-1 frame without one then parsed normally, `sid`
+        # stayed None, `messages_lost` returned None forever, and the one-shot
+        # warning that used to say so was deleted with
+        # `_warned_no_gap_detection`. An operator running an alternate
+        # publisher — or a DLL build where `reserve_seq` regressed — collects
+        # a full day, reads a `messages_lost` of None as "nothing to report",
+        # and files it verified-complete while high-water-mark drops went
+        # uncounted. That is the conflation §6.6 exists to forbid.
+        #
+        # Checked here rather than beside observe() above so a superseded
+        # publisher's frame — which does carry seq — still gets the protocol
+        # message, which is the one its operator can act on.
+        if "seq" not in data:
+            raise ValueError(
+                f"proto {PROTO_VERSION} payload carries no 'seq'. Every frame in "
+                f"this protocol is sequenced; without it, loss cannot be detected "
+                f"and a clean-looking run would be unverifiable."
+            )
+
         kind = data.get("kind")
         if kind == "tick":
             return self._parse_tick(symbol, data)
