@@ -233,7 +233,7 @@ int __stdcall EL_Publish(
     double bid, double ask);
 ```
 
-Return codes: `0` success, `1` already initialized (idempotent re-init), `-1` not initialized, `-2` ZMQ send failed, `-3` init failed (bind / socket create), `-4` invalid argument, `-5` unmappable bar interval, `-6` ABI mismatch (tombstone).
+Return codes: `0` success, `1` already initialized (idempotent re-init), `-1` not initialized, `-2` ZMQ send failed, `-3` init failed (bind / socket create), `-4` invalid argument, `-6` ABI mismatch (tombstone).
 
 ### Why the tombstones exist
 
@@ -263,6 +263,6 @@ python contract/tools/record.py --latency
 cpp\Release\TS2Python_TestHarness.exe --mode stress --rate 10000 --seconds 10
 ```
 
-A successful harness exits with code `0` (no dropped sends). The subscriber should print ~100 000 `SPY`-topic messages and per-percentile latency stats. Other harness modes: `--mode smoke` (3 topics plus one bar), `--mode noquote`, `--mode bars` (every non-1m `tf` plus the `-5` refusal path), `--mode session`, `--mode multithread --threads 8 --per-thread 5000`. Each fixture's mode and frame count is tabulated in [`../contract/fixtures/README.md`](../contract/fixtures/README.md).
+A successful harness exits with code `0` (no dropped sends). The subscriber should print ~100 000 `SPY`-topic messages and per-percentile latency stats. Other harness modes: `--mode smoke` (3 topics plus one bar), `--mode noquote`, `--mode bars` (every `BarType`/`BarInterval` combination, none refused — including ones a `-5` mapping used to reject outright), `--mode session`, `--mode multithread --threads 8 --per-thread 5000`. Each fixture's mode and frame count is tabulated in [`../contract/fixtures/README.md`](../contract/fixtures/README.md).
 
 **Every run first asserts the ABI**: `EL_DllVersion() == 1`, and both tombstones returning `-6`, before any init. A check that only runs when someone remembers to run it is not a check.

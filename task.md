@@ -21,9 +21,9 @@ decision first. The two that do are tracked in `TODO_ISSUES.md` instead.
 | # | File | Defect | Status | Commit subject |
 |---|---|---|---|---|
 | T3 | `bindings/python/tests/test_history_store.py:7` | Regression test for "load_bars never derives from ticks" was deleted, no replacement | ✅ | `test(storage): restore the load_bars-never-derives regression test` |
-| T4 | `docs/architecture.md:498` | Table row contradicts the row above it on interval refusal | ⬜ | |
+| T4 | `docs/architecture.md:498` | Table row contradicts the row above it on interval refusal | ✅ | `docs(el): stop documenting the deleted refuse/idle chart-interval model` |
 | T5 | `EL/README.md:100`, `EL/README.zh-TW.md` | "Supported chart intervals" table still describes deleted refuse/idle/-5 model | ✅ | `docs(el): stop documenting the deleted refuse/idle chart-interval model` |
-| T6 | `cpp/README.md:236`, `cpp/README.zh-TW.md` | Still documents removed `-5 unmappable bar interval` return code | ⬜ | |
+| T6 | `cpp/README.md:236`, `cpp/README.zh-TW.md` | Still documents removed `-5 unmappable bar interval` return code | ✅ | `docs(cpp): drop the retired -5 return code from cpp/README` |
 | T7 | `bindings/python/src/tradestation_data/runtime/ingestion.py:42` | Class docstring still describes deleted Tick/Bar split | ⬜ | |
 | T8 | `bindings/python/tests/test_ingestion_runtime.py:118` | Comment still describes removed left-edge shift | ⬜ | |
 | T9 | `bindings/python/src/tradestation_data/sinks/callback.py:100` | Docstring has garbled duplicated `on_bar` fragment | ⬜ | |
