@@ -14,13 +14,13 @@ wire 上有兩個時間戳，用途**不可互換**：
 
 | 欄位 | 來源 | 正確用途 | 錯誤用途 |
 | --- | --- | --- | --- |
-| `ts_str` | EL 原始字串，逐字透傳 | **`bar_time` 的唯一權威來源**（每一種圖都是） | ❌ 當成有秒級解析度 |
-| `ts` | DLL 收訊端 wall clock（UTC epoch 秒） | 逐字落地為 `ts` 欄；延遲量測；**tick 圖上同一分鐘內各 frame 的唯一排序依據**；`ts_str` 缺席時的最後手段 | ❌ `bar_time` 的來源（缺席除外） |
+| `ts_str` | EL 原始字串，逐字透傳 | **`bar_time` 的唯一權威來源**（每一種圖都是）。**秒數是真的** —— publisher 用 `BarDateTime` 產生，見 §1.3 | ❌ 當成事件時間（它是 bar 的收盤時間，不是某一筆成交的時間） |
+| `ts` | DLL 收訊端 wall clock（UTC epoch 秒） | 逐字落地為 `ts` 欄；延遲量測；**同一個 `bar_time` 內多個 frame 的唯一排序依據**；`ts_str` 缺席時的最後手段 | ❌ `bar_time` 的來源（缺席除外） |
 
-**兩個都必須落地。** frame 只有一種形狀，`ts_str` 只有分鐘解析度 —— tick 圖
-（`bar_type` 0）一分鐘內的每一筆成交共用同一個 `bar_time`，把它們分開的資訊只在
-`ts` 裡。丟掉 `ts` 的 binding 存下的 tick 資料無法在分鐘內排序，而那正是舊協定
-tick 的事件時間。
+**兩個都必須落地。** `ts_str` 帶秒數，但那是 **bar 的收盤時間**，不是成交時間 ——
+tick 圖（`bar_type` 0）一秒內可以有多筆成交，它們共用同一個 `bar_time`，把它們分開
+的資訊只在 `ts` 裡。丟掉 `ts` 的 binding 存下的 tick 資料無法在同一秒內排序，而那
+正是舊協定 tick 的事件時間。
 
 ### 1.1 規則
 
@@ -28,8 +28,9 @@ tick 的事件時間。
   **`America/New_York` 時區**解析，再轉 UTC。
   - 必須用 IANA tz database 的 `America/New_York`，**不可用系統本地時區**，也不可用
     固定 UTC 偏移。DLL 主機的系統時區與此無關。
-  - 解析出來的就是 bar 的時間,**原樣使用**。EL 的 `Time` 是收盤時間,所以
-    `bar_time` 也是收盤時間 —— 不減、不對齊。要左緣標籤的消費端自己換算(§2)。
+  - 解析出來的就是 bar 的時間,**原樣使用**。EL 的 `BarDateTime` 是收盤時間,所以
+    `bar_time` 也是收盤時間 —— 不減、不對齊、**不歸零秒數**。要左緣標籤的消費端
+    自己換算(§2)。
 - **`ts_str` 缺席與解析失敗是兩種不同的狀態，binding 必須分開處理。**
 
   | 狀態 | 行為 | 為什麼 |
@@ -58,6 +59,35 @@ tick 的事件時間。
 若某個 binding 改用收訊時間作 bar 邊界，它與其他 binding 在 **DST 轉換日**會算出
 不同的 bucket。平常看不出來，一年錯兩天。
 
+### 1.3 `ts_str` 的秒數來自 `BarDateTime`，不是 `Time`
+
+**publisher 必須用 EasyLanguage 的 `BarDateTime` 保留字產生 `ts_str`，不可用
+`Date`/`Time`。** 這是實測出來的差異，不是風格選擇：
+
+| 保留字 | 解析度 | 30 秒圖（`BarType=14`, `BarInterval=30`）上的表現 |
+| --- | --- | --- |
+| `Date` / `Time` | **只有分鐘** | 相鄰兩根 bar 都回 `07:20:00` —— **撞名** |
+| `BarDateTime` | **有秒** | 同兩根回 `07:20:00` 與 `07:20:30` —— 正確區分 |
+
+> **實測（2026-08-03, live SPY）**：同一支 indicator 同時印兩者，`bar#1` 與 `bar#2`
+> 是兩根不同的、已收完的 bar。`Date`/`Time` 組出的字串兩根完全相同，
+> `BarDateTime.Format("%Y-%m/%d-%H:%M:%S")` 組出的字串正確相差 30 秒。
+>
+> TradeStation 官方對 `BarDateTime` 的說明：*"allows you to reference the current
+> date and time properties of the bar, **including seconds**"*。
+
+`BarDateTime` 回傳 `DateTime` 類別物件，`Format()` 直接產出本協定要的字串格式，
+補零正確，不需要手動組 `Hour`/`Minute`/`Second`。
+
+**成形中的 bar 不會漂移。** EL 的 "Update Every Tick" 會對同一根未收完的 bar 重複
+呼叫，實測（同上）在 `bar#10` 的 7 次、`bar#11` 的 8 次重算中，`BarDateTime` 每次
+都回同一個值 —— 一根成形中的 bar 被穩定標上它「將要收盤」的時間。binding 的
+intra-bar 緩衝（同 `bar_time` 視為同一根的更新）因此成立。
+
+> **不可用 `elsystem.DateTime.CurrentTime` / `.Now`。** 那兩個讀的是**電腦系統
+> 時鐘**，不是 bar 自己的時間 —— 用它們會重演 `ts` 在歷史回放時「整段塌成同一
+> 瞬間」的事故（見 §1.1 的拒收規則）。`BarDateTime` 是 bar-scoped，那才是對的。
+
 ---
 
 ## 2. Bar 的時間就是 publisher 給的時間
@@ -65,11 +95,11 @@ tick 的事件時間。
 **`bar_time` = `ts_str` 逐字解析的結果,不做任何位移或對齊。**
 
 ```
-EL 的 Time  →  ts_str  →  以 America/New_York 解析 → 轉 UTC → 秒歸零  →  bar_time
+EL 的 BarDateTime  →  ts_str  →  以 America/New_York 解析 → 轉 UTC  →  bar_time
 ```
 
-EasyLanguage 的 `Time` 是 bar 的**收盤**時間,所以 `bar_time` 也是收盤時間。想要左緣
-標籤(`[t, t+step)`)的消費端自己減 —— 那是消費端的事,不是這條傳輸鏈的事。
+EasyLanguage 的 `BarDateTime` 是 bar 的**收盤**時間,所以 `bar_time` 也是收盤時間。
+想要左緣標籤(`[t, t+step)`)的消費端自己減 —— 那是消費端的事,不是這條傳輸鏈的事。
 
 ### 2.0 為什麼不在這裡換成左標籤
 
@@ -129,20 +159,31 @@ template，所以這條規則不能省。
 > 右標籤的 bar 就這樣一路寫進了 Parquet。fixture 的職責是複現 publisher，不是
 > 複述 spec。
 
-### 2.1 `bar_time` 必須向下取整到分鐘
+### 2.1 `bar_time` 的秒數必須原樣保留
 
-解析 `ts_str` 得到 UTC 時間後，**秒與微秒一律歸零**。
+解析 `ts_str` 得到 UTC 時間後，**秒數照送、不得歸零**。`17:30:30` 就是 `17:30:30`。
 
-1 分鐘 bar 的 bucket 依定義是 `[分鐘邊界, +1min)`。若原樣保留秒數，`17:30:45` 起算的
-bucket 涵蓋 `[17:30:45, 17:31:45)`，那不是分鐘 bar，也無法與其他 bar 對齊。
+理由跟 §2 是同一條：publisher 給什麼就存什麼。秒級圖表（`BarType=14`）一分鐘內有
+多根不同的 bar，秒數正是唯一能分開它們的東西 —— 歸零會讓它們塌成同一個
+`bar_time`，被 binding 的 intra-bar 緩衝當成同一根的更新，**一分鐘只剩最後一根
+落地，其餘靜默消失**。
 
-EL 正常情況下送出的就是分鐘對齊的時間，所以取整通常是 no-op —— 但 **`test_harness`
-的 `--mode smoke` 會把 tick 的 `13:30:45` 直接沿用給 `EL_PublishBar`**，
-`smoke.jsonl` 因此正好涵蓋這個情境。
-
-> 這條規則原本只存在於 reference binding 的實作裡，本文件漏寫。是 conformance 測試
-> 比對手寫期望值時抓出來的 —— 照當時的規格實作，新 binding 會產出 `17:30:45Z`
-> 而非 `17:30:00Z`，與 reference binding 不一致。
+> **這條規則是反過來的 —— 本文件曾經要求「秒與微秒一律歸零」。**
+>
+> 當時的立論是：「1 分鐘 bar 的 bucket 依定義是 `[分鐘邊界, +1min)`，若原樣保留
+> 秒數，`17:30:45` **起算**的 bucket 涵蓋 `[17:30:45, 17:31:45)`，那不是分鐘 bar」。
+>
+> **那段話是用左邊界 bucket 模型寫的，而那個模型已經在 proto-2 重構裡被刪掉了**
+> —— §2 現在寫明 `bar_time` 是收盤時間、逐字落地，不是 bucket 起點。歸零規則活過
+> 了一次把它的立論基礎拆掉的重構，沒有人發現。
+>
+> 它當時也確實無害：publisher 用 `Date`/`Time` 產生 `ts_str`，那兩個保留字**根本
+> 沒有秒數**（§1.3），所以歸零永遠是 no-op。唯一會踩到的是 `test_harness`
+> 的 `--mode smoke` 把 tick 的 `13:30:45` 沿用給 bar frame —— 一個 harness 自己
+> 造出來的情境，真實 EL 不會這樣送。
+>
+> publisher 改用 `BarDateTime`（§1.3）之後，秒數變成真實資訊，歸零就從 no-op 變成
+> **資料遺失**。規則必須跟著反轉。
 
 ### 2.3 讀取端的時區語意：對外一律 ET，UTC 只是內部絕對時間
 

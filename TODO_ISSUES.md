@@ -14,7 +14,7 @@ separately from `task.md`, which covers the nine findings that are.
 
 **Files:** `EL/TS2Python_Exporter.el:231`, `bindings/python/src/tradestation_data/runtime/ingestion.py:278`
 
-**Status:** ⬜ blocked on a direction choice
+**Status:** 🔄 real fix identified (rewrite `TS2Python_Exporter.el` to use `BarDateTime` instead of `Date`/`Time`) — confirming two remaining pieces via a live probe before writing it: `BarDateTime.Format()` behavior, and mid-formation (refire) behavior
 
 ### The problem
 
@@ -65,6 +65,107 @@ intervals" table now carries the same warning (T5's fix). Still missing:
 is a much smaller lift than originally scoped here. The Python-side data loss
 itself (`ingestion.py:278`) is unchanged and still needs (a)/(b)/(c) decided.
 
+**Update (2026-08-03, real `BarType` values measured live):** the user
+supplied TradeStation's actual `BarType` enum (0=TickBar, 1=Minute, 2=Daily,
+3=Weekly, 4=Monthly, 5=Point&Figure, 8=Kagi, 9=Kase, 10=Line Break,
+11=Momentum, 12=Range, 13=Renko, 14=Second, 15=Renko Custom, 16=Renko Mean)
+and a live log showing a 30-second chart reports `BarType=14, BarInterval=30`
+— **not** `BarType=1` like a real minute chart. The "wire-indistinguishable
+from a 1-minute chart" framing above is wrong for this case: `bar_type`
+already, verbatim, tells the two apart. The collision that remains is
+narrower than originally scoped — it is two DIFFERENT closed bars *within
+the same* `bar_type=14` series sharing one minute-floored `bar_time`, not an
+ambiguity between series.
+
+Also ruled (a) out **on principle, not just cost**: this project reads
+whatever TradeStation exports verbatim and does not build an inference layer
+to guess meaning it wasn't given (an OHLC/volume-monotonicity heuristic was
+proposed and rejected on exactly this basis — see the `feedback-
+verbatim-no-assumptions` project memory). (a) is dead.
+
+**Update (2026-08-03, live probe run — `EL/Probe_TimePrecision_And_B1.el`):**
+ran the probe on a `BarType=14/BarInterval=30` chart (historical replay,
+2026-07-31 19:55–20:00 ET) and a `BarType=1/BarInterval=1` chart.
+
+- **Q1 answered: NO, `Time` carries no sub-minute precision, even on
+  `BarType=14`.** Direct proof: two consecutive, distinct closed bars
+  (`bar#=2`, `bar#=3`, both `newbar=Y`) produced the identical formatted
+  close `2026-07/31-19:56:00`. This is not a Python-side artifact —
+  `FormatTime("HH:mm:ss", ElTimeToDateTime(Time))` has nothing but `:00`
+  seconds to show, because `Time` itself is minute-resolution on this chart
+  type. This rules out "stop flooring in `_parse_el_str_as_et`" as a fix —
+  there is no seconds precision to preserve; `el_subscriber.py:523`'s
+  `.replace(second=0, microsecond=0)` is a no-op here, not the cause.
+- **Q2 (B1) strongly supported, one gap remains.** Every transition in both
+  logs has `prev` on line N+1 exactly equal to `now` on line N — including
+  the `bar#=2`→`bar#=3` case where the two bars' own `now` values collide.
+  `Time[1]`/`Date[1]` correctly tracks "the immediately preceding bar's own
+  close," in lockstep with `CurrentBar`, even across a minute-resolution
+  collision and across real data gaps (quiet periods with no bar at all).
+  **Gap:** every logged call was `newbar=Y` — this run was a historical
+  replay (chart load), which fires once per already-closed bar regardless of
+  "Update Every Tick." Not yet observed directly: whether `Time[1]` holds
+  perfectly steady across `newbar=N` refire calls for a bar still forming
+  live. Live confirmation planned for the 2026-08-03 US market open
+  (`BarType=14/BarInterval=30`, SPY, Update Every Tick genuinely on,
+  real-time not history).
+
+**Revised recommendation (superseded by the update below):** (b) was the
+confirmed direction, converging with I2 via `Time[1]`/`Date[1]`
+(`ts_str_prev`). Kept for the record — see below for why an even more
+direct fix looks available.
+
+**Update (2026-08-03, `ELSystem.DateTime.BarDateTime` researched and
+measured):** the user pointed out that TradeStation's `elsystem` object
+model exposes date/time with real precision, and asked specifically about
+`ELSystem.DateTime`. Research + a live probe run found something better
+than `ts_str_prev`:
+
+- **`BarDateTime` (a reserved word returning a `DateTime`-class object,
+  `BarDateTime[BarsAgo].FieldName`) is documented by TradeStation itself as
+  giving "the current date and time properties of the bar, INCLUDING
+  SECONDS"** — a different reserved word from the classic `Date`/`Time`
+  this script and `TS2Python_Exporter.el` both use. `Date`/`Time` are
+  genuinely minute-resolution (Q1, confirmed above); `BarDateTime` is not.
+- **Confirmed live** (`EL/Probe_TimePrecision_And_B1.el`,
+  `BarType=14/BarInterval=30`): `bar#=1` printed `bdt_now=19:41:00`,
+  `bar#=2` (a different closed bar) printed `bdt_now=19:41:30` — exactly
+  where the classic-`Time`-based column collided (`19:41:00` for both).
+  `BarDateTime[1]` also tracked the true previous bar correctly across
+  every transition in the log, same as `Time[1]` did.
+- Important distinction found during research: **do not confuse this with
+  `elsystem.DateTime.CurrentTime`/`.Now`** — those read the computer's wall
+  clock, not the bar's own time, and would reintroduce the exact
+  "historical replay collapses onto one instant" bug `ts` already has.
+  `BarDateTime` is bar-scoped; `CurrentTime`/`Now` are clock-scoped.
+
+**This changes the fix entirely.** If `BarDateTime` behaves correctly
+mid-formation (still being confirmed — see below), the real fix is:
+**rewrite `TsStr` in `TS2Python_Exporter.el` to build from `BarDateTime`
+instead of `Date`/`Time`.** No Python buffer change. No wire/ABI bump —
+`TsStr`'s wire format (`"yyyy-MM/dd-HH:mm:ss"`) already has a seconds field;
+it would just start carrying a real value, and `bar_time` would become
+genuinely unique per closed bar without any disambiguation logic at all.
+This would make I1 independent of I2/Phase 2's B1–B3 entirely — no need to
+wait on `ts_str_prev`.
+
+**Two things confirmed still needed before writing that change** (probe
+already extended to test both, live run pending — see "Next step"):
+1. Does `BarDateTime.Format("%Y-%m/%d-%H:%M:%S")` work directly (it's a
+   `DateTime`-class object, and `Format()` is documented on that class), or
+   does `TsStr` need to be built by hand from `Hour`/`Minute`/`Second` with
+   manual zero-padding?
+2. What does `BarDateTime` read **mid-formation**, during an "Update Every
+   Tick" refire call for a bar that has not actually closed yet? Every run
+   so far has been historical replay (every line `newbar=Y`), which never
+   exercises a refire regardless of the Update Every Tick setting. This is
+   the same gap Q2 already had for `Time[1]`, now doubled for `BarDateTime`
+   too — needs a genuinely live, currently-forming bar to observe.
+
+(a) remains ruled out on principle (see above). (c) (the documented
+limitation in `EL/README.md`) stays true and harmless regardless of which
+fix lands — it just may end up describing a limitation that gets lifted.
+
 ---
 
 ## I2 — `verify_parquet.py` / `imputation_parquet.py` expected-bar grid is wrong for session-restarting intervals
@@ -110,10 +211,37 @@ can be written once, correctly.
 here would be thrown away once the wire carries the true segment boundary —
 better to spend that effort once, on the real fix, than twice.
 
+**Cross-reference (2026-08-03):** the probe run investigating I1 (see I1's
+updates above) produced first-hand evidence for this document's B1 question
+too — `Time[1]`/`Date[1]` correctly tracked the previous bar's close across
+every transition observed, including a minute-resolution collision and real
+data gaps. One gap remains (live "Update Every Tick" refire behavior, not
+yet observed — historical replay only fires once per bar). Live confirmation
+planned for the 2026-08-03 market open. If it holds, B1 in
+`docs/plan-bar-start-on-wire.md` may be answerable from this evidence, and
+Phase 2's `ts_str_prev` would unblock I1 and I2 together with one field.
+
 ---
 
 ## Next step
 
-Reply with a direction for I1 (a/b/c) and whether you want the I2 interim
-mitigation now or to wait for Phase 2's B1–B3. Both get their own commit(s)
-once decided; neither blocks `task.md`.
+**Run `EL/Probe_TimePrecision_And_B1.el` LIVE (not replay), during market
+hours, on the `BarType=14/BarInterval=30` SPY chart, with "Update Every
+Tick" confirmed on.** Every run so far has been historical replay (every
+line `newbar=Y`) — replay already conclusively answered Q1 and Q1b, but
+can't exercise a refire. What's still needed:
+
+1. `fmt_now`/`fmt_prev` (`BarDateTime.Format(...)`) — does it work cleanly,
+   or does `TsStr` need manual zero-padding from `Hour`/`Minute`/`Second`?
+2. At least one `bar#` with several consecutive `newbar=N` lines — confirms
+   whether `BarDateTime`/`Time[1]` hold steady across refires of a bar still
+   forming (this is I1's `BarDateTime` fix AND the original B1 question,
+   both closed by the same capture).
+
+Once that's in hand, the path looks like: rewrite `TsStr` in
+`TS2Python_Exporter.el` to build from `BarDateTime`, fully independent of
+I2/Phase 2. Reply once you have that capture, or if you'd rather I draft the
+`TS2Python_Exporter.el` change now on the replay evidence alone (I'd rather
+not — mid-formation behavior is the one thing that could still surprise
+us). I2 stays parked on Phase 2's B1–B3 either way — unrelated to this
+fix. Neither blocks `task.md`, which is already done.
