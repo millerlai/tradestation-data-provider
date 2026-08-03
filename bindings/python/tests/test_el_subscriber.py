@@ -233,6 +233,12 @@ async def test_bar_absent_ts_str_falls_back_but_says_so(zmq_inproc_bus, caplog) 
     sent no string. It requires the binding to record it, because an operator
     seeing this on every frame is watching a publisher that will collapse any
     replay onto a single bucket.
+
+    The fallback keeps its seconds, like the `ts_str` path does. It used to
+    floor them away, matching the old §2.1 — which after that rule reversed
+    would have left the two paths disagreeing, and in the worse direction:
+    flooring is what collapses a sub-minute chart onto one `bar_time` per
+    minute for the buffer to then discard.
     """
     provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
     frame = _frame(ts=datetime(2026, 4, 18, 13, 31, 12, tzinfo=UTC).timestamp())
@@ -244,7 +250,7 @@ async def test_bar_absent_ts_str_falls_back_but_says_so(zmq_inproc_bus, caplog) 
         event = await asyncio.wait_for(anext(gen), timeout=1.0)
 
     assert isinstance(event, Bar)
-    assert event.bar_time == datetime(2026, 4, 18, 13, 31, 0, tzinfo=UTC)
+    assert event.bar_time == datetime(2026, 4, 18, 13, 31, 12, tzinfo=UTC)
     assert any("ts_str_absent_using_recv_clock" in r.message for r in caplog.records)
 
     await gen.aclose()

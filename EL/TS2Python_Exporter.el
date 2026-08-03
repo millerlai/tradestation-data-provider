@@ -36,33 +36,36 @@
   vocabulary. Guessing here would file 5-minute bars under the 1-minute
   partition, which nothing downstream can detect.
 
-  SUB-MINUTE AND AGGREGATED-TICK CHARTS ARE DETECTED AND LOGGED — publishing
-  CONTINUES. A second-based chart reports BarType = 1 with BarInterval = 1
-  exactly like a 1-minute chart, and TsStr has minute resolution, so its
-  bars land with minute-shaped timestamps; an N-tick chart's frames each
-  carry a whole aggregated bar. Both used to stop publishing here — this
-  script deciding the data was not worth sending. Now each is announced
-  once in the Print Log, bar_type/bar_interval travel on every frame so a
-  consumer can see what the chart was, and the wire's receive-side ts is
-  what separates same-minute frames.
+  SUB-MINUTE CHARTS ARE FULLY SUPPORTED, and the detection below is now only
+  informational. TsStr is built from BarDateTime, which carries real seconds
+  (contract/semantics.md §1.3), so a 30-second chart's adjacent bars go out as
+  07:20:00 and 07:20:30 — distinct, and the subscriber stores both.
 
-  What survives is the repetition: on a minute chart Date and Time advance every
-  bar; on a sub-minute chart consecutive bars share both. This script latches on
-  that and says so ONCE — it does not stop publishing.
+  This was NOT always true, and the cost was silent. While TsStr came from
+  Date/Time — reserved words with no seconds at all — both bars formatted as
+  "07:20:00", the subscriber's intra-bar buffer read the second as an update
+  of the first, and a 30-second chart kept one bar per minute. Nothing raised.
+  Measured live on SPY 2026-08-03; the fix was to change the reserved word,
+  not to add a rule about which charts are allowed.
 
-  Know what that costs before attaching one. A sub-minute chart reports
-  BarType 1 / BarInterval 1, exactly like a 1-minute chart, and TsStr has
-  minute resolution — so the wire cannot tell the two apart, and the
-  subscriber cannot either. Its buffer treats same-bar_time frames as
-  refinements of one bar (which is right for a 1-minute chart in "update
-  every tick" mode) and will coalesce a sub-minute chart's distinct bars
-  into one point per minute. The raw frames are on the wire and `ts`
-  separates them, but the reference binding's stored rows will not.
-  Use a tick chart (BarType 0, which the subscriber forwards print by
-  print) or a minute chart. The test needs no version-specific constant, unlike
-  BarType_ext — whose values differ across TS releases and have never been
-  checked against a live install here. To pin those down, Print(BarType_ext) on
-  a known 1-minute chart and on a known 1-second one.
+  A second-based chart reports BarType = 14 (TradeStation's own value for
+  Second bars) with BarInterval = the seconds per bar — NOT BarType = 1 like
+  a minute chart, as an earlier version of this comment claimed without
+  measuring. Both numbers travel on every frame, so a consumer can always see
+  what the chart was.
+
+  AGGREGATED-TICK CHARTS ARE DETECTED AND LOGGED — publishing CONTINUES.
+  An N-tick chart's frames each carry a whole aggregated bar. It used to stop
+  publishing here — this script deciding the data was not worth sending. Now
+  it is announced once in the Print Log and bar_interval says N on the wire.
+
+  What the sub-minute latch below still detects is the repetition of the OLD
+  Date/Time pair, which remains minute-resolution. That is no longer a
+  data-loss warning — it is a note that this chart is finer than a minute.
+  It needs no version-specific constant, unlike BarType_ext — whose values
+  differ across TS releases and have never been checked against a live
+  install here. To pin those down, Print(BarType_ext) on a known 1-minute
+  chart and on a known 1-second one.
 
   Zero state. All symbol/value plumbing comes from TS built-ins at runtime,
   so one compiled indicator covers every chart.
@@ -171,29 +174,30 @@ If Enabled and InitDone = False Then Begin
     End;
 End;
 
-{ -- Sub-minute chart guard. Runs before the publish block, so the bar that
-     reveals the chart is itself never sent.
+{ -- Sub-minute chart note. INFORMATIONAL ONLY — nothing downstream depends
+     on it, and no data is at risk either way.
 
-     BarType and BarInterval cannot separate a 1-second chart from a 1-minute
-     one — both can read 1 and 1. The bar times can: Date and Time advance on
-     every bar of a minute chart, and repeat within a minute on a sub-minute
-     one. Tick charts (BarType = 0) legitimately produce many prints per minute
+     The old Date/Time pair still has minute resolution, so on a chart finer
+     than a minute, consecutive bars repeat it. TsStr no longer comes from
+     those two (it comes from BarDateTime, which has real seconds), so this
+     repetition no longer means the bars will collide on the wire — it just
+     means the chart is sub-minute, which is worth one line in the log.
+
+     Tick charts (BarType = 0) legitimately produce many prints per minute
      and are excluded.
 
-     Latching is deliberate. Once a chart has shown itself to be sub-minute it
-     does not become minute-based later, and a chart that goes quiet must not
-     silently resume publishing. }
+     Latching keeps it to one line per chart. }
 If Enabled and InitDone and SubMinuteChart = False
-   and BarType = 1 and CurrentBar > 1
+   and BarType <> 0 and CurrentBar > 1
    and Date = Date[1] and Time = Time[1] Then Begin
     SubMinuteChart = True;
     If LogErrors Then
-        Print("[TS2Python] sub-minute chart detected on symbol=", GetSymbolName,
-              " — two consecutive bars share date=", Date, " time=", Time, ".",
-              " ts_str has minute resolution, so two prints inside one minute",
-              " carry the same string; the DLL's receive-side ts is what",
-              " separates them. Publishing continues — refusing would be",
-              " this script deciding the data is not worth sending.");
+        Print("[TS2Python] sub-minute chart on symbol=", GetSymbolName,
+              " — two consecutive bars share the minute-resolution",
+              " date=", Date, " time=", Time, ", so this chart is finer",
+              " than a minute. ts_str carries real seconds from BarDateTime,",
+              " so those bars are still distinct on the wire.",
+              " bar_type=", BarType, " bar_interval=", BarInterval);
 End;
 
 { -- Aggregated tick chart guard. Same shape as the sub-minute one, and for
@@ -234,25 +238,42 @@ If Enabled and InitDone and VersionMismatch = False Then Begin
       read — TradeStation's own requirement. Goes out verbatim; this
       script never branches on it. }
     Cat = Category;
-    { Bar-time string "yyyy-MM/dd-HH:mm:ss" 24-hour (e.g. "2026-04/18-13:30:45").
+    { Bar-time string "yyyy-MM/dd-HH:mm:ss" 24-hour (e.g. "2026-04/18-13:30:30").
       Goes on the wire verbatim as ts_str. The authoritative wall-clock ts is
       stamped by the DLL; this string is what the subscriber derives the bar's
-      bucket from, and the DLL no longer parses it at all.
+      time from, and the DLL no longer parses it at all.
+
+      BarDateTime, NOT Date/Time. Those two reserved words carry NO SECONDS —
+      measured live on SPY 2026-08-03, a BarType=14/BarInterval=30 chart gave
+      two adjacent, distinct, already-closed bars the SAME "07:20:00" through
+      Date/Time, and the correct "07:20:00" / "07:20:30" through BarDateTime.
+      TradeStation documents BarDateTime as carrying "the current date and
+      time properties of the bar, including seconds"; it returns a DateTime
+      object whose Format() emits this protocol's string directly, correctly
+      zero-padded, with no manual NumToStr assembly.
+
+      A collided timestamp is not a cosmetic problem: the subscriber's
+      intra-bar buffer treats two frames sharing a bar_time as two updates of
+      ONE forming bar, so a 30-second chart lost every bar but the last of
+      each minute, silently. contract/semantics.md §1.3 has the measurement.
+
+      DO NOT substitute elsystem.DateTime.CurrentTime / .Now. Those read the
+      HOST'S CLOCK rather than this bar's own time, which is exactly the
+      "historical replay collapses onto one instant" failure that `ts` already
+      has and that ts_str exists to avoid. BarDateTime is bar-scoped.
 
       24-hour format is deliberate: the AM/PM designator ("tt") is locale-
       dependent on Windows — a zh-TW TradeStation host emits "上午"/"下午",
       which breaks both the DLL sscanf path and the Python strptime path,
       silently collapsing every bar onto today's receive-time minute.
 
-      Time IS THE BAR'S CLOSE, so TsStr is right-labelled: the first RTH
+      BarDateTime IS THE BAR'S CLOSE, so TsStr is right-labelled: the first RTH
       1-minute bar goes out as 09:31, not 09:30. That is left as-is on
       purpose — the wire carries EL's raw fact and each binding converts to
       the contract's left label itself (contract/semantics.md §2). Shifting
       it here would change the meaning of the wire without any binding
       knowing, which is the one thing this transport must never do. }
-    TsStr = FormatDate("yyyy-MM/dd", ELDateToDateTime(Date))
-          + "-"
-          + FormatTime("HH:mm:ss", ElTimeToDateTime(Time));
+    TsStr = BarDateTime.Format("%Y-%m/%d-%H:%M:%S");
 
     { Volume, Ticks, UpTicks, DownTicks and OpenInt all go out VERBATIM, one
       wire field each, named after the reserved word that produced them.

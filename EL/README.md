@@ -105,16 +105,19 @@ Every chart type is forwarded — there is no refusal and no idle state.
 | 1 / 5 / 15 / 30 / 60 minute and any other intraday interval (`BarType = 1`) | full OHLC sent, `bar_type`/`bar_interval` travel verbatim |
 | Daily (`BarType = 2`, `BarInterval = 0` or `1`) | full OHLC sent. TradeStation 10 reports `0` here — `1` is accepted too, because that is what the ABI documented before a live install was measured |
 | Weekly / monthly / P&F / any other bar type | forwarded the same way; `bar_type` names it, nothing maps or rejects it |
-| Sub-minute / sub-second chart (`BarType = 1`, two consecutive bars sharing one minute-resolution `Date`/`Time`) | detected and logged once, publishing continues — **see the caveat below** |
+| Second chart (`BarType = 14`, `BarInterval` = seconds per bar) | fully supported — `TsStr` carries real seconds, so a 30-second chart's `07:20:00` and `07:20:30` bars stay distinct. Detected and logged once, publishing continues |
 
-> **A sub-second chart is wire-indistinguishable from a 1-minute chart.** Both
-> report `BarType = 1`, and `TsStr` only has minute resolution. The reference
-> Python binding treats two frames sharing a `bar_time` as refinements of one
-> forming bar — correct for a real 1-minute chart under "Update Every Tick" —
-> so it currently coalesces a genuinely sub-minute chart's distinct bars down
-> to one per minute. Use a tick chart (`BarType = 0`, forwarded print by print)
-> for sub-second data; see the exporter's header comment for the full
-> explanation.
+> **This was broken until 2026-08-03, and the failure was silent.** `TsStr` was
+> built from EL's `Date`/`Time`, which carry no seconds — so both bars above
+> formatted as `07:20:00`, the reference binding's intra-bar buffer read the
+> second as a refinement of the first (correct behaviour for a real 1-minute
+> chart under "Update Every Tick"), and a 30-second chart stored one bar per
+> minute. Nothing raised.
+>
+> The publisher now uses `BarDateTime`, which TradeStation documents as
+> carrying seconds, and the binding no longer floors them away. If you are
+> running an older `.ELD` or an older binding, sub-minute charts still lose
+> data — upgrade both. `contract/semantics.md` §1.3 has the measurement.
 
 ### Why all five quantity words go out, and none is chosen for you
 
@@ -151,51 +154,58 @@ inversion is still a fact; it is now a table the consumer reads
 decision this file makes on their behalf. A consumer who wants total share
 volume takes `el_ticks` intraday and `el_volume` on daily.
 
-`OpenInt` is included for completeness. It is 0 on stocks and ETFs and only
-means anything on futures and options.
+`OpenInt` is NOT open interest on an intraday chart. Measured live on SPY,
+`@ES`, `VXX` and an SPY option (2026-08-02), and on every partition collected
+since: **`el_open_interest` equals `el_downticks` on every intraday row,
+whatever the category** — futures included, where real open interest would be
+orders of magnitude larger. Open interest only appears on daily bars and up,
+and there it is `DownTicks` that carries it. Two inversions, not one; both are
+tabulated in [`../contract/semantics.md`](../contract/semantics.md) §3.4.
 
-### Why an N-tick chart is refused
+### What an N-tick chart actually sends
 
 A tick series is one print per call only when `BarInterval = 1`. On a 100-tick
 chart each call carries a finished bar: `Close` is the last of the hundred
 prints, and the volume words cover all hundred under the intraday rule above —
 `Ticks` their total share volume, `Volume` the up-tick part. Neither reports
-`100`; EL has no count intraday. `bar_interval` now travels on the wire and says the call
-is a bar either, so Tier 1 would store it as **one trade priced at the last
-print and carrying a hundred prints' volume** — wrong by about two orders of
-magnitude in the volume column, with nothing downstream able to notice.
+`100`; EL has no count intraday.
 
-Unlike the second-based case, the information needed to detect this survives:
-`BarInterval` says exactly how many prints went into the call. Measured on a
-live install — a 100-tick chart reports `bar_interval=100.00` at init and
-`Ticks = 760951` (the hundred prints' share volume, not `100`), while a 1-tick
-chart reports `1.00` and calls `EL_Publish` once per print.
+**Nothing is refused.** `bar_interval` travels on the wire and says exactly how
+many prints went into the call, so a consumer can see what it is holding. The
+indicator used to stop publishing on these charts, back when the tick frame had
+no field able to say the call was an aggregate — a consumer would then have
+stored it as one trade priced at the last print but carrying a hundred prints'
+volume, wrong by two orders of magnitude with nothing able to notice. The field
+exists now, so the decision belongs downstream. It is still announced once in
+the Print Log.
 
-Note this also means `TsStr` cannot separate the prints inside one minute: a
-1-tick chart happily emits eight calls all stamped `19:48:00`, because `Time`
-has minute resolution. What separates them is the DLL's receive-side `ts`,
-which is why [`../contract/semantics.md`](../contract/semantics.md) §1 makes
-that — not `ts_str` — the tick's authoritative time.
+Measured on a live install: a 100-tick chart reports `bar_interval=100.00` at
+init and `Ticks = 760951` (the hundred prints' share volume, not `100`), while
+a 1-tick chart reports `1.00` and calls `EL_Publish` once per print.
 
-### Why second-based charts need their own guard
+Note this also means `TsStr` cannot separate the prints inside one **second**:
+a 1-tick chart emits many calls stamped with the same second. What separates
+them is the DLL's receive-side `ts`, which is why
+[`../contract/semantics.md`](../contract/semantics.md) §1 makes that — not
+`ts_str` — the tick's authoritative ordering.
 
-`BarType` and `BarInterval` **cannot tell** a 1-second chart from a 1-minute one —
-both can report `1` / `1`. Sent as minutes, those bars would land in the
-`bartype=1/interval=1/` partition and be undetectable downstream: `TsStr` is built
-from `Time`, and `Time` has minute resolution, so **the seconds are gone before
-they ever leave the indicator**.
+### Second-based charts: what the guard is, and is not
 
-The guard depends on no version-specific constant. On a minute chart, `Date` /
-`Time` advance on every bar; on a second-based chart they repeat within the same
-minute. When the indicator sees two consecutive bars with identical `Date` and
-`Time` (and `BarType = 1`, which excludes a tick series, where several prints per
-minute are normal), it latches and stops sending.
+`BarType` **does** tell a second-based chart from a minute one: TradeStation
+reports `BarType = 14` for a Second chart, with `BarInterval` in seconds.
+An earlier version of this file claimed both reported `1` / `1` and were
+indistinguishable — that was written without measuring, and it is wrong.
 
-> TradeStation also exposes `BarType_ext`, which does distinguish second-based
-> from minute-based intraday — but its values differ between versions and have not
-> been confirmed against a real installation, so it is **not** used as the test.
-> To pin those values down: `Print(BarType_ext)` once on a known 1-minute chart
-> and once on a 1-second chart.
+The sub-minute latch in the indicator is now **informational only**. It fires
+when two consecutive bars repeat the same minute-resolution `Date` / `Time`,
+which tells you the chart is finer than a minute — but that no longer implies
+anything is lost, because `TsStr` is built from `BarDateTime` and carries real
+seconds. It does not stop publishing, and never should have.
+
+> TradeStation also exposes `BarType_ext`. Its values differ between versions
+> and have not been confirmed against a real installation, so nothing here uses
+> it. To pin those values down: `Print(BarType_ext)` once on a known 1-minute
+> chart and once on a 1-second chart.
 
 ## Design constraints
 
@@ -208,8 +218,10 @@ minute are normal), it latches and stops sending.
   symbols) they return 0, and the DLL normalises that to JSON `null` — in one
   place in the C ABI, so that every EL caller agrees. See
   [`../contract/semantics.md`](../contract/semantics.md) §3.1.
-  **Ticks only.** Bars carry no quote: a live-quote function describes the
-  moment of the call, which on a bar is its last print, not the bar.
+  **They travel on every point, bars included.** Bars used to carry no quote,
+  on the grounds that a live-quote function describes the moment of the call
+  rather than the bar. That is true, and it is not this transport's call to
+  make — the same reasoning that removed the hard-coded index-symbol list.
 - The five quantity words are forwarded without conversion or selection. Any
   interpretation of them belongs to the consumer.
 

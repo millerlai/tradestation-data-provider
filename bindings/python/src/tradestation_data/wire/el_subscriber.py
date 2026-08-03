@@ -442,7 +442,7 @@ class TradeStationELProvider:
                 "ts_str_absent_using_recv_clock",
                 extra={"symbol": symbol},
             )
-            bar_time = _floor_to_minute_utc(float(data["ts"]))
+            bar_time = _recv_clock_utc(float(data["ts"]))
 
         # The timestamp is EasyLanguage's, verbatim. Nothing here shifts it or
         # snaps it to a grid — see the Bar docstring and semantics.md §2 for
@@ -495,16 +495,34 @@ def _quote_or_none(value: object) -> float | None:
     return q
 
 
-def _floor_to_minute_utc(epoch_seconds: float) -> datetime:
-    ts = datetime.fromtimestamp(epoch_seconds, tz=UTC)
-    return ts.replace(second=0, microsecond=0)
+def _recv_clock_utc(epoch_seconds: float) -> datetime:
+    """The `ts_str`-absent fallback: the receive clock, seconds and all.
+
+    This used to floor to the minute, matching the old §2.1. Keeping that
+    after §2.1 reversed would make the two paths answer the same question
+    differently — and in the worse direction: on a sub-minute chart,
+    flooring is what collapses a minute's bars onto one `bar_time`, which
+    is exactly what `_handle_provider_bar`'s buffer then reads as an
+    intra-bar update and drops. The fallback is degraded already; there is
+    no reason to degrade it further.
+    """
+    return datetime.fromtimestamp(epoch_seconds, tz=UTC)
 
 
 def _parse_el_str_as_et(s: str) -> datetime | None:
-    """Parse EL TsStr ``yyyy-MM/dd-HH:mm:ss`` (24-hour) as ET, return
-    UTC-aware datetime floored to the minute. Returns None on any parse
+    """Parse EL TsStr ``yyyy-MM/dd-HH:mm:ss`` (24-hour) as ET, return a
+    UTC-aware datetime — **seconds included**. Returns None on any parse
     failure — the caller refuses the frame rather than substituting a
     guess. DST is resolved by ZoneInfo from the parsed local fields.
+
+    The seconds used to be floored to zero here (semantics.md §2.1, since
+    reversed). That was a no-op for as long as the publisher built TsStr
+    from EL's ``Date``/``Time``, which carry no seconds at all — but the
+    publisher now uses ``BarDateTime``, which does. Flooring a real value
+    would collapse a 30-second chart's two bars per minute onto one
+    ``bar_time``, and ``_handle_provider_bar`` would then read the second
+    as an intra-bar update of the first and drop it. semantics.md §1.3
+    has the live measurement.
 
     24-hour format is deliberate: the prior ``hh:mm:ss tt`` format broke
     on zh-TW Windows hosts where ``FormatTime("tt")`` emits localized
@@ -519,8 +537,7 @@ def _parse_el_str_as_et(s: str) -> datetime | None:
         return None
     aware_et = local.replace(tzinfo=_ET_TZ)
     _warn_if_dst_ambiguous(aware_et, s)
-    utc_dt = aware_et.astimezone(UTC)
-    return utc_dt.replace(second=0, microsecond=0)
+    return aware_et.astimezone(UTC)
 
 
 def _warn_if_dst_ambiguous(aware_et: datetime, raw: str) -> None:

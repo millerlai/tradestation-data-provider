@@ -115,8 +115,8 @@ async def test_runtime_preserves_published_bar_ohlc(
     assert bar.low == pytest.approx(449.80)
     assert bar.close == pytest.approx(450.40)
     assert bar.el_volume == 12000
-    # ts 13:30:30 floors to 13:30 and lands verbatim — bar_time is the
-    # wire's close time, with no shift and no grid snap.
+    # ts_str "09:30:00" ET lands verbatim as 13:30:00 UTC — bar_time is the
+    # wire's close time, with no shift, no grid snap and no second dropped.
     assert bar.bar_time == datetime(2026, 4, 20, 13, 30, 0, tzinfo=UTC)
 
     # Snapshot accepted the bar.
@@ -173,15 +173,41 @@ async def test_runtime_replaces_intra_bar_updates_and_drops_stale_bars(
     await asyncio.sleep(0)
 
     ts_el_1 = datetime(2026, 4, 20, 13, 30, 0, tzinfo=UTC).timestamp()
-    # Three intra-bar refreshes for bucket 13:30 — close/high/volume grow.
-    await _publish(pub, "SPY", _bar_payload(ts_el_1 + 5, (450.10, 450.20, 450.05, 450.15), 3000))
-    await _publish(pub, "SPY", _bar_payload(ts_el_1 + 30, (450.10, 450.50, 450.05, 450.45), 8000))
-    await _publish(pub, "SPY", _bar_payload(ts_el_1 + 55, (450.10, 450.75, 449.80, 450.40), 12000))
-    # bar_time is the verbatim close, so these three refreshes all land on
-    # 13:30. The next payload's bar_time (13:31) is a new bucket: it closes
-    # and emits the buffered 13:30 bar, then buffers itself.
+    # Three intra-bar refreshes of ONE forming bar — close/high/volume grow.
+    #
+    # All three carry the SAME ts_str, because that is what EL does: measured
+    # live (semantics.md §1.3), BarDateTime holds steady across every "Update
+    # Every Tick" refire of a bar that has not closed. Only `ts`, the DLL's
+    # receive clock, advances. The refreshes used to be written with three
+    # different ts_str seconds and relied on the binding flooring them
+    # together — that flooring is gone, and with it a test that only passed
+    # by sending something the publisher never sends.
+    bar_1_close = "2026-04/20-09:30:00"  # ET; 13:30 UTC
+    await _publish(
+        pub,
+        "SPY",
+        _bar_payload(ts_el_1 + 5, (450.10, 450.20, 450.05, 450.15), 3000, ts_str=bar_1_close),
+    )
+    await _publish(
+        pub,
+        "SPY",
+        _bar_payload(ts_el_1 + 30, (450.10, 450.50, 450.05, 450.45), 8000, ts_str=bar_1_close),
+    )
+    await _publish(
+        pub,
+        "SPY",
+        _bar_payload(ts_el_1 + 55, (450.10, 450.75, 449.80, 450.40), 12000, ts_str=bar_1_close),
+    )
+    # A new bar_time (13:31) closes and emits the buffered 13:30 bar, then
+    # buffers itself.
     ts_el_2 = datetime(2026, 4, 20, 13, 31, 0, tzinfo=UTC).timestamp()
-    await _publish(pub, "SPY", _bar_payload(ts_el_2 + 1, (450.40, 450.60, 450.30, 450.55), 5000))
+    await _publish(
+        pub,
+        "SPY",
+        _bar_payload(
+            ts_el_2 + 1, (450.40, 450.60, 450.30, 450.55), 5000, ts_str="2026-04/20-09:31:00"
+        ),
+    )
 
     for _ in range(200):
         if len(observed) >= 1 and runtime._counters.bars_direct_updated >= 2:
@@ -199,7 +225,11 @@ async def test_runtime_replaces_intra_bar_updates_and_drops_stale_bars(
     assert runtime._counters.bars_direct_updated == 2
 
     # Now replay bucket 13:30 — it is stale (<= last_emitted) and must be dropped.
-    await _publish(pub, "SPY", _bar_payload(ts_el_1 + 55, (450.10, 450.75, 449.80, 450.40), 12000))
+    await _publish(
+        pub,
+        "SPY",
+        _bar_payload(ts_el_1 + 55, (450.10, 450.75, 449.80, 450.40), 12000, ts_str=bar_1_close),
+    )
 
     for _ in range(200):
         if runtime._counters.bars_duplicate_dropped >= 1:
@@ -376,12 +406,12 @@ async def test_direct_bar_release_deadline_is_close_plus_grace() -> None:
 async def test_tick_chart_frames_bypass_the_buffer_entirely() -> None:
     """Every bar_type-0 frame is forwarded the moment it arrives.
 
-    ts_str has minute resolution, so every print inside one minute parses to
-    the same bar_time. Routed through the intra-bar buffer, each print
-    replaced the previous one and — once the minute was emitted — the
-    `<= last_emitted` gate dropped the rest: a live 1-tick chart lost nearly
-    its whole stream, silently, where proto 1's tick path forwarded every
-    print. The buffer's precondition is that bar_time names the bar
+    ts_str resolves to the second, and a second holds many prints, so they
+    all parse to the same bar_time. Routed through the intra-bar buffer,
+    each print replaced the previous one and — once that second was emitted
+    — the `<= last_emitted` gate dropped the rest: a live 1-tick chart lost
+    nearly its whole stream, silently, where proto 1's tick path forwarded
+    every print. The buffer's precondition is that bar_time names the bar
     uniquely, and on a tick chart it does not.
     """
     runtime = _make_runtime()
@@ -389,7 +419,7 @@ async def test_tick_chart_frames_bypass_the_buffer_entirely() -> None:
     runtime._on_bar = emitted.append
 
     ts = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)
-    # Five prints inside one minute — same bar_time on every frame.
+    # Five prints inside one second — same bar_time on every frame.
     for i in range(5):
         await runtime._handle_provider_bar(
             _bar("SPY", ts, close=450.0 + i * 0.01, bar_type=0, bar_interval=1)

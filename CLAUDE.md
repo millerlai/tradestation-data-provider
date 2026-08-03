@@ -244,24 +244,32 @@ measurements — §3.4 has the four reasons.
 and every binding must agree. Change them there first.**
 
 - `ts_str` (`yyyy-MM/dd-HH:mm:ss`, 24-hour) is **authoritative** for `Bar.bar_time`:
-  parsed as `America/New_York`, converted to UTC, then **floored to the minute**. The
-  flooring is invisible in normal operation because EL sends aligned times; the smoke
-  fixture catches it because the harness reuses a tick's `:45` timestamp. `ts` is the
+  parsed as `America/New_York`, converted to UTC, **seconds and all**. `ts` is the
   DLL's receive clock and a last-resort fallback only — during historical replay every
   bar shares one `ts` and would collapse onto a single bucket. 24-hour is deliberate —
   `hh:mm:ss tt` broke on zh-TW Windows hosts where `FormatTime("tt")` emits localised
   AM/PM.
+- **The seconds are real, and the publisher must use `BarDateTime` to produce them.**
+  EL's `Date`/`Time` reserved words carry no seconds at all: on a 30-second chart
+  (`BarType` 14) two adjacent, distinct, already-closed bars both formatted as
+  `07:20:00`, the intra-bar buffer read the second as an update of the first, and one
+  bar per minute was all that survived. `BarDateTime.Format(...)` gives `07:20:00` and
+  `07:20:30`. `bar_time` used to be floored to the minute here, which was a harmless
+  no-op while `Time` had nothing to floor — and became data loss the moment it did.
+  `contract/semantics.md` §1.3 has the live measurement; `bars.jsonl`'s last two
+  frames are the fixture. Never `elsystem.DateTime.CurrentTime`/`.Now` — those read
+  the host clock, not the bar.
 - **The wire's `ts` (receive clock) lands verbatim as its own column.** On a tick
-  chart it is the only sub-minute time there is — `ts_str` has minute resolution,
-  so every print inside a minute shares one `bar_time` and `ts` orders them.
+  chart it is the only intra-second time there is — a second can hold many prints,
+  so they share one `bar_time` and `ts` orders them.
 - **The DLL no longer parses `ts_str`, so it no longer validates it.** `ts_utc` is gone
   from the wire: it was `zoned_time`'s reading of the same string that Python parses with
   `ZoneInfo`, and the >5s drift warning was the only signal that the two ends disagreed
   about a timezone database. Dropping it was a trade, recorded in `contract/wire.md` —
   an unparseable time string now arrives intact and fails one layer later, here.
 - **A bar's time is the publisher's, verbatim.** `ts_str` parses as ET, converts to
-  UTC, floors to the minute, and lands as `bar_time`. There is no shift and no grid
-  snap. EasyLanguage's `Time` is the bar's *close*, so `bar_time` is a close time;
+  UTC, and lands as `bar_time`. There is no shift, no grid snap and no rounding.
+  EasyLanguage's `BarDateTime` is the bar's *close*, so `bar_time` is a close time;
   a consumer wanting left edges subtracts for itself.
 
   This binding used to convert: subtract a minute, then snap onto a 09:30-anchored

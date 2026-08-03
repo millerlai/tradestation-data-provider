@@ -11,9 +11,9 @@
 
 | fixture | expected | 涵蓋 |
 | --- | --- | --- |
-| `smoke.jsonl` | `expected/smoke.json` | tick + bar · per-symbol `seq` · index symbol 的 bid/ask 無效化（§3.2）· bucket 向下取整到分鐘（§2.1）· 時間戳原樣落地（§2） |
+| `smoke.jsonl` | `expected/smoke.json` | tick + bar · per-symbol `seq` · index symbol 的 bid/ask 無效化（§3.2）· **秒數原樣保留（§2.1）—— 唯一帶非零秒數（`:45`）的 fixture** · 時間戳原樣落地（§2） |
 | `noquote.jsonl` | `expected/noquote.json` | 無報價 → wire 上為 `null`（§3.1）。含 **非 index symbol**（SPY）的無報價 tick —— `$TICK` 單獨無法區分 §3.1 與 §3.2 |
-| `bars.jsonl` | `expected/bars.json` | 每一個 `BarType`/`BarInterval` 組合逐字上 wire · **沒有任何組合被拒收** —— 2 分鐘圖(1/2)、週線(3/1)、2 日(2/2) 以前會被 DLL 回 `-5` 整根不送 · `bar_type=2` 與盤中同一條規則:時間戳原樣落地(§2)
+| `bars.jsonl` | `expected/bars.json` | 每一個 `BarType`/`BarInterval` 組合逐字上 wire · **沒有任何組合被拒收** —— 2 分鐘圖(1/2)、週線(3/1)、2 日(2/2) 以前會被 DLL 回 `-5` 整根不送 · `bar_type=2` 與盤中同一條規則:時間戳原樣落地(§2) · **同一分鐘內的兩根 30 秒 bar（14/30，`13:30:00` 與 `13:30:30`）—— 秒數歸零會讓它們塌成同一根（§2.1、§1.3）**
 | `session.jsonl` | `expected/session.json` | session 首尾兩根 bar（§2）。**wire 送 EL 的收盤時間 `09:31` / `16:00`，期望值就是 `09:31` / `16:00`** —— 釘住「publisher 給什麼就存什麼」 |
 
 四份都涵蓋五個 `el_*` 量值原樣落地（§3.4）。harness 用的是內部一致的 intraday 形狀：
@@ -49,11 +49,15 @@ wait
 | --- | --- | ---: |
 | `smoke.jsonl` | `smoke` | 6 |
 | `noquote.jsonl` | `noquote` | 3 |
-| `bars.jsonl` | `bars` | 9 |
+| `bars.jsonl` | `bars` | 11 |
 | `session.jsonl` | `session` | 2 |
 
-> `bars` 的 9 個 frame 對應 9 種 `BarType`/`BarInterval` 組合 —— 包含 2 分鐘(1/2)、
-> 週線(3/1)與 2 日(2/2)。**沒有任何組合被拒收**;`-5` 的映射拒收已隨 `tf` 一起移除。
+> `bars` 的 11 個 frame 對應 11 種情境 —— 包含 2 分鐘(1/2)、週線(3/1)與 2 日(2/2)，
+> **沒有任何組合被拒收**（`-5` 的映射拒收已隨 `tf` 一起移除），以及最後兩個
+> `bar_type=14`（TradeStation 的 Second chart）`bar_interval=30` 的 frame：
+> **同一分鐘內的兩根 30 秒 bar，只差在秒數**。那一對就是 §2.1 的整個重點 ——
+> binding 若把秒數歸零，兩根會塌成同一個 `bar_time`，intra-bar 緩衝把第二根當成
+> 第一根的更新，其中一根就此靜默消失。這正是實際出貨過的行為。
 
 > TradeStation 執行中時它已經佔用預設的 `tcp://127.0.0.1:5555`，init 會回 `-3`。
 > 不必關掉 TradeStation，兩邊都指定同一個別的 port 即可。
