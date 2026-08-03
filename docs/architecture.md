@@ -5,7 +5,7 @@
 > This is a human-readable architecture overview. The AI agent's line-by-line behavioral
 > rules live in [`CLAUDE.md`](../CLAUDE.md) at the repo root; the two should stay
 > consistent, and where they conflict, the code and [`contract/`](../contract/) win (see
-> §11). This document was written against, and every version number and behavior verified
+> §12). This document was written against, and every version number and behavior verified
 > against, the following authoritative sources: `cpp/src/ts2python.cpp`,
 > `cpp/include/ts2python.h`, `contract/wire.md`, `contract/semantics.md`,
 > `contract/error_codes.md`, `bindings/python/src/tradestation_data/**`.
@@ -40,7 +40,7 @@ exactly why the `contract/fixtures/` conformance suite exists (§9).
 | Out of scope | Why |
 | --- | --- |
 | **Strategy / order routing / risk** | This is the data-collection-only fork. `domain/` has exactly one type, `Bar`, because the wire has exactly one shape. |
-| **Aggregation, resampling, backfill, caching** | `HistoryStore` only reads; it never derives. See §7.6 and §10. |
+| **Aggregation, resampling, backfill, caching** | `HistoryStore` only reads; it never derives. See §7.6 and §11. |
 | **Timeframe vocabulary / name mapping** | `bar_type`/`bar_interval` are EasyLanguage's own words, carried verbatim onto the wire and into storage — there is no translation layer that turns them into names like `"5m"`/`"1d"`. |
 | **A non-Windows producer** | Constrained by TradeStation Desktop, a 32-bit Windows process. The subscriber side has no such constraint — the Python binding runs on Windows/macOS/Linux. |
 | **Compatibility with the old protocol** | Wire `proto` / DLL ABI are always **2**; there is no older version to stay compatible with. An old payload cannot pass the version gate — it fails structurally (§5.4). |
@@ -164,17 +164,24 @@ PUB `zmq::socket_t`.
 ### 4.3 DLL ABI Version and the Compatibility Matrix
 
 `EL_DllVersion()` returns `2`, paired with the wire `proto`'s `2` —
-**version identification is guarded by the name of the init export, not by names
-staying the same**: `EL_PublishTick`/`EL_PublishBar` once kept the previous
+**safety comes from a name that changed meaning never being reused, backed by an
+explicit version latch**: `EL_PublishTick`/`EL_PublishBar` once kept the previous
 generation's names while their signatures changed, and under `__stdcall` the
 callee pops the stack, so a call with a mismatched signature **corrupts the
-stack** rather than returning an error. This publish call was given an
+stack** rather than returning an error. This publish call was therefore given an
 entirely new name, `EL_Publish`, and the two old names were left in `.def` as
 tombstones.
 
+Note which export actually catches the old-DLL direction. The superseded ABI-1
+DLL **did** export `EL_Init3` with this same signature (`git show
+7faeabf:cpp/src/TS2Python.def`), so init alone does not catch it; what an ABI-1
+DLL lacks is `EL_Publish`, added only in `572b436`. Init is the interception
+point for the *reverse* direction (an old `.ELD` calling `EL_Init`/`EL_Init2`),
+and the `EL_DllVersion()` latch is what covers everything else.
+
 | Deployment scenario | Where it's caught | What the operator sees in the Print Log |
 | --- | --- | --- |
-| New `.ELD` + old DLL | The old DLL has no `EL_Init3` export | `DefineDLLFunc` fails right at Verify time |
+| New `.ELD` + old (ABI-1) DLL | The old DLL has no `EL_Publish` export — `EL_Init3` resolves fine | `DefineDLLFunc` fails right at Verify time, naming `EL_Publish` |
 | New `.ELD` + a mismatched new DLL | The indicator's `EL_DllVersion()` latch | A version-mismatch message; the indicator stops publishing |
 | Old `.ELD` (calling `EL_Init`) + new DLL | Tombstone returns `-6` | `EL_Init FAILED rc=-6` |
 | Old `.ELD` (calling `EL_Init2`) + new DLL | Tombstone returns `-6` | `EL_Init2 FAILED rc=-6` |
@@ -220,7 +227,7 @@ a daily chart, the same set of fields is sent every time:
 | `proto` | int | Protocol version, **always 2**; a payload missing this key is not this protocol |
 | `seq` | int | Per-symbol, monotonically increasing; every frame must carry one (§6.5) |
 | `sid` | int | Publisher session id (microsecond precision); changes on a DLL restart — that's a reset, not a loss |
-| `ts` | float | DLL receive-side wall clock (UTC epoch seconds); used for latency measurement, for ordering same-minute frames on a tick chart, and as the last resort when `ts_str` is absent |
+| `ts` | float | DLL receive-side wall clock (UTC epoch seconds); used for latency measurement, for ordering same-minute frames on a tick chart, and as the last resort when `ts_str` is absent. **Must be persisted verbatim as its own column** (§6.1) |
 | `ts_str` | string | EL's `Date`+`Time`, `yyyy-MM/dd-HH:mm:ss`, 24-hour ET wall clock, verbatim. **The sole authoritative source for `bar_time`** (§6.1) |
 | `bar_type` | int | EL's `BarType`, verbatim. 0 = tick series, 1 = intraday minutes, 2 = daily |
 | `bar_interval` | int | EL's `BarInterval`, verbatim; the minute count when `bar_type` = 1 |
@@ -261,7 +268,7 @@ matches" and "this is actually old data" can never both be true at once.
 | `-1` | Publish called before a successful init | `EL_Publish` |
 | `-2` | ZMQ send failed (hit the high-water mark, or an exception) | `EL_Publish` |
 | `-3` | Init's bind/socket creation failed (most commonly: the port is already in use) | `EL_Init3` |
-| `-4` | Invalid argument (a null pointer, or a quantity outside `int64`'s representable range) | `EL_Init3` `EL_Publish` |
+| `-4` | Invalid argument: a null pointer; **a quantity outside ±9.0e15** (just under 2^53, the largest integer a `double` holds exactly — *not* `int64`'s range, and rejected rather than clamped); or **the assembled payload being truncated by `snprintf`** past the 768-byte buffer | `EL_Init3` `EL_Publish` |
 | `-6` | ABI mismatch — the caller is a `.ELD` older than this protocol | The four tombstone exports |
 
 The real danger isn't these return codes — it's ZMQ PUB's **silent drop** past
@@ -281,7 +288,15 @@ wiser. That is exactly why the payload carries `seq` (§6.5).
 | Field | Correct use | Wrong use |
 | --- | --- | --- |
 | `ts_str` | **The sole authoritative source for `bar_time`**: parsed as `America/New_York` (the IANA tz database, not the system's local timezone), converted to UTC, floored to the minute | Treating it as having second-level resolution (it only has minute resolution) |
-| `ts` | The DLL's receive-side wall clock; the ordering key for same-minute frames on a tick chart; the last resort when `ts_str` is **absent** (present but unparseable is a different state — see below) | A source for `bar_time` |
+| `ts` | The DLL's receive-side wall clock; **persisted verbatim as its own column**; the ordering key for same-minute frames on a tick chart; the last resort when `ts_str` is **absent** (present but unparseable is a different state — see below) | A source for `bar_time` |
+
+**Both timestamps must be persisted, not just `bar_time`.** `contract/semantics.md`
+§1 states it as a requirement ("兩個都必須落地"), and `BAR_SCHEMA` carries
+`pa.field("ts", pa.float64())` for exactly this reason. `ts_str` resolves only to
+the minute, so on a tick chart every print inside one minute shares a single
+`bar_time` and **`ts` is the only thing that can order them** — a binding that
+treats `ts` as diagnostic-only and drops it on write produces a tick store whose
+rows cannot be sequenced within a minute at all.
 
 **`ts_str` being absent and `ts_str` failing to parse are two states that must be
 handled separately:**
@@ -315,7 +330,7 @@ Per TradeStation's official definition (for equities — see the
 | EL reserved word | **intraday** (minute / tick / volume bar) | **daily and above** |
 | --- | --- | --- |
 | `Volume` | Only the up-tick share volume | Total share volume |
-| `Ticks` | **Total share volume** | Total tick count; equals `Volume` on equities (OI = 0) |
+| `Ticks` | **Total share volume** | **`Volume` + Open Interest — never a trade count.** On equities OI = 0, so it is byte-identical to `el_volume` |
 | `UpTicks` | Up-tick share volume | Total share volume |
 | `DownTicks` | Down-tick share volume | 0 (equities) / Open Interest (futures) |
 | `OpenInt` | 0 (equities) / down-tick volume (futures) | Open Interest (futures) / 0 otherwise |
@@ -344,12 +359,21 @@ numbers).
 
 The DLL already turns `InsideBid`/`InsideAsk` ≤ 0 (including NaN) into JSON
 `null`; the binding only needs one more belt-and-braces check
-(`_quote_or_none`). **There is no hard-coded list of index/breadth symbols** —
-an earlier version had one, with `VXX` on it, and VXX is a tradeable ETN that
-measured 567,776 shares of volume in a single bar, so its real quote was being
-thrown away for nothing. `category` (§5.2) now travels on every frame, so a
+(`_quote_or_none`). **In the code, there is no hard-coded list of index/breadth
+symbols** — an earlier version had one, with `VXX` on it, and VXX is a tradeable
+ETN that measured 567,776 shares of volume in a single bar, so its real quote was
+being thrown away for nothing. `category` (§5.2) now travels on every frame, so a
 consumer that wants that behavior has a fact to key off instead of a guessed
 list.
+
+> ⚠️ **Unresolved spec-vs-code drift — do not implement a second binding from
+> either side alone.** `contract/semantics.md` §3.2/§3.3 still *mandates* that
+> list (`$TICK $ADD $VOLD $TRIN $PCVA VXX`) and names a
+> `TradeStationELProvider(index_symbols=...)` parameter that no longer exists;
+> §3's preamble also still says quotes apply to ticks only ("bar 不帶報價"), which
+> §5.2 of this document contradicts. The contract is the SSoT, so this is not a
+> drift a descriptive document may silently paper over. Resolution plan:
+> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md) (D2).
 
 ### 6.4 Session Rules
 
@@ -357,7 +381,7 @@ list.
 | --- | --- |
 | US equity RTH | 09:30–16:00 **ET** |
 | Session assignment | A bar before 04:00 ET belongs to the **previous** session |
-| `breadth`-symbol retention | Reset daily at 09:30 ET; no pre-market retention |
+| `breadth`-symbol retention (**as implemented**) | `recent_bars` clears when the **04:00 ET** session date rolls over; within a session nothing is evicted, so all pre-market bars are retained |
 | Other symbols (`etf`/`volatility`/`mega_cap`) retention | Not reset; 60 minutes of pre-market data retained by default |
 
 Defaults are determined by `category` in
@@ -366,6 +390,17 @@ Defaults are determined by `category` in
 rule**, not an implementation detail of any one binding — if a binding interprets
 it independently, its session boundaries will disagree with every other
 binding's.
+
+> ⚠️ **Unresolved spec-vs-code drift.** `contract/semantics.md` §4.1 says
+> `breadth` resets at **09:30 ET** with no pre-market retention. The code does
+> neither: `MarketSnapshot.on_bar` clears only when `session_date_of()` changes,
+> and that boundary is `PRE_SESSION_CUTOFF_LOCAL = 04:00` ET; the pre-market
+> eviction path is skipped entirely when `session_reset=True`, and
+> `pre_market_window_minutes=None` is documented in `session.py` as "unlimited
+> pre-market". So at 09:31 ET the Python binding still holds `$TICK`'s bars from
+> 04:00 onward. The row above describes the **code**; the contract has not been
+> reconciled. Resolution plan:
+> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md) (D1).
 
 ### 6.5 Sequence Numbers and Gap Detection (`seq` / `sid`)
 
@@ -376,7 +411,18 @@ binding's.
 | A change in `sid` | Means the publisher restarted; state must reset. The idempotent init path (returning `1`) does **not** change `sid`, so re-Verifying the indicator is never mistaken for a restart |
 | `seq < expected` | TCP guarantees single-publisher ordering, so a smaller sequence number is a duplicate/replay — **the expectation must not be rolled back** |
 | A sequence number is consumed even on send failure | That data really was lost, and showing it as a gap is the honest answer |
-| `messages_lost == None` | "Cannot tell" and "confirmed zero" are two different states that must be expressible separately (see `gap_detection_available` in §7.2) |
+| **A refused frame is still counted** | `seq` must be observed **before** the `proto` version gate, not after — see below |
+| `messages_lost == None` | "Cannot tell" and "confirmed zero" are two different states that must be expressible separately; the reference binding spells this as the `gap_detection_available` property on `TradeStationELProvider`, True once any sequenced frame has arrived |
+
+**Sequence accounting happens before the version gate, deliberately.** A frame
+this binding refuses still occupied a slot in the publisher's per-symbol counter.
+Skipping `observe()` on the refusal path would leave `_expected` parked at the
+last *accepted* `seq`, so the next accepted frame reports a gap that never
+happened. That is not hypothetical: during the documented binding-first,
+DLL-second upgrade window, an operator would watch a link that lost nothing
+report steady, fabricated message loss — and then be unable to tell a real gap
+from the artifact. `el_subscriber.py::_parse_payload` calls `observe()` first and
+checks `proto` second for exactly this reason.
 
 `messages_lost` (transport-layer loss) and `frames_refused` (received but failed
 to parse — e.g. a `proto` mismatch) must be read **together**: a stream in which
@@ -412,7 +458,7 @@ flowchart LR
     DLL["EL_Publish<br/>(cpp)"] -->|"ZMQ PUB<br/>2-frame"| RECV["socket.recv_multipart()<br/>wire/el_subscriber.py"]
     RECV --> TOPICCHK{"topic string<br/>exactly equal?"}
     TOPICCHK -->|"no (prefix mismatch)"| DROP1["dropped<br/>topic_prefix_mismatch_dropped"]
-    TOPICCHK -->|"yes"| PARSE["_parse_payload()<br/>proto gate + seq observed + quantities required"]
+    TOPICCHK -->|"yes"| PARSE["_parse_payload()<br/>seq observed FIRST → then proto gate<br/>→ quantities required"]
     PARSE -->|"proto≠2 / missing field / bad JSON"| DROP2["frames_refused += 1<br/>logged, stream continues (no raised error)"]
     PARSE -->|"ok"| BAR["Bar (domain/bar.py)"]
     BAR --> INGEST["IngestionRuntime<br/>._handle_provider_bar()"]
@@ -490,8 +536,8 @@ model: `last_closed_bar`, a bounded `recent_bars` deque, `session_date`,
 `session_open_bar`. Coroutines that span an `await` should call
 `view_of()`/`views()` to get an immutable snapshot, avoiding a data race with
 concurrent ingestion updates. `SessionPolicy` (§6.4) decides whether
-`recent_bars` clears when the 09:30 ET boundary is crossed, and how much
-pre-market data is retained.
+`recent_bars` clears when the session date rolls over — which happens at the
+**04:00 ET** cutoff, not at 09:30 — and how much pre-market data is retained.
 
 ### 7.5 Sink Pipeline and Built-In Sinks
 
@@ -500,14 +546,23 @@ pre-market data is retained.
 **isolating each sink's exceptions** (`sink_on_bar_failed` is logged and
 execution continues, without affecting the other sinks). The pipeline is built
 from `config/sinks.yaml` via `sinks.registry.build_pipeline_from_config()`;
-`class:` is a `module:attr` string pointing at any callable that returns a
+`class:` is a `module:attr` string pointing at a callable that returns a
 `Sink` protocol implementation — users can point it at their own module to
 register a custom sink without touching this repo.
+
+**The factory contract has two hard requirements**, both enforced in
+`sinks/registry.py::instantiate_sink`. It is always invoked as
+`factory(name=cfg.name, **cfg.params)`, so **the callable must accept `name` as a
+keyword argument** (and should assign it to `self.name`); and the returned object
+must satisfy `isinstance(instance, Sink)` on the runtime-checkable Protocol.
+Failing either raises `SinksConfigError`, which the CLI reports as
+`sinks_config_invalid` and exits with code 3 — ingestion never starts, so a sink
+written without `name=` costs the whole session rather than degrading.
 
 | Built-in sink | Purpose |
 | --- | --- |
 | `ParquetBarSink` | The default persistence sink. A thin layer over `BarWriter` (§7.6), exposing only `on_bar`/`should_flush`/`flush`/`close` |
-| `InMemorySink` | A bounded per-symbol deque, for tests / notebook exploration only |
+| `InMemorySink` | Per-symbol deques for tests / notebook exploration only. **Unbounded by default** — `max_per_symbol` defaults to `None`, i.e. `deque(maxlen=None)`; pass it explicitly to bound the sink. Not for long-running production |
 | `CallbackSink` | Dynamic Python callback dispatch; `get_sink(name)` retrieves the instance declared in `sinks.yaml` from a module-level `WeakValueDictionary`; `close()` removes it from the registry immediately |
 
 ### 7.6 Storage: `BarWriter` / `HistoryStore`
@@ -529,24 +584,36 @@ about 5,000 rows. So the whole file is **rewritten in full on every flush**
 `bar_time` keeping the last write, sorted, written to a temp file, then swapped
 in with `os.replace`).
 
-**Buffering and flush triggers**: `max_buffered_bars` (accumulated across every
-partition) or `max_flush_seconds` (measured from the oldest buffered bar).
+**Buffering and flush triggers** — `should_flush()` returns True on **any of
+three**, checked in this order:
+
+1. **An elapsed open day exists** (`_has_elapsed_open_day()`) — checked *first*,
+   and it fires **even when the buffer is empty**. This is the only thing that
+   drives `_seal_elapsed_days()` once a replay burst has already flushed its
+   last bars; a re-implementation that short-circuits on an empty buffer leaves
+   the newest day's file footerless forever.
+2. `max_buffered_bars`, accumulated across every partition.
+3. `max_flush_seconds`, measured from the oldest buffered bar.
+
 Writing one bar at a time used to cost one Parquet row group per bar — measured
 on 78 five-minute bars, writing one at a time produced 145,977 bytes across 78
 row groups, versus 5,936 bytes in 1 row group when buffered.
 
-**Sealing a partition (only `date=` partitions)** requires **both** signals to
-hold at once:
+**Sealing a partition (only `date=` partitions)** happens on **either** of two
+independent signals — they are an OR, not an AND:
 
-1. A bar for a **later day** of the same (timeframe, symbol) arrives; **and**
-2. That day is over in ET, **and** a full `max_flush_seconds` has passed with no
-   new data.
+1. A bar for a **later day** of the same (timeframe, symbol) arrives —
+   `_seal_earlier_days()`, called from `write()`, with no quiet-period check; **or**
+2. That day is over in ET **and** a full `max_flush_seconds` has passed with no
+   new data for it — `_seal_elapsed_days()`/`_is_finished()`, called from `flush()`.
 
-Signal (1) alone would leave the **newest** day of a finished replay waiting
-forever (no later day is ever coming); signal (2) alone would seal a day partway
-through a replay burst (five days of data can arrive within seconds), and
-`write()` refuses a sealed partition — turning "not readable yet" into "the data
-is really gone." The quiet period is what separates "this day is over" from
+Both are needed because each alone fails a real case. Signal (1) alone leaves the
+**newest** day of a finished replay open forever, since no later day is ever
+coming — a daily chart replaying two years once left 499 footerless files behind,
+readable only after Ctrl+C. Signal (2) alone would seal a day partway through a
+replay burst (five days of data can arrive within seconds), and `write()` refuses
+a sealed partition — turning "not readable yet" into "the data is really gone."
+Within signal (2) the quiet period is what separates "this day is over" from
 "this day has merely gone quiet for now." **Today's partition is never sealed by
 (2)**, because once a `pq.ParquetWriter` is `close()`d, it can't be reopened and
 resumed.
@@ -620,7 +687,17 @@ is being ingested anymore.
 
 ---
 
-## 8. Producer-Side Configuration Summary (Python binding)
+## 8. Configuration Summary
+
+### 8.1 Producer side (layer ①)
+
+| Knob | Where | Notes |
+| --- | --- | --- |
+| Publish endpoint | The EL indicator's `ZMQEndpoint` input (`EL/TS2Python_Exporter.el`), default `tcp://127.0.0.1:5555` | This is the **only** place the producer's endpoint is set — the DLL binds whatever the indicator passes to `EL_Init3`. If TradeStation already holds the port, init returns `-3` (§5.4) and this input is what to change |
+| Publish on/off, error logging | The indicator's `Enabled` / `LogErrors` inputs | |
+| Per-publish quantity dump | The indicator's `LogPublish` input, off by default | Prints all five quantity words per call — the switch to use when working out what a chart type really hands over |
+
+### 8.2 Subscriber side (layer ③, Python binding)
 
 | Config file | Contents |
 | --- | --- |
@@ -629,7 +706,8 @@ is being ingested anymore.
 
 `--data-root` only acts as a fallback when `--sinks-config` is missing; to
 redirect output under normal operation, edit `sinks.yaml`'s `root`, not the CLI
-flag.
+flag. `--endpoint` sets the SUB side and must match the indicator's
+`ZMQEndpoint` above.
 
 ---
 
@@ -722,10 +800,19 @@ pins this down as a test.
 | EasyLanguage indicator installation | [`EL/README.md`](../EL/README.md) |
 | How to use the Python binding | [`bindings/python/README.md`](../bindings/python/README.md) |
 
-> **Known documentation drift**: the repo-root `README.md`'s Versioning table and
-> the top of `contract/README.md` still label the wire `proto` and the DLL ABI as
-> `1`; this document, along with `contract/wire.md`, `contract/semantics.md`,
-> `cpp/src/ts2python.cpp` (`kDllVersion = 2`), and
-> `bindings/python/.../wire/el_subscriber.py` (`PROTO_VERSION = 2`), have all been
-> verified against the code as **2**. Those two spots haven't been updated yet
-> and are worth fixing on their own.
+> **Known documentation drift.** Three files still label the wire `proto` and the
+> DLL ABI as `1`: the repo-root `README.md` Versioning table, the **same table in
+> `README.zh-TW.md`** (lines 153-154), and the top of `contract/README.md`. The
+> code is unambiguously at `2` — `cpp/src/ts2python.cpp` (`kDllVersion = 2`) and
+> `bindings/python/.../wire/el_subscriber.py` (`PROTO_VERSION = 2`), which refuses
+> anything else — as are `contract/wire.md` and `contract/semantics.md`. Tracked
+> with the other drift items in
+> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md) (D4).
+
+> **Further unresolved drift, flagged inline above**: the index/breadth quote list
+> (§6.3), the `breadth` session-reset boundary (§6.4), and the ABI compatibility
+> matrix's missing-export claim, which `contract/wire.md` also carries (§4.3). All
+> four are scoped in
+> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md); none
+> is fixed by this document, because they require changing `contract/`, which is
+> the SSoT every binding is built against.

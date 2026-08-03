@@ -3,7 +3,7 @@
 > 📖 [English version](architecture.md)
 
 > 本文是給人讀的架構總覽；AI 代理的逐行行為規則在根目錄 [`CLAUDE.md`](../CLAUDE.md)，
-> 兩者應保持一致，如有衝突以程式碼與 [`contract/`](../contract/) 為準（見 §11）。
+> 兩者應保持一致，如有衝突以程式碼與 [`contract/`](../contract/) 為準（見 §12）。
 > 本文對照下列權威來源撰寫，並逐一驗證版本號與行為：`cpp/src/ts2python.cpp`、
 > `cpp/include/ts2python.h`、`contract/wire.md`、`contract/semantics.md`、
 > `contract/error_codes.md`、`bindings/python/src/tradestation_data/**`。
@@ -35,7 +35,7 @@ repo 真實發生過：舊版規格文件描述的欄位早已與 DLL 實際輸�
 | 不做 | 理由 |
 | --- | --- |
 | **策略 / 下單 / 風控** | 這是 data-collection-only 的 fork。`domain/` 只有一個型別 `Bar`，因為 wire 只有一種形狀。 |
-| **聚合、重採樣、回補、快取** | `HistoryStore` 只讀，不推算。詳見 §7.6 與 §10。 |
+| **聚合、重採樣、回補、快取** | `HistoryStore` 只讀，不推算。詳見 §7.6 與 §11。 |
 | **時間框架詞彙 / 命名映射** | `bar_type`/`bar_interval` 是 EasyLanguage 自己的詞，逐字上 wire、逐字入庫，沒有 `"5m"`/`"1d"` 這類名字的翻譯層。 |
 | **非 Windows producer** | 受 TradeStation Desktop（32-bit Windows process）限制。Subscriber 端不受此限，Python binding 支援 Windows/macOS/Linux。 |
 | **相容舊協定** | Wire `proto` / DLL ABI 恆為 **2**，沒有需要相容的舊版本。舊 payload 在結構上就無法通過版本閘門（§5.4）。 |
@@ -148,14 +148,19 @@ repo 根沒有 `config/`——symbols.yaml / sinks.yaml 屬於 Python binding �
 
 ### 4.3 DLL ABI 版本與相容性矩陣
 
-`EL_DllVersion()` 回傳 `2`，與 wire `proto` 的 `2` 成對——**版本識別由 init 匯出名稱把關，
-不是靠名稱不變**：`EL_PublishTick`/`EL_PublishBar` 曾經沿用前一代名字卻換了簽章，
-`__stdcall` 由 callee 清堆疊，簽章不符的呼叫會**弄壞堆疊**而不是回傳錯誤。這次的 publish
-改叫全新名字 `EL_Publish`，兩個舊名字留在 `.def` 裡當墓碑。
+`EL_DllVersion()` 回傳 `2`，與 wire `proto` 的 `2` 成對——**安全性來自「換過語意的名字絕不
+重用」，再加上一個明確的版本 latch**：`EL_PublishTick`/`EL_PublishBar` 曾經沿用前一代名字
+卻換了簽章，`__stdcall` 由 callee 清堆疊，簽章不符的呼叫會**弄壞堆疊**而不是回傳錯誤。
+所以這次的 publish 改叫全新名字 `EL_Publish`，兩個舊名字留在 `.def` 裡當墓碑。
+
+注意實際擋住舊 DLL 的是哪一個匯出。前一代的 ABI-1 DLL **確實**匯出了 `EL_Init3`，且簽章
+相同（`git show 7faeabf:cpp/src/TS2Python.def`），所以光靠 init 擋不住；ABI-1 缺的是
+`EL_Publish`，那是 `572b436` 才加進去的。init 是**反方向**（舊 `.ELD` 呼叫
+`EL_Init`/`EL_Init2`）的攔截點，其餘情況由 `EL_DllVersion()` latch 負責。
 
 | 部署情境 | 攔截點 | Operator 在 Print Log 看到什麼 |
 | --- | --- | --- |
-| 新 `.ELD` + 舊 DLL | 舊 DLL 沒有 `EL_Init3` 匯出 | `DefineDLLFunc` 在 Verify 階段就報錯 |
+| 新 `.ELD` + 舊（ABI-1）DLL | 舊 DLL 沒有 `EL_Publish` 匯出——`EL_Init3` 反而解析得到 | `DefineDLLFunc` 在 Verify 階段就報錯，指名 `EL_Publish` |
 | 新 `.ELD` + 版本不符的新 DLL | indicator 的 `EL_DllVersion()` latch | 版本不符訊息，indicator 停止發布 |
 | 舊 `.ELD`（呼叫 `EL_Init`）+ 新 DLL | 墓碑回 `-6` | `EL_Init FAILED rc=-6` |
 | 舊 `.ELD`（呼叫 `EL_Init2`）+ 新 DLL | 墓碑回 `-6` | `EL_Init2 FAILED rc=-6` |
@@ -199,7 +204,7 @@ repo 根沒有 `config/`——symbols.yaml / sinks.yaml 屬於 Python binding �
 | `proto` | int | 協定版本，**恆為 2**，缺這個鍵就不是這個協定 |
 | `seq` | int | per-symbol 單調遞增，每個 frame 都必須有（§6.5） |
 | `sid` | int | publisher session id（微秒精度），DLL 重啟會變——那是重置不是遺漏 |
-| `ts` | float | DLL 收訊端 wall clock（UTC epoch 秒）；延遲量測 + tick 圖同分鐘內排序 + `ts_str` 缺席時最後手段 |
+| `ts` | float | DLL 收訊端 wall clock（UTC epoch 秒）；延遲量測 + tick 圖同分鐘內排序 + `ts_str` 缺席時最後手段。**必須逐字落地為獨立欄位**（§6.1） |
 | `ts_str` | string | EL 的 `Date`+`Time`，`yyyy-MM/dd-HH:mm:ss` 24 小時制 ET 牆鐘，逐字。**`bar_time` 的唯一權威來源**（§6.1） |
 | `bar_type` | int | EL `BarType` 逐字。0=tick 序列，1=盤中分鐘，2=日線 |
 | `bar_interval` | int | EL `BarInterval` 逐字，`bar_type`=1 時是分鐘數 |
@@ -233,7 +238,7 @@ repo 根沒有 `config/`——symbols.yaml / sinks.yaml 屬於 Python binding �
 | `-1` | 未初始化就呼叫 publish | `EL_Publish` |
 | `-2` | ZMQ 送出失敗（觸及 high-water mark 或例外） | `EL_Publish` |
 | `-3` | init 的 bind/socket 建立失敗（最常見：port 已被佔用） | `EL_Init3` |
-| `-4` | 參數無效（null 指標，或量值超出 `int64` 可表示範圍） | `EL_Init3` `EL_Publish` |
+| `-4` | 參數無效：null 指標；**量值超出 ±9.0e15**（略小於 2^53，`double` 能精確表示的最大整數——**不是** `int64` 的範圍，且是拒收而非 clamp）；或 **payload 被 `snprintf` 截斷**（超出 768 bytes 緩衝區） | `EL_Init3` `EL_Publish` |
 | `-6` | ABI 不符——呼叫端是早於本協定的 `.ELD` | 四個墓碑匯出 |
 
 真正危險的不是這些回傳碼，而是 ZMQ PUB 超過 `SNDHWM` 時的**靜默丟棄**——完全不回傳
@@ -251,7 +256,13 @@ repo 根沒有 `config/`——symbols.yaml / sinks.yaml 屬於 Python binding �
 | 欄位 | 正確用途 | 錯誤用途 |
 | --- | --- | --- |
 | `ts_str` | **`bar_time` 唯一權威來源**：以 `America/New_York`（IANA tz database，非系統本地時區）解析、轉 UTC、秒歸零 | 當成有秒級解析度（它只有分鐘解析度） |
-| `ts` | DLL 收訊端 wall clock；tick 圖同分鐘內排序依據；`ts_str` **缺席**（非空字串但解析失敗）時的最後手段 | `bar_time` 的來源 |
+| `ts` | DLL 收訊端 wall clock；**逐字落地為獨立的 `ts` 欄**；tick 圖同分鐘內排序依據；`ts_str` **缺席**（欄位不存在或為 `""`；「有值但解析不了」是另一種狀態，見下表）時的最後手段 | `bar_time` 的來源 |
+
+**兩個時間戳都必須落地，不是只落地 `bar_time`。** `contract/semantics.md` §1 明文
+要求（「兩個都必須落地」），`BAR_SCHEMA` 也因此帶了 `pa.field("ts", pa.float64())`。
+`ts_str` 只到分鐘解析度，所以 tick 圖上一分鐘內每一筆成交共用同一個 `bar_time`，
+**能把它們排序的只有 `ts`** —— 把 `ts` 當成純診斷欄位而不落地的 binding，存下來的
+tick 資料在分鐘內根本無法排序。
 
 **`ts_str` 缺席與解析失敗是兩種必須分開處理的狀態：**
 
@@ -277,7 +288,7 @@ wire 帶五個量值，**每一個都是 EasyLanguage 同名保留字的原值**
 | EL 保留字 | **intraday**（分鐘/tick/volume bar） | **daily 以上** |
 | --- | --- | --- |
 | `Volume` | 只有上漲 tick 的成交量 | 總成交量 |
-| `Ticks` | **總成交量** | 總 tick 數，股票上恆等於 `Volume`（OI=0） |
+| `Ticks` | **總成交量** | **`Volume` 與 Open Interest 之和——從來不是筆數。** 股票的 OI=0，所以它與 `el_volume` 逐位元組相同 |
 | `UpTicks` | 上漲 tick 的成交量 | 總成交量 |
 | `DownTicks` | 下跌 tick 的成交量 | 0（股票）／Open Interest（期貨） |
 | `OpenInt` | 0（股票）／下跌 tick 的量（期貨） | Open Interest（期貨）／其餘為 0 |
@@ -299,10 +310,18 @@ wire 帶五個量值，**每一個都是 EasyLanguage 同名保留字的原值**
 ### 6.3 `bid`/`ask` 何時無效
 
 DLL 已經把 `InsideBid`/`InsideAsk` ≤ 0（含 NaN）轉成 JSON `null`。binding 只需再做一次
-belt-and-braces 檢查（`_quote_or_none`）。**沒有硬編碼的 index/breadth symbol 清單**——
-舊版本曾經有，`VXX` 在清單上，而 VXX 是可交易的 ETN，實測單根 bar 有 567,776 股成交量，
-它的真實報價被白白丟棄。`category`（§5.2）現在逐 frame 都在，消費端要那個行為時有事實
-可查，不必用猜的清單。
+belt-and-braces 檢查（`_quote_or_none`）。**程式碼裡沒有硬編碼的 index/breadth symbol
+清單**——舊版本曾經有，`VXX` 在清單上，而 VXX 是可交易的 ETN，實測單根 bar 有 567,776 股
+成交量，它的真實報價被白白丟棄。`category`（§5.2）現在逐 frame 都在，消費端要那個行為時
+有事實可查，不必用猜的清單。
+
+> ⚠️ **未解決的 spec-vs-code drift —— 不要只看單一邊就動手寫第二個 binding。**
+> `contract/semantics.md` §3.2/§3.3 仍然**強制要求**那份清單
+> （`$TICK $ADD $VOLD $TRIN $PCVA VXX`），並且指名一個早已不存在的參數
+> `TradeStationELProvider(index_symbols=...)`；§3 開頭也還寫著報價只適用於 tick
+> （「bar 不帶報價」），這與本文 §5.2 直接矛盾。contract 是 SSoT，所以這種不一致
+> 不該由一份描述性文件默默蓋過去。解決計畫：
+> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md)（D2）。
 
 ### 6.4 Session 規則
 
@@ -310,12 +329,21 @@ belt-and-braces 檢查（`_quote_or_none`）。**沒有硬編碼的 index/breadt
 | --- | --- |
 | US equity RTH | 09:30–16:00 **ET** |
 | Session 歸屬 | 04:00 ET 之前的 bar 屬於**前一個** session |
-| `breadth` symbol 保留政策 | 09:30 ET 每日重置，無盤前保留 |
+| `breadth` symbol 保留政策（**實作現況**） | `recent_bars` 在 **04:00 ET** session 日期換日時清空；session 之內不驅逐任何資料，因此盤前 bar 全部保留 |
 | 其他 symbol（`etf`/`volatility`/`mega_cap`）保留政策 | 不重置，預設保留 60 分鐘盤前資料 |
 
 由 `bindings/python/config/symbols.yaml` 的 `category` 決定預設，可逐 symbol 覆寫
 （`aggregation/session.py::SessionPolicy.for_category`）。這是**市場規則**，不是某個
 binding 的實作細節——任何 binding 自行詮釋，session 邊界就會與其他 binding 不一致。
+
+> ⚠️ **未解決的 spec-vs-code drift。** `contract/semantics.md` §4.1 寫 `breadth` 在
+> **09:30 ET** 重置且無盤前保留。程式碼兩件都不是這樣：`MarketSnapshot.on_bar` 只在
+> `session_date_of()` 改變時清空，而那個邊界是 `PRE_SESSION_CUTOFF_LOCAL = 04:00` ET；
+> 盤前驅逐那條路徑在 `session_reset=True` 時根本不會執行，而 `session.py` 對
+> `pre_market_window_minutes=None` 的註解是「unlimited pre-market」。所以 09:31 ET 時
+> Python binding 手上仍握有 `$TICK` 從 04:00 起的所有 bar。上表描述的是**程式碼**，
+> contract 尚未同步。解決計畫：
+> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md)（D1）。
 
 ### 6.5 序號與缺漏偵測（`seq` / `sid`）
 
@@ -326,7 +354,15 @@ binding 的實作細節——任何 binding 自行詮釋，session 邊界就會�
 | `sid` 變更 | 代表 publisher 重啟，重置狀態；idempotent init（回傳 `1`）**不會**改 `sid`，重新 Verify indicator 不會被誤判成重啟 |
 | `seq < expected` | TCP 保證單一 publisher 順序，較小序號是重複/重播，**不得回退期望值** |
 | 序號在送出失敗時仍消耗 | 那筆資料確實遺失，顯示為 gap 才誠實 |
-| `messages_lost == None` | 「無法判斷」與「確認為 0」是兩種不同狀態，必須能分開表達（見 §7.2 的 `gap_detection_available`） |
+| **被拒收的 frame 仍要計入序號** | `seq` 必須在 `proto` 版本閘門**之前**觀測，不是之後——見下 |
+| `messages_lost == None` | 「無法判斷」與「確認為 0」是兩種不同狀態，必須能分開表達；reference binding 把它寫成 `TradeStationELProvider` 的 `gap_detection_available` 屬性，收到任何帶序號的 frame 後即為 True |
+
+**序號計數刻意發生在版本閘門之前。** 一個被本 binding 拒收的 frame，一樣佔用了 publisher
+那個 per-symbol 計數器的一格。若在拒收路徑上跳過 `observe()`，`_expected` 會停在最後一個
+**被接受**的 `seq`，於是下一個被接受的 frame 會報出一個根本沒發生的 gap。這不是假設：在
+文件記載的「binding 先升級、DLL 後升級」那段視窗期，operator 會看到一條什麼都沒丟的連線
+持續回報捏造出來的遺失量——而且從此分不出真 gap 與假 gap。
+`el_subscriber.py::_parse_payload` 先呼叫 `observe()` 再檢查 `proto`，正是為了這件事。
 
 `messages_lost`（傳輸層遺失）與 `frames_refused`（收到但解析失敗，如 proto 不符）必須
 一起讀：一條每個 frame 都被拒收的串流，`messages_lost` 依然讀 0——這正是「binding 先
@@ -360,7 +396,7 @@ flowchart LR
     DLL["EL_Publish<br/>(cpp)"] -->|"ZMQ PUB<br/>2-frame"| RECV["socket.recv_multipart()<br/>wire/el_subscriber.py"]
     RECV --> TOPICCHK{"topic 字串<br/>完全相等?"}
     TOPICCHK -->|"否（前綴誤配）"| DROP1["丟棄<br/>topic_prefix_mismatch_dropped"]
-    TOPICCHK -->|"是"| PARSE["_parse_payload()<br/>proto 閘門 + seq 觀測 + quantities 必填"]
+    TOPICCHK -->|"是"| PARSE["_parse_payload()<br/>先觀測 seq → 再過 proto 閘門<br/>→ quantities 必填"]
     PARSE -->|"proto≠2 / 缺欄位 / JSON 壞掉"| DROP2["frames_refused += 1<br/>記錄後繼續（不拋錯終止串流）"]
     PARSE -->|"成功"| BAR["Bar（domain/bar.py）"]
     BAR --> INGEST["IngestionRuntime<br/>._handle_provider_bar()"]
@@ -428,7 +464,8 @@ flowchart TD
 Asyncio 單執行緒下的 in-memory 最新狀態：`last_closed_bar`、有界 `recent_bars` deque、
 `session_date`、`session_open_bar`。跨 `await` 的協程應呼叫 `view_of()`/`views()` 取得
 不可變快照，避免與併發的 ingestion 更新產生資料競爭。`SessionPolicy`
-（§6.4）決定 09:30 ET 邊界跨越時 `recent_bars` 是否清空、盤前資料保留多久。
+（§6.4）決定 session 日期換日時 `recent_bars` 是否清空——換日發生在 **04:00 ET**
+cutoff，不是 09:30——以及盤前資料保留多久。
 
 ### 7.5 Sink Pipeline 與內建 Sinks
 
@@ -436,13 +473,20 @@ Asyncio 單執行緒下的 in-memory 最新狀態：`last_closed_bar`、有界 `
 廣播給每一個已註冊的 sink，**單一 sink 的例外被隔離**（`sink_on_bar_failed` 記錄後繼續，
 不影響其他 sink）。Pipeline 由 `config/sinks.yaml` 透過
 `sinks.registry.build_pipeline_from_config()` 建構；`class:` 是 `module:attr` 字串，
-指向任何回傳 `Sink` protocol 實作的可呼叫物件——使用者可以指到自己的 module 註冊自訂
+指向一個回傳 `Sink` protocol 實作的可呼叫物件——使用者可以指到自己的 module 註冊自訂
 sink，不必修改本 repo。
+
+**工廠函式的契約有兩條硬性要求**，都由 `sinks/registry.py::instantiate_sink` 強制執行。
+它一律以 `factory(name=cfg.name, **cfg.params)` 呼叫，所以**該可呼叫物件必須接受 `name`
+關鍵字參數**（並且應該把它指派給 `self.name`）；回傳的物件還必須通過
+`isinstance(instance, Sink)` 這個 runtime-checkable Protocol 檢查。任一條不符都會拋
+`SinksConfigError`，CLI 記錄為 `sinks_config_invalid` 並以 exit code 3 結束——ingestion
+根本不會啟動，所以一個忘了寫 `name=` 的 sink 代價是整個 session，而不是降級運作。
 
 | 內建 Sink | 用途 |
 | --- | --- |
 | `ParquetBarSink` | 預設持久化。薄薄一層包住 `BarWriter`（§7.6），對外只暴露 `on_bar`/`should_flush`/`flush`/`close` |
-| `InMemorySink` | 有界 per-symbol deque，僅供測試 / notebook 探索 |
+| `InMemorySink` | per-symbol deque，僅供測試 / notebook 探索。**預設無界**——`max_per_symbol` 預設為 `None`，即 `deque(maxlen=None)`；要有界必須明確傳入。不適合長時間執行 |
 | `CallbackSink` | 動態 Python callback 分派；`get_sink(name)` 從模組級 `WeakValueDictionary` 取回 `sinks.yaml` 宣告的實例，`close()` 立即從 registry 移除 |
 
 ### 7.6 儲存層：`BarWriter` / `HistoryStore`
@@ -461,21 +505,33 @@ Parquet 檔案不論裝多少列都要付約 2.9 KB 的 schema/footer 成本—�
 約 5,000 列，所以整檔在每次 flush 時**整份重寫**（讀回現有列 + 合併新列 + 依
 `bar_time` 去重取最後一筆 + 排序 + 寫暫存檔 + `os.replace` 原子替換）。
 
-**緩衝與 flush 觸發**：`max_buffered_bars`（跨所有 partition 累計）或
-`max_flush_seconds`（自最舊緩衝 bar 起算）。單筆即寫曾經讓每根 bar 各佔一個 Parquet
-row group——實測 78 根 5 分鐘 bar，逐筆寫 145,977 bytes / 78 row groups，緩衝後一次寫
-5,936 bytes / 1 row group。
+**緩衝與 flush 觸發** —— `should_flush()` 在**三者任一**成立時回傳 True，檢查順序如下：
 
-**Partition 的 sealing（僅 `date=` partition）**，需要**兩個訊號同時成立**：
+1. **存在已過完的未封存日**（`_has_elapsed_open_day()`）——**最先**檢查，而且
+   **緩衝為空時照樣觸發**。重播突發把最後一批 bar 寫完之後，這是唯一還能驅動
+   `_seal_elapsed_days()` 的東西；任何「緩衝為空就直接回 False」的重寫，都會讓最新
+   一天的檔案永遠沒有 footer。
+2. `max_buffered_bars`（跨所有 partition 累計）。
+3. `max_flush_seconds`（自最舊緩衝 bar 起算）。
 
-1. 同一 (timeframe, symbol) 的**更晚一天**的 bar 到達；
-2. 這一天在 ET 已經過去，且**已經一整個 `max_flush_seconds` 沒有新資料**。
+單筆即寫曾經讓每根 bar 各佔一個 Parquet row group——實測 78 根 5 分鐘 bar，逐筆寫
+145,977 bytes / 78 row groups，緩衝後一次寫 5,936 bytes / 1 row group。
 
-只有 (1) 會讓一次重播的**最新一天**永遠等不到 sealing（沒有更晚的一天會來），只有 (2)
-會在重播突發（五天資料幾秒內全部到齊）進行到一半時就把當天封起來，而 `write()` 拒收已
-sealed 的 partition——把「還沒能讀」的問題變成「資料真的丟了」。安靜期就是用來區分
-「這天結束了」與「這天只是暫時沒有新資料」。**今天的 partition 永遠不會被 (2) 封存**，
-因為 `pq.ParquetWriter` 一旦 `close()` 就不能重新開啟續寫。
+**Partition 的 sealing（僅 `date=` partition）** 在**兩個獨立訊號的任一個**成立時發生
+——它們是 OR，不是 AND：
+
+1. 同一 (timeframe, symbol) 的**更晚一天**的 bar 到達——`_seal_earlier_days()`，
+   由 `write()` 呼叫，**不做安靜期檢查**；**或**
+2. 這一天在 ET 已經過去，**且**已經一整個 `max_flush_seconds` 沒有新資料——
+   `_seal_elapsed_days()`/`_is_finished()`，由 `flush()` 呼叫。
+
+兩個都需要，因為各自單獨都會在真實情境下失效。只有 (1) 會讓一次重播的**最新一天**
+永遠開著（沒有更晚的一天會來）——日線圖重播兩年曾經留下 499 個沒有 footer 的檔案，
+只有 Ctrl+C 才收得掉。只有 (2) 會在重播突發（五天資料幾秒內全部到齊）進行到一半時
+就把當天封起來，而 `write()` 拒收已 sealed 的 partition——把「還沒能讀」的問題變成
+「資料真的丟了」。(2) 裡的安靜期就是用來區分「這天結束了」與「這天只是暫時沒有新資料」。
+**今天的 partition 永遠不會被 (2) 封存**，因為 `pq.ParquetWriter` 一旦 `close()`
+就不能重新開啟續寫。
 
 **讀取端（`storage/history_store.py`）只讀，不推算**：查詢一個從未發布過的 interval
 回傳零列，絕不生出一個看似合理的替代值，也絕不在讀路徑上寫入。想要衍生的 interval，
@@ -535,7 +591,17 @@ sequenceDiagram
 
 ---
 
-## 8. Producer 端設定摘要（Python binding）
+## 8. 設定摘要
+
+### 8.1 Producer 端（層 ①）
+
+| 可調項 | 位置 | 說明 |
+| --- | --- | --- |
+| 發布 endpoint | EL indicator 的 `ZMQEndpoint` input（`EL/TS2Python_Exporter.el`），預設 `tcp://127.0.0.1:5555` | 這是 producer 端 endpoint **唯一**的設定處——DLL 綁定的就是 indicator 傳給 `EL_Init3` 的值。若 TradeStation 已佔用該 port，init 會回 `-3`（§5.4），要改的就是這個 input |
+| 發布開關、錯誤記錄 | indicator 的 `Enabled` / `LogErrors` inputs | |
+| 逐筆 publish 量值 dump | indicator 的 `LogPublish` input，預設關閉 | 每次呼叫印出全部五個量值保留字——想弄清楚某種圖表實際送出什麼時就開這個 |
+
+### 8.2 Subscriber 端（層 ③，Python binding）
 
 | 設定檔 | 內容 |
 | --- | --- |
@@ -543,7 +609,8 @@ sequenceDiagram
 | `config/sinks.yaml` | Sink pipeline 宣告（§7.5），預設單一 `ParquetBarSink` 寫到 `data/bars/` |
 
 `--data-root` 只在 `--sinks-config` 缺失時當 fallback；正常情況下要換輸出位置是改
-`sinks.yaml` 的 `root`，不是 CLI flag。
+`sinks.yaml` 的 `root`，不是 CLI flag。`--endpoint` 設定的是 SUB 端，必須與上面
+indicator 的 `ZMQEndpoint` 一致。
 
 ---
 
@@ -624,8 +691,17 @@ C++ 側只建置 Win32（x86）——TradeStation 是 32-bit process。MSBuild �
 | EasyLanguage indicator 安裝 | [`EL/README.md`](../EL/README.md) |
 | Python binding 使用方式 | [`bindings/python/README.md`](../bindings/python/README.md) |
 
-> **已知的文件漂移**：repo 根 `README.md`〈Versioning〉表與 `contract/README.md` 開頭
-> 仍把 wire `proto` 與 DLL ABI 標示為 `1`；本文與 `contract/wire.md`、
-> `contract/semantics.md`、`cpp/src/ts2python.cpp`（`kDllVersion = 2`）、
-> `bindings/python/.../wire/el_subscriber.py`（`PROTO_VERSION = 2`）均已核對為 **2**。
-> 這兩處尚未同步更新，值得單獨修正。
+> **已知的文件漂移。** 有**三個**檔案仍把 wire `proto` 與 DLL ABI 標示為 `1`：repo 根
+> `README.md` 的〈Versioning〉表、**`README.zh-TW.md` 裡的同一張表**（153-154 行），
+> 以及 `contract/README.md` 開頭。程式碼明確是 `2` ——
+> `cpp/src/ts2python.cpp`（`kDllVersion = 2`）與
+> `bindings/python/.../wire/el_subscriber.py`（`PROTO_VERSION = 2`，其餘一律拒收）
+> ——`contract/wire.md` 與 `contract/semantics.md` 也是。與其他漂移項一併追蹤於
+> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md)（D4）。
+
+> **另有三處已在前文就地標註的未解決漂移**：index/breadth 報價清單（§6.3）、
+> `breadth` session 重置邊界（§6.4），以及 ABI 相容矩陣「缺哪個匯出」的說法——
+> `contract/wire.md` 也帶著同樣的錯誤（§4.3）。四項全部收錄在
+> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md)；
+> **本文一項都沒有修掉**，因為它們都需要改 `contract/`，而那是所有 binding 賴以
+> 建構的 SSoT。
