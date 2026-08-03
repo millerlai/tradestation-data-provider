@@ -177,7 +177,7 @@ are all gone.
 The reason is that a computed bar is indistinguishable from a published one the moment
 it is persisted. `HistoryStore.load_bars` therefore answers zero rows for an interval
 TradeStation never published, and never writes on a read path.
-`tests/test_history_store.py::test_load_bars_never_derives_from_ticks` pins it.
+`tests/test_history_store.py::test_load_bars_never_derives_bars_it_was_not_given` pins it.
 
 ### Storage layout (`storage/`)
 

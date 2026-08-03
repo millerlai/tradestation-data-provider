@@ -60,6 +60,7 @@ from verify_parquet import (
     _parse_date,
     _parse_hhmm,
     _resolve_tz,
+    _validate_intraday_bar_args,
 )
 
 METHODS = ("ffill", "bfill", "interpolate")
@@ -81,11 +82,11 @@ def _read_file(path: Path) -> pa.Table:
     """The file's own columns, without the ones the path implies.
 
     `pq.read_table()` on a single file under `bartype=/interval=/symbol=/date=` runs
-    hive discovery and hands back those three as real columns — 14, not the 11
+    hive discovery and hands back those four as real columns — 19, not the 15
     BAR_SCHEMA declares. Building an output schema from that produced a
-    15-column table while `_build_imputed_row` supplies 12 keys, so every
-    invented bar was written with NULL `timeframe`, `symbol` and `date` next
-    to real values on the rows that came off the wire.
+    20-column table while `_build_imputed_row` supplies 16 keys, so every
+    invented bar was written with NULL `bartype`, `interval`, `symbol` and
+    `date` next to real values on the rows that came off the wire.
 
     `ParquetFile.read()` reads the file and nothing else. `bar_writer._rewrite`
     already does this for the same reason.
@@ -103,8 +104,8 @@ def _passthrough_table(path: Path) -> pa.Table:
     answer (semantics.md §2.4).
 
     The column is appended rather than the file copied byte-for-byte so every
-    file under --output carries one schema. A tree mixing 11-column and
-    12-column files puts the reader back on the schema-drift trap this
+    file under --output carries one schema. A tree mixing 15-column and
+    16-column files puts the reader back on the schema-drift trap this
     protocol exists to remove.
     """
     table = _read_file(path)
@@ -295,21 +296,7 @@ def main() -> int:
     args = ap.parse_args()
 
     try:
-        if args.bar_interval < 1:
-            print(f"error: --bar-interval must be >= 1, got {args.bar_interval}", file=sys.stderr)
-            return 2
-        if args.bar_type != 1:
-            print(
-                f"error: --bar-type {args.bar_type} is not supported here. This tool "
-                f"derives an expected per-day bar grid, which only exists for intraday "
-                f"minute charts (BarType 1). A daily store (BarType 2) is FLAT -- one "
-                f"file per symbol, no date= level -- so this tool's date-partitioned "
-                f"paths would read every day as FILE_MISSING and its minute grid would "
-                f"invent hundreds of 'missing' bars. A day with no daily bar is visible "
-                f"as a missing row in bars.parquet itself.",
-                file=sys.stderr,
-            )
-            return 2
+        _validate_intraday_bar_args(args.bar_interval, args.bar_type)
         tf_label = f"bartype={args.bar_type}/interval={args.bar_interval}"
         tf_sec = args.bar_interval * 60
         start_time = _parse_hhmm(args.start_time)

@@ -40,10 +40,12 @@ class IngestionRuntime:
     """
     Wires Provider → Snapshot → SinkPipeline.
 
-    Ticks and bars both arrive already formed; nothing here builds one from
-    the other. A tick goes to the snapshot and the sinks as it is, and a bar
-    is buffered only long enough to absorb EL's "update every tick" resends
-    of the same bucket.
+    Every point arrives already formed; nothing here builds one from another.
+    A tick-chart point (`bar_type == 0`) goes to the snapshot and the sinks as
+    it is — `bar_time` has only minute resolution, so buffering it would
+    coalesce a whole minute of prints into one. Every other point is buffered
+    only long enough to absorb EL's "update every tick" resends of the same
+    bucket.
 
     Also runs a background:
       - flush task (drives any buffered sink's flush() when its

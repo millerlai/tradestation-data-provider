@@ -115,8 +115,8 @@ async def test_runtime_preserves_published_bar_ohlc(
     assert bar.low == pytest.approx(449.80)
     assert bar.close == pytest.approx(450.40)
     assert bar.el_volume == 12000
-    # ts 13:30:30 floors to 13:30, then steps back one interval: §2 labels a
-    # bar by its left edge, while the wire stamps it at the close.
+    # ts 13:30:30 floors to 13:30 and lands verbatim — bar_time is the
+    # wire's close time, with no shift and no grid snap.
     assert bar.bar_time == datetime(2026, 4, 20, 13, 30, 0, tzinfo=UTC)
 
     # Snapshot accepted the bar.
@@ -177,8 +177,9 @@ async def test_runtime_replaces_intra_bar_updates_and_drops_stale_bars(
     await _publish(pub, "SPY", _bar_payload(ts_el_1 + 5, (450.10, 450.20, 450.05, 450.15), 3000))
     await _publish(pub, "SPY", _bar_payload(ts_el_1 + 30, (450.10, 450.50, 450.05, 450.45), 8000))
     await _publish(pub, "SPY", _bar_payload(ts_el_1 + 55, (450.10, 450.75, 449.80, 450.40), 12000))
-    # Wire stamps the close, so these land on the 13:29 / 13:30 left edges.
-    # New bucket 13:30 closes 13:29 and buffers itself.
+    # bar_time is the verbatim close, so these three refreshes all land on
+    # 13:30. The next payload's bar_time (13:31) is a new bucket: it closes
+    # and emits the buffered 13:30 bar, then buffers itself.
     ts_el_2 = datetime(2026, 4, 20, 13, 31, 0, tzinfo=UTC).timestamp()
     await _publish(pub, "SPY", _bar_payload(ts_el_2 + 1, (450.40, 450.60, 450.30, 450.55), 5000))
 
@@ -197,7 +198,7 @@ async def test_runtime_replaces_intra_bar_updates_and_drops_stale_bars(
     assert runtime._counters.bars_direct_in == 1
     assert runtime._counters.bars_direct_updated == 2
 
-    # Now replay bucket 13:29 — it is stale (<= last_emitted) and must be dropped.
+    # Now replay bucket 13:30 — it is stale (<= last_emitted) and must be dropped.
     await _publish(pub, "SPY", _bar_payload(ts_el_1 + 55, (450.10, 450.75, 449.80, 450.40), 12000))
 
     for _ in range(200):

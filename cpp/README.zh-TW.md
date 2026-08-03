@@ -216,7 +216,7 @@ cmake --install build/x86-release --prefix build/x86-release/stage
 
 ## C ABI
 
-DLL 版本 `EL_DllVersion() == 1`。return codes 見 [`../contract/error_codes.md`](../contract/error_codes.md)。
+DLL 版本 `EL_DllVersion() == 2`。return codes 見 [`../contract/error_codes.md`](../contract/error_codes.md)。
 
 ```c
 int __stdcall EL_DllVersion(void);
@@ -233,7 +233,7 @@ int __stdcall EL_Publish(
     double bid, double ask);
 ```
 
-Return codes：`0` 成功、`1` 已初始化（重複呼叫 idempotent）、`-1` 未初始化、`-2` ZMQ send 失敗、`-3` init 失敗（bind / socket create）、`-4` 參數無效、`-5` 無法對應的 bar 間隔、`-6` ABI 不符（墓碑）。
+Return codes：`0` 成功、`1` 已初始化（重複呼叫 idempotent）、`-1` 未初始化、`-2` ZMQ send 失敗、`-3` init 失敗（bind / socket create）、`-4` 參數無效、`-6` ABI 不符（墓碑）。
 
 ### 為什麼要留墓碑
 
@@ -263,6 +263,6 @@ python contract/tools/record.py --latency
 cpp\Release\TS2Python_TestHarness.exe --mode stress --rate 10000 --seconds 10
 ```
 
-Harness 退 `0` 表示沒掉訊。Subscriber 端應看到 ~100 000 筆 `SPY` topic 訊息，以及 p50 / p95 / p99 延遲統計。其他 harness 模式：`--mode smoke`（3 個 topic + 1 根 bar）、`--mode noquote`、`--mode bars`（每個非 1m 的 `tf`，外加 `-5` 拒收路徑）、`--mode session`、`--mode multithread --threads 8 --per-thread 5000`。各 fixture 對應的 mode 與 frame 數列在 [`../contract/fixtures/README.md`](../contract/fixtures/README.md)。
+Harness 退 `0` 表示沒掉訊。Subscriber 端應看到 ~100 000 筆 `SPY` topic 訊息，以及 p50 / p95 / p99 延遲統計。其他 harness 模式：`--mode smoke`（3 個 topic + 1 根 bar）、`--mode noquote`、`--mode bars`（每一個 `BarType`/`BarInterval` 組合，沒有任何一個被拒收——包含以前會被 `-5` 映射直接拒收的那些）、`--mode session`、`--mode multithread --threads 8 --per-thread 5000`。各 fixture 對應的 mode 與 frame 數列在 [`../contract/fixtures/README.md`](../contract/fixtures/README.md)。
 
-**每次啟動都會先驗 ABI**：在任何 init 之前斷言 `EL_DllVersion() == 1`、且兩個墓碑都回 `-6`。只有想到才會跑的檢查，不算檢查。
+**每次啟動都會先驗 ABI**：在任何 init 之前斷言 `EL_DllVersion() == 2`、且兩個墓碑都回 `-6`。只有想到才會跑的檢查，不算檢查。

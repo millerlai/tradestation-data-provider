@@ -56,7 +56,7 @@ ready-made binaries. See [`../cpp/README.md`](../cpp/README.md) for the details.
 | --- | --- | --- |
 | `ZMQEndpoint` | `tcp://127.0.0.1:5555` | where the DLL publishes |
 | `Enabled` | `True` | master switch |
-| `LogErrors` | `True` | init failures, refused charts, non-zero publish return codes |
+| `LogErrors` | `True` | init failures, sub-minute / aggregated-tick chart detection, non-zero publish return codes |
 | `LogPublish` | `False` | one line per publish call — see below |
 
 ### `LogPublish`
@@ -76,32 +76,45 @@ source line by line, with no mapping step in between to reason about. `volume`
 and `ticks` sit side by side because that is the pair whose meaning flips
 between chart types.
 
-On a **refused** chart the publish never runs, so a third line shape covers it:
+No interval is refused and no chart type stops the publish — `LogErrors` covers
+two detections that fire once per chart and let publishing continue:
 
 ```
-[TS2Python] refused SPY bar_type=0.00 bar_interval=100.00
-            date=1260724.00 time=1600.00
-            volume=753328 ticks=760951 upticks=753328 downticks=7623 openint=0
+[TS2Python] sub-minute chart detected on symbol=SPY — two consecutive bars
+            share date=1260724.00 time=1600.00. ts_str has minute resolution...
+[TS2Python] aggregated tick chart detected on symbol=SPY — bar_interval=100.
+            each call carries 100 prints aggregated into one bar...
 ```
 
-Only the EasyLanguage words appear — `rc` does not exist unless the publish
-ran. That is the half that matters when measuring a chart type for the first
-time, and without it the switch printed nothing at all on exactly the charts it
-is documented for.
+Both used to stop the publish entirely — that was this script deciding the
+data was not worth sending. Now `bar_type`/`bar_interval` travel on every
+frame so a consumer can see what the chart was, and the wire's receive-side
+`ts` is what separates same-minute frames.
 
-Leave it off in normal use. On a tick chart, or on any chart in "update every
-tick" mode, it prints once per print.
+Leave `LogPublish` off in normal use. On a tick chart, or on any chart in
+"update every tick" mode, it prints once per print.
 
 ## Supported chart intervals
+
+Every chart type is forwarded — there is no refusal and no idle state.
 
 | chart | behaviour |
 | --- | --- |
 | 1-tick series (`BarType = 0`, `BarInterval = 1`) | sent print by print |
-| N-tick series (`BarType = 0`, `BarInterval > 1`) | **idle**; each call is N prints aggregated and the tick wire cannot say so |
-| 1 / 5 / 15 / 30 / 60 minute | full OHLC sent under the matching timeframe (`1m`, `5m`, …) |
-| Daily (`BarType = 2`, `BarInterval = 0` or `1`) | full OHLC sent under the `1d` timeframe. TradeStation 10 reports `0` here — `1` is accepted too, because that is what the ABI documented before a live install was measured |
-| Weekly / monthly / P&F / any other unsupported interval | **idle**; the DLL rejects it with `-5` and the reason is printed once |
-| Second-based charts | **idle**; the indicator detects it itself, stops sending, and prints the reason once |
+| N-tick series (`BarType = 0`, `BarInterval > 1`) | one aggregated bar per call; detected and logged once (see above), publishing continues |
+| 1 / 5 / 15 / 30 / 60 minute and any other intraday interval (`BarType = 1`) | full OHLC sent, `bar_type`/`bar_interval` travel verbatim |
+| Daily (`BarType = 2`, `BarInterval = 0` or `1`) | full OHLC sent. TradeStation 10 reports `0` here — `1` is accepted too, because that is what the ABI documented before a live install was measured |
+| Weekly / monthly / P&F / any other bar type | forwarded the same way; `bar_type` names it, nothing maps or rejects it |
+| Sub-minute / sub-second chart (`BarType = 1`, two consecutive bars sharing one minute-resolution `Date`/`Time`) | detected and logged once, publishing continues — **see the caveat below** |
+
+> **A sub-second chart is wire-indistinguishable from a 1-minute chart.** Both
+> report `BarType = 1`, and `TsStr` only has minute resolution. The reference
+> Python binding treats two frames sharing a `bar_time` as refinements of one
+> forming bar — correct for a real 1-minute chart under "Update Every Tick" —
+> so it currently coalesces a genuinely sub-minute chart's distinct bars down
+> to one per minute. Use a tick chart (`BarType = 0`, forwarded print by print)
+> for sub-second data; see the exporter's header comment for the full
+> explanation.
 
 ### Why all five quantity words go out, and none is chosen for you
 
