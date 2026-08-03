@@ -42,10 +42,9 @@ class IngestionRuntime:
 
     Every point arrives already formed; nothing here builds one from another.
     A tick-chart point (`bar_type == 0`) goes to the snapshot and the sinks as
-    it is — `bar_time` has only minute resolution, so buffering it would
-    coalesce a whole minute of prints into one. Every other point is buffered
-    only long enough to absorb EL's "update every tick" resends of the same
-    bucket.
+    it is — a second holds many prints and they all share one `bar_time`, so
+    buffering would coalesce them into one. Every other point is buffered only
+    long enough to absorb EL's "update every tick" resends of the same bucket.
 
     Also runs a background:
       - flush task (drives any buffered sink's flush() when its
@@ -268,14 +267,21 @@ class IngestionRuntime:
 
         TICK CHARTS BYPASS ALL OF IT. The buffer's precondition is that
         ``bar_time`` names the bar uniquely, and on ``bar_type`` 0 it does
-        not: ``ts_str`` has minute resolution, so every print inside one
-        minute parses to the same ``bar_time``. Routed through the buffer,
-        each print replaced the previous one and — once the minute was
-        emitted — the ``<= last_emitted`` gate dropped the rest, silently
-        losing nearly the whole stream. Every tick-chart frame is therefore
-        forwarded the moment it arrives, exactly as the old tick path did;
-        the wire's ``ts`` (stored per row) is what orders prints within a
-        minute, and any dedupe is the consumer's decision.
+        not: ``ts_str`` resolves to the second, and a second holds many
+        prints, so they all parse to the same ``bar_time``. Routed through
+        the buffer, each print replaced the previous one and — once that
+        second was emitted — the ``<= last_emitted`` gate dropped the rest,
+        silently losing nearly the whole stream. Every tick-chart frame is
+        therefore forwarded the moment it arrives, exactly as the old tick
+        path did; the wire's ``ts`` (stored per row) is what orders prints
+        within a second, and any dedupe is the consumer's decision.
+
+        Sub-minute BAR charts do NOT need this bypass: a 30-second chart is
+        ``bar_type`` 14 and its two bars a minute carry distinct ``bar_time``
+        values, because ``ts_str`` comes from EL's ``BarDateTime`` and
+        carries real seconds (semantics.md §1.3). While it came from
+        ``Date``/``Time``, which do not, those two bars collided here and one
+        of them was dropped as an intra-bar update.
         """
         if bar.bar_type == 0:
             self._counters.bars_direct_in += 1

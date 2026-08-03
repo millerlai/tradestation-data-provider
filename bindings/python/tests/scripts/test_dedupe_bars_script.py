@@ -61,10 +61,11 @@ def test_dedupe_file_dry_run_preserves_dups(tmp_path):
 def test_tick_partitions_are_skipped_not_deduped(tmp_path):
     """bartype=0 rows share a bar_time by design; deduping deletes real trades.
 
-    A tick chart's ts_str has minute resolution, so every print inside one
-    minute carries the same bar_time and only `ts` separates them. Keyed on
-    bar_time, this tool would keep one print per minute and delete the rest —
-    the exact collapse the ingest path bypasses its buffer to avoid.
+    A tick chart's ts_str resolves to the second, and a second holds many
+    prints, so they carry the same bar_time and only `ts` separates them.
+    Keyed on bar_time, this tool would keep one print per second and delete
+    the rest — the exact collapse the ingest path bypasses its buffer to
+    avoid.
     """
     part = tmp_path / "bartype=0" / "interval=1" / "symbol=SPY" / "date=2026-04-20"
     part.mkdir(parents=True)

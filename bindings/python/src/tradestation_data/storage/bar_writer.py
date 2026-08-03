@@ -60,9 +60,10 @@ BAR_SCHEMA: pa.Schema = pa.schema(
         pa.field("category", pa.int64(), nullable=False),
         pa.field("bid", pa.float64(), nullable=True),
         pa.field("ask", pa.float64(), nullable=True),
-        # The DLL's receive clock, verbatim. On a tick chart ts_str has
-        # minute resolution, so this is the only sub-minute ordering the
-        # stored rows have. Nullable only for rows synthesised off-wire.
+        # The DLL's receive clock, verbatim. On a tick chart ts_str resolves
+        # to the second and a second holds many prints, so this is the only
+        # intra-second ordering the stored rows have. Nullable only for rows
+        # synthesised off-wire.
         pa.field("ts", pa.float64(), nullable=True),
     ]
 )

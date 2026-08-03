@@ -406,12 +406,12 @@ async def test_direct_bar_release_deadline_is_close_plus_grace() -> None:
 async def test_tick_chart_frames_bypass_the_buffer_entirely() -> None:
     """Every bar_type-0 frame is forwarded the moment it arrives.
 
-    ts_str has minute resolution, so every print inside one minute parses to
-    the same bar_time. Routed through the intra-bar buffer, each print
-    replaced the previous one and — once the minute was emitted — the
-    `<= last_emitted` gate dropped the rest: a live 1-tick chart lost nearly
-    its whole stream, silently, where proto 1's tick path forwarded every
-    print. The buffer's precondition is that bar_time names the bar
+    ts_str resolves to the second, and a second holds many prints, so they
+    all parse to the same bar_time. Routed through the intra-bar buffer,
+    each print replaced the previous one and — once that second was emitted
+    — the `<= last_emitted` gate dropped the rest: a live 1-tick chart lost
+    nearly its whole stream, silently, where proto 1's tick path forwarded
+    every print. The buffer's precondition is that bar_time names the bar
     uniquely, and on a tick chart it does not.
     """
     runtime = _make_runtime()
@@ -419,7 +419,7 @@ async def test_tick_chart_frames_bypass_the_buffer_entirely() -> None:
     runtime._on_bar = emitted.append
 
     ts = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)
-    # Five prints inside one minute — same bar_time on every frame.
+    # Five prints inside one second — same bar_time on every frame.
     for i in range(5):
         await runtime._handle_provider_bar(
             _bar("SPY", ts, close=450.0 + i * 0.01, bar_type=0, bar_interval=1)

@@ -51,10 +51,10 @@ class Bar:
     included.
 
     ``ts`` is the DLL's receive-side wall clock (UTC epoch seconds), landed
-    verbatim from the wire. On a tick chart it is the only sub-minute time
-    there is: ``ts_str`` has minute resolution, so every print inside one
-    minute shares a ``bar_time``, and ``ts`` is what orders them — exactly
-    the field that was the tick's timestamp before the shapes merged.
+    verbatim from the wire. On a tick chart it is the only intra-second time
+    there is: ``ts_str`` resolves to the second, and a second holds many
+    prints, so they share a ``bar_time`` and ``ts`` is what orders them —
+    exactly the field that was the tick's timestamp before the shapes merged.
     None only for rows synthesised off-wire (tests, examples).
     """
 
