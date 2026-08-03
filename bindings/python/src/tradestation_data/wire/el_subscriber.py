@@ -501,10 +501,19 @@ def _floor_to_minute_utc(epoch_seconds: float) -> datetime:
 
 
 def _parse_el_str_as_et(s: str) -> datetime | None:
-    """Parse EL TsStr ``yyyy-MM/dd-HH:mm:ss`` (24-hour) as ET, return
-    UTC-aware datetime floored to the minute. Returns None on any parse
+    """Parse EL TsStr ``yyyy-MM/dd-HH:mm:ss`` (24-hour) as ET, return a
+    UTC-aware datetime — **seconds included**. Returns None on any parse
     failure — the caller refuses the frame rather than substituting a
     guess. DST is resolved by ZoneInfo from the parsed local fields.
+
+    The seconds used to be floored to zero here (semantics.md §2.1, since
+    reversed). That was a no-op for as long as the publisher built TsStr
+    from EL's ``Date``/``Time``, which carry no seconds at all — but the
+    publisher now uses ``BarDateTime``, which does. Flooring a real value
+    would collapse a 30-second chart's two bars per minute onto one
+    ``bar_time``, and ``_handle_provider_bar`` would then read the second
+    as an intra-bar update of the first and drop it. semantics.md §1.3
+    has the live measurement.
 
     24-hour format is deliberate: the prior ``hh:mm:ss tt`` format broke
     on zh-TW Windows hosts where ``FormatTime("tt")`` emits localized
@@ -519,8 +528,7 @@ def _parse_el_str_as_et(s: str) -> datetime | None:
         return None
     aware_et = local.replace(tzinfo=_ET_TZ)
     _warn_if_dst_ambiguous(aware_et, s)
-    utc_dt = aware_et.astimezone(UTC)
-    return utc_dt.replace(second=0, microsecond=0)
+    return aware_et.astimezone(UTC)
 
 
 def _warn_if_dst_ambiguous(aware_et: datetime, raw: str) -> None:
