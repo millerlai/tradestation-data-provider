@@ -495,7 +495,6 @@ flowchart LR
 | breadth symbol（`$TICK` / `$ADD`） | 五個 `el_*` 全為 0、`bid`/`ask` 為 `null`，易被 binding 誤判 | `noquote` |
 | 非 index symbol 的 null 報價 | 只測 index symbol 分不出 §3.1（publisher 送 null）與 §3.2（binding 判無效） | `noquote` |
 | 每一個 BarType/BarInterval | 原值 → `bartype=`/`interval=` 分區，沒有任何組合被拒收 | `bars` |
-| 無法對應的間隔 | 必須回 `-5` 且不送出，而不是塞進預設值 | `bars` |
 | session 首尾 bar | 釘住「publisher 給什麼就存什麼」 | `session` |
 | bar 全程無報價 | bar quote 在本協定結構上不存在，binding 不該有任何判斷 | 四份皆驗 |
 | DST 轉換日 | `ts_str` → UTC 的正確性，跨 binding 最容易不一致 | 尚無（單元測試有，fixture 無） |

@@ -53,6 +53,18 @@ a minute," and the wire currently carries no field that answers this.
 being wrongly relied on — with (b) as the real fix, worth folding into any
 future proto/ABI bump (see I2, which already has one queued).
 
+**Update (found while fixing `task.md` T5):** (c) is already half-done. The
+`.el` file's own header comment (`TS2Python_Exporter.el:39-65`) already spells
+out this exact caveat — it just wasn't surfaced anywhere a binding author
+would read it. `EL/README.md`/`EL/README.zh-TW.md`'s "Supported chart
+intervals" table now carries the same warning (T5's fix). Still missing:
+`contract/semantics.md` has no mention of it at all (`grep` for
+`sub-minute|coalesce` there returns nothing) — per this repo's own rule
+("anything a second binding would have to guess belongs in
+`contract/semantics.md`"), that's the one place this is genuinely absent, and
+is a much smaller lift than originally scoped here. The Python-side data loss
+itself (`ingestion.py:278`) is unchanged and still needs (a)/(b)/(c) decided.
+
 ---
 
 ## I2 — `verify_parquet.py` / `imputation_parquet.py` expected-bar grid is wrong for session-restarting intervals

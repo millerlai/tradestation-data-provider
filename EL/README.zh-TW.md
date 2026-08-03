@@ -49,7 +49,7 @@ cd cpp
 | --- | --- | --- |
 | `ZMQEndpoint` | `tcp://127.0.0.1:5555` | DLL 發布的位址 |
 | `Enabled` | `True` | 總開關 |
-| `LogErrors` | `True` | init 失敗、被拒收的圖表、非零的 publish 回傳碼 |
+| `LogErrors` | `True` | init 失敗、sub-minute / aggregated-tick 圖表偵測、非零的 publish 回傳碼 |
 | `LogPublish` | `False` | 每次 publish 印一行 —— 見下 |
 
 ### `LogPublish`
@@ -67,30 +67,42 @@ subscriber 收到的內容**：
 這個一致性正是重點：落地的分區可以逐行對照來源，中間沒有任何對映步驟需要推敲。
 `volume` 與 `ticks` 並排，因為那一對正是在不同圖表型態之間會反轉語意的欄位。
 
-**被拒收的圖表** publish 不會執行，因此另有第三種行的形狀：
+沒有任何間隔被拒收，也沒有圖表型態會讓 publish 停下來——`LogErrors` 涵蓋兩種只印一次
+就繼續發布的偵測：
 
 ```
-[TS2Python] refused SPY bar_type=0.00 bar_interval=100.00
-            date=1260724.00 time=1600.00
-            volume=753328 ticks=760951 upticks=753328 downticks=7623 openint=0
+[TS2Python] sub-minute chart detected on symbol=SPY — two consecutive bars
+            share date=1260724.00 time=1600.00. ts_str has minute resolution...
+[TS2Python] aggregated tick chart detected on symbol=SPY — bar_interval=100.
+            each call carries 100 prints aggregated into one bar...
 ```
 
-這行只有 EasyLanguage 側的字 —— `rc` 要 publish 真的跑過才存在。但要第一次量測一個
-圖表型態，需要的本來就是這一半；在此之前 LogPublish 在它文件上宣稱適用的那些圖表上
-一行都印不出來。
+這兩種情況以前都會讓 publish 整個停掉——那是這支腳本自己判斷資料不值得送。現在
+`bar_type`/`bar_interval` 會逐一隨每個 frame 上 wire，讓消費端自己看得出圖表是什麼，
+同一分鐘內的多個 frame 則靠 wire 的接收端 `ts` 分開。
 
-平時請關閉。在 tick 圖、或任何開啟 "update every tick" 的圖上，它會每筆成交印一次。
+平時請關閉 `LogPublish`。在 tick 圖、或任何開啟 "update every tick" 的圖上，它會每筆
+成交印一次。
 
 ## 支援的 chart 間隔
+
+每種圖表型態都會被轉發——沒有拒收，也沒有閒置狀態。
 
 | chart | 行為 |
 | --- | --- |
 | 1-tick series（`BarType = 0`, `BarInterval = 1`） | 逐筆送出 |
-| N-tick series（`BarType = 0`, `BarInterval > 1`） | **閒置**；每次呼叫是 N 筆聚合，tick wire 無欄位可表達 |
-| 1 / 5 / 15 / 30 / 60 分鐘圖 | 依照對應的 timeframe (`1m`, `5m`, 等) 送出完整 OHLC |
-| 日線圖（`BarType = 2`, `BarInterval = 0` 或 `1`） | 以 `1d` timeframe 送出完整 OHLC。TradeStation 10 實測回報 `0`；`1` 也收，那是實機量測前 ABI 寫定的值 |
-| 週 / 月 / P&F / 其他不支援的間隔 | **閒置**，並由 DLL 回傳 `-5` 拒收，Print 一次原因 |
-| 秒級圖表 | **閒置**，由 indicator 自行偵測後停止送出，Print 一次原因 |
+| N-tick series（`BarType = 0`, `BarInterval > 1`） | 每次呼叫送一根聚合 bar；偵測後只 Print 一次（見上），publishing 繼續 |
+| 1 / 5 / 15 / 30 / 60 分鐘圖及其他任何 intraday 間隔（`BarType = 1`） | 送出完整 OHLC，`bar_type`/`bar_interval` 逐字上 wire |
+| 日線圖（`BarType = 2`, `BarInterval = 0` 或 `1`） | 送出完整 OHLC。TradeStation 10 實測回報 `0`；`1` 也收，那是實機量測前 ABI 寫定的值 |
+| 週 / 月 / P&F / 其他任何 bar type | 同樣被轉發；`bar_type` 本身就能指名，沒有任何對映或拒收 |
+| Sub-minute / sub-second 圖表（`BarType = 1`，連續兩根 bar 共用同一個分鐘解析度的 `Date`/`Time`） | 偵測後只 Print 一次，publishing 繼續——**請見下方但書** |
+
+> **秒級圖表在 wire 上跟 1 分鐘圖無法分辨。** 兩者都回報 `BarType = 1`，而 `TsStr`
+> 只有分鐘解析度。目前的 Python 參考 binding 會把「共用同一個 `bar_time`」的兩個
+> frame 當成同一根尚未收完的 bar 的更新——這在真正的 1 分鐘圖搭配「Update Every
+> Tick」時是對的——所以它現在會把一個真正的秒級圖表的多根不同 bar 折疊成每分鐘一根。
+> 要秒級資料請改用 tick 圖（`BarType = 0`，逐筆轉發）；完整說明見 exporter 檔頭的
+> 註解。
 
 ### 為何五個量值全部送出、且不替你挑
 
