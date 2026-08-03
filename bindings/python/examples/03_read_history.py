@@ -2,14 +2,14 @@
 """Read stored data back, and see what the read API does and does not do.
 
 **Runs offline** — no TradeStation, no DLL. It fabricates a session's worth
-of bars and ticks, writes them exactly as the live runtime would, and reads
+of points, writes them exactly as the live runtime would, and reads
 them back.
 
     uv run python examples/03_read_history.py
 
 The thing worth noticing is what is NOT here. `load_bars` reads Parquet and
 nothing else: there is no cache to miss, no resampling, no backfill. Ask for
-a timeframe the collector never recorded and you get zero rows, not a
+a chart the collector never recorded and you get zero rows, not a
 computed substitute — because a bar assembled here would be indistinguishable
 from one TradeStation published the moment it hit disk, and you would have no
 way to tell later which you were looking at. Building 5-minute bars out of
@@ -17,13 +17,13 @@ way to tell later which you were looking at. Building 5-minute bars out of
 rules, downstream of this package.
 
     data/
-      ticks/symbol=SPY/date=2026-04-20/ticks.parquet
       bars/bartype=1/interval=1/symbol=SPY/date=2026-04-20/bars.parquet
       bars/bartype=2/interval=1/symbol=SPY/bars.parquet   <- one file, no date=
 
-Bars are LEFT-labelled: `bar_time` covers [t, t+step). A 09:30 bar spans
-09:30 to 09:31, and an RTH 1m session ends at 15:59, not 16:00
-(contract/semantics.md §2).
+`bar_time` is the publisher's own timestamp, landed verbatim: EasyLanguage's
+`Time` is the point's CLOSE, so an RTH 1m session runs 09:31 through 16:00.
+There is no left-edge conversion and no grid — a consumer wanting left edges
+subtracts for itself (contract/semantics.md §2).
 
 Times are Eastern. This is a US-equity store, so a bare `datetime(...)` passed
 to `load_bars` means `America/New_York` (§2.3) — you never do
@@ -52,8 +52,8 @@ SESSION_OPEN = datetime(2026, 4, 20, 9, 30, tzinfo=ET)
 SYMBOL = "SPY"
 
 
-def write_synthetic_store(root: Path, *, minutes: int = 30) -> tuple[int, int]:
-    """Write bars and ticks the way the live sinks would.
+def write_synthetic_store(root: Path, *, minutes: int = 30) -> int:
+    """Write points the way the live sink would.
 
     The quantities are shaped like real intraday data: EasyLanguage's
     `Volume` is the up-tick share volume (so it equals `UpTicks`) and

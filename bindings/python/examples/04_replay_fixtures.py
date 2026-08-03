@@ -22,14 +22,16 @@ hand-written one would only restate what we believe the wire looks like.
 
 Available fixtures:
 
-    smoke        ticks + a bar across three symbols; index-symbol quote
-                 invalidation; bar_time floored to the minute
+    smoke        points across three symbols; bar_time floored to the minute
     noquote      absent quotes as JSON null, on an index and a normal symbol
-    bars         every non-1m timeframe: 5m/15m/30m/1h/1d
-    session      first and last bar of an RTH session (09:30 / 15:59 ET)
+    bars         nine BarType/BarInterval combinations, none refused —
+                 including 2-minute, weekly and 2-day, which the superseded
+                 wire rejected with rc -5 and never published at all
+    session      first and last point of an RTH session, landed as EL stamped
+                 them (09:31 / 16:00 ET — the close times, verbatim)
 
 There is no superseded-protocol fixture to replay. A publisher older than
-`proto` 1 is refused outright rather than read on a compatibility path, so
+`proto` 2 is refused outright rather than read on a compatibility path, so
 there is nothing for such a fixture to certify.
 """
 

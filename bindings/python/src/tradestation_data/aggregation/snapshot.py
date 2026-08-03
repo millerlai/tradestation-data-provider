@@ -19,13 +19,15 @@ class SymbolState:
     """
     In-memory snapshot of a symbol's recent market state.
 
-    - `last_tick`        : most recent Tick received
     - `last_closed_bar`  : most recent closed bar the publisher shipped
     - `recent_bars`      : bounded deque of recent closed bars
                            (oldest→newest), filtered per SessionPolicy
     - `session_date`     : NY trading date the current buffer belongs to
-    - `session_open_bar` : the first bar at/after 09:30 ET for
-                           `session_date`, populated once crossed.
+    - `session_open_bar` : the first regular-session point for
+                           `session_date`, populated once crossed. Its
+                           `bar_time` is a CLOSE, so the test is strictly
+                           after 09:30 ET — a point closing exactly at
+                           09:30 is the last pre-market one.
                            May remain None if the session opened while
                            the symbol was offline / we only have pre-
                            market data.

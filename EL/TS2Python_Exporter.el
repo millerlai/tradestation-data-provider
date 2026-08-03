@@ -48,7 +48,18 @@
 
   What survives is the repetition: on a minute chart Date and Time advance every
   bar; on a sub-minute chart consecutive bars share both. This script latches on
-  that and stops publishing. The test needs no version-specific constant, unlike
+  that and says so ONCE — it does not stop publishing.
+
+  Know what that costs before attaching one. A sub-minute chart reports
+  BarType 1 / BarInterval 1, exactly like a 1-minute chart, and TsStr has
+  minute resolution — so the wire cannot tell the two apart, and the
+  subscriber cannot either. Its buffer treats same-bar_time frames as
+  refinements of one bar (which is right for a 1-minute chart in "update
+  every tick" mode) and will coalesce a sub-minute chart's distinct bars
+  into one point per minute. The raw frames are on the wire and `ts`
+  separates them, but the reference binding's stored rows will not.
+  Use a tick chart (BarType 0, which the subscriber forwards print by
+  print) or a minute chart. The test needs no version-specific constant, unlike
   BarType_ext — whose values differ across TS releases and have never been
   checked against a live install here. To pin those down, Print(BarType_ext) on
   a known 1-minute chart and on a known 1-second one.
@@ -91,16 +102,22 @@ Variables:
   Calling convention is __stdcall (TS default for DefineDLLFunc).
   Keep types in sync with cpp/include/ts2python.h.
 
-  EL_PublishTick and EL_PublishBar kept their names across the protocol
+  EL_PublishTick and EL_PublishBar once kept their names across a protocol
   rewrite but NOT their signatures. Under __stdcall the callee pops the
   arguments, so calling either one with the wrong arity corrupts the stack —
-  TradeStation misbehaves or dies, it does not return an error. What makes
-  that unreachable is the init guard: every publish call below sits behind
-  InitDone, and the DLL this file is built for renamed its init to
-  EL_Init3. An older DLL has no such export, so DefineDLLFunc fails to
-  resolve at verify time and no publish ever runs. Conversely this DLL keeps
-  EL_Init and EL_Init2 as tombstones returning -6, so an older .ELD stops at
-  init too. See contract/wire.md.
+  TradeStation misbehaves or dies, it does not return an error. That is why
+  the publisher this file binds is named EL_Publish rather than reusing
+  either: a name that changed meaning is the hazard, so it did not change
+  meaning.
+
+  Two layers make a mismatch safe. An ABI-1 DLL does not export EL_Publish
+  at all, so DefineDLLFunc fails to resolve at verify time and nothing runs.
+  It DOES export EL_Init3 with this same signature, so init alone would not
+  catch it — the EL_DllVersion latch below is what does, and every publish
+  call sits behind InitDone and VersionMismatch. Conversely this DLL keeps
+  EL_Init, EL_Init2, EL_PublishTick and EL_PublishBar as tombstones
+  returning -6, so an older .ELD stops at its own init. See
+  contract/wire.md.
 
   The quantity parameters are double because EasyLanguage has no 64-bit
   integer type; the DLL casts them to int64 before they reach the wire. }
