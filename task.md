@@ -26,7 +26,7 @@ decision first. The two that do are tracked in `TODO_ISSUES.md` instead.
 | T6 | `cpp/README.md:236`, `cpp/README.zh-TW.md` | Still documents removed `-5 unmappable bar interval` return code | ✅ | `docs(cpp): drop the retired -5 return code from cpp/README` |
 | T7 | `bindings/python/src/tradestation_data/runtime/ingestion.py:42` | Class docstring still describes deleted Tick/Bar split | ✅ | `docs(runtime): fix IngestionRuntime docstring after the tick/bar split removal` |
 | T8 | `bindings/python/tests/test_ingestion_runtime.py:118` | Comment still describes removed left-edge shift | ✅ | `test(runtime): fix stale left-edge comments in test_ingestion_runtime.py` |
-| T9 | `bindings/python/src/tradestation_data/sinks/callback.py:100` | Docstring has garbled duplicated `on_bar` fragment | ⬜ | |
+| T9 | `bindings/python/src/tradestation_data/sinks/callback.py:100` | Docstring has garbled duplicated `on_bar` fragment | ✅ | `docs(sinks): fix garbled CallbackSink docstring left by the on_tick removal` |
 | T10 | `bindings/python/scripts/imputation_parquet.py:83` | Docstring column counts stale after schema grew (4th partition level + 4 new columns) | ⬜ | |
 | T11 | `bindings/python/scripts/imputation_parquet.py:298` | `--bar-interval`/`--bar-type` validation block duplicated instead of imported from `verify_parquet.py` | ⬜ | |
 

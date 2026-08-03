@@ -97,13 +97,13 @@ class _Entry:
 
 
 class CallbackSink(BaseSink):
-    """Dispatch ticks/bars to dynamically registered Python callbacks.
+    """Dispatch bars to dynamically registered Python callbacks.
 
     Thread-safety: ``on`` / ``on_any`` / ``off`` use an internal lock
     so user code can register from any thread. Dispatch (``on_bar``)
-    ``on_bar``) takes the same lock briefly to snapshot the callback
-    list, then releases it — callbacks themselves run unlocked so a
-    slow callback does not block registration.
+    takes the same lock briefly to snapshot the callback list, then
+    releases it — callbacks themselves run unlocked so a slow callback
+    does not block registration.
     """
 
     def __init__(self, *, name: str) -> None:
