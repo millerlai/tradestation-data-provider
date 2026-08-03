@@ -14,7 +14,7 @@ separately from `task.md`, which covers the nine findings that are.
 
 **Files:** `EL/TS2Python_Exporter.el:231`, `bindings/python/src/tradestation_data/runtime/ingestion.py:278`
 
-**Status:** 🔄 real fix identified (rewrite `TS2Python_Exporter.el` to use `BarDateTime` instead of `Date`/`Time`) — confirming two remaining pieces via a live probe before writing it: `BarDateTime.Format()` behavior, and mid-formation (refire) behavior
+**Status:** ✅ **FIXED** 2026-08-03 — see `docs/plan-bardatetime-seconds.md` (P1–P6, branch `fix/bardatetime-seconds`). The publisher now builds `ts_str` from `BarDateTime`, which carries real seconds; the binding no longer floors them away; `contract/semantics.md` §2.1 is reversed and §1.3 records the measurement; `bars.jsonl` gained two `BarType=14` frames one minute apart in `bar_time` but 30 seconds apart in reality, so conformance now fails if any binding reintroduces the flooring.
 
 ### The problem
 
@@ -225,23 +225,17 @@ Phase 2's `ts_str_prev` would unblock I1 and I2 together with one field.
 
 ## Next step
 
-**Run `EL/Probe_TimePrecision_And_B1.el` LIVE (not replay), during market
-hours, on the `BarType=14/BarInterval=30` SPY chart, with "Update Every
-Tick" confirmed on.** Every run so far has been historical replay (every
-line `newbar=Y`) — replay already conclusively answered Q1 and Q1b, but
-can't exercise a refire. What's still needed:
+**I1 is closed** (`docs/plan-bardatetime-seconds.md`). Two things it leaves
+behind:
 
-1. `fmt_now`/`fmt_prev` (`BarDateTime.Format(...)`) — does it work cleanly,
-   or does `TsStr` need manual zero-padding from `Hour`/`Minute`/`Second`?
-2. At least one `bar#` with several consecutive `newbar=N` lines — confirms
-   whether `BarDateTime`/`Time[1]` hold steady across refires of a bar still
-   forming (this is I1's `BarDateTime` fix AND the original B1 question,
-   both closed by the same capture).
-
-Once that's in hand, the path looks like: rewrite `TsStr` in
-`TS2Python_Exporter.el` to build from `BarDateTime`, fully independent of
-I2/Phase 2. Reply once you have that capture, or if you'd rather I draft the
-`TS2Python_Exporter.el` change now on the replay evidence alone (I'd rather
-not — mid-formation behavior is the one thing that could still surprise
-us). I2 stays parked on Phase 2's B1–B3 either way — unrelated to this
-fix. Neither blocks `task.md`, which is already done.
+1. **Redeploy both halves.** The `.ELD` has NOT been compiled in
+   TradeStation — offline checks only (Begin/End balance, unchanged
+   `EL_Publish` arity). The DLL and the indicator must be reinstalled as a
+   pair, and any Parquet already collected from a sub-minute chart is
+   missing bars that cannot be recovered.
+2. **I2 stays open**, still parked on `docs/plan-bar-start-on-wire.md`'s
+   B1–B3. Unrelated to the `BarDateTime` fix — I2 is about the bar's
+   *start*, which the wire still does not carry. The probe runs did produce
+   first-hand B1 evidence (`Time[1]`/`BarDateTime[1]` track the previous bar
+   correctly, and hold steady across refires), so B1 is arguably answerable
+   now from `docs/plan-bardatetime-seconds.md` §A4 without another capture.

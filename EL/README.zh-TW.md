@@ -95,14 +95,17 @@ subscriber 收到的內容**：
 | 1 / 5 / 15 / 30 / 60 分鐘圖及其他任何 intraday 間隔（`BarType = 1`） | 送出完整 OHLC，`bar_type`/`bar_interval` 逐字上 wire |
 | 日線圖（`BarType = 2`, `BarInterval = 0` 或 `1`） | 送出完整 OHLC。TradeStation 10 實測回報 `0`；`1` 也收，那是實機量測前 ABI 寫定的值 |
 | 週 / 月 / P&F / 其他任何 bar type | 同樣被轉發；`bar_type` 本身就能指名，沒有任何對映或拒收 |
-| Sub-minute / sub-second 圖表（`BarType = 1`，連續兩根 bar 共用同一個分鐘解析度的 `Date`/`Time`） | 偵測後只 Print 一次，publishing 繼續——**請見下方但書** |
+| 秒級圖表（`BarType = 14`，`BarInterval` = 每根幾秒） | 完整支援——`TsStr` 帶真正的秒數，所以 30 秒圖的 `07:20:00` 與 `07:20:30` 兩根不會混在一起。偵測後只 Print 一次，publishing 繼續 |
 
-> **秒級圖表在 wire 上跟 1 分鐘圖無法分辨。** 兩者都回報 `BarType = 1`，而 `TsStr`
-> 只有分鐘解析度。目前的 Python 參考 binding 會把「共用同一個 `bar_time`」的兩個
-> frame 當成同一根尚未收完的 bar 的更新——這在真正的 1 分鐘圖搭配「Update Every
-> Tick」時是對的——所以它現在會把一個真正的秒級圖表的多根不同 bar 折疊成每分鐘一根。
-> 要秒級資料請改用 tick 圖（`BarType = 0`，逐筆轉發）；完整說明見 exporter 檔頭的
-> 註解。
+> **這件事在 2026-08-03 之前是壞的，而且壞得沒有聲音。** `TsStr` 當時是用 EL 的
+> `Date`/`Time` 組出來的，那兩個保留字**根本沒有秒數**——所以上面那兩根都變成
+> `07:20:00`，參考 binding 的 intra-bar 緩衝把第二根當成第一根的更新（這在真正的
+> 1 分鐘圖搭配「Update Every Tick」時是**對的**行為），於是一張 30 秒圖每分鐘只
+> 存下一根。全程沒有任何錯誤浮現。
+>
+> 現在 publisher 改用 `BarDateTime`（TradeStation 官方文件寫明它帶秒數），binding
+> 也不再把秒數歸零。**若你還在跑舊的 `.ELD` 或舊的 binding，秒級圖表仍然會掉資料
+> ——兩邊要一起升級。** 量測記錄見 `contract/semantics.md` §1.3。
 
 ### 為何五個量值全部送出、且不替你挑
 

@@ -120,12 +120,12 @@ expected/smoke.json  bar_time = "2026-04-18T17:30:00Z"
 
 | # | 階段 | 檔案 | 狀態 | Commit subject |
 |---|---|---|---|---|
-| P1 | 改規格 | `contract/semantics.md` §1/§1.1/§2/§2.1 | ⬜ | |
-| P2 | 改 publisher | `EL/TS2Python_Exporter.el` | ⬜ | |
-| P3 | 改 binding | `bindings/python/src/tradestation_data/wire/el_subscriber.py` | ⬜ | |
-| P4 | 改 harness | `cpp/src/test_harness.cpp` | ⬜ | |
-| P5 | 重錄 fixture + 手推 expected | `contract/fixtures/` | ⬜ | |
-| P6 | 文件收尾 | `CLAUDE.md`、`EL/README*.md`、`TODO_ISSUES.md` | ⬜ | |
+| P1 | 改規格 | `contract/semantics.md` §1/§1.1/§2/§2.1 | ✅ | `spec(contract)!: bar_time keeps its seconds, sourced from BarDateTime` |
+| P2 | 改 publisher | `EL/TS2Python_Exporter.el` | ✅ | `feat(el)!: build ts_str from BarDateTime so sub-minute bars stay distinct` |
+| P3 | 改 binding | `bindings/python/src/tradestation_data/wire/el_subscriber.py` | ✅ | `fix(wire)!: keep the seconds ts_str now carries` |
+| P4 | 改 harness | `cpp/src/test_harness.cpp` | ✅ | `test(contract): cover two 30-second bars inside one minute` |
+| P5 | ~~重錄 fixture~~ + 手推 expected | `contract/fixtures/` | ✅ | 同 P3 commit（見下方修正） |
+| P6 | 文件收尾 | `CLAUDE.md`、`EL/README*.md`、`TODO_ISSUES.md` | ✅ | `docs: record the BarDateTime switch and close out TODO_ISSUES I1` |
 
 圖例：⬜ 未開始 · 🔄 進行中 · ✅ 完成 · ⏸️ 卡住（原因記在下方）
 
@@ -174,10 +174,26 @@ LOGGED」的 sub-minute 偵測與警告，在秒數上 wire 之後還需不需�
 存在的目的**就是**測 flooring。規則改了之後這個 case 的意義要重新想：是改成
 測「秒數原樣保留」，還是加一個真正帶秒數的秒級圖 frame。
 
-### P5 — fixture
+### P5 — fixture（**範圍比原本估計小很多**）
 
-重錄 4 份 fixture，`expected/*.json` **必須手工重推**，不得由 binding 產生
-（repo 硬規則）。需要 C++ toolchain + 能跑 harness 的環境。
+**原本以為要重錄 4 份 fixture，實際上不用。** DLL 從來不解析 `ts_str`（proto-2
+把 `ts_utc` 拿掉時一併移除），它只是逐字轉發，所以**這次的改動完全沒有動到 DLL
+的行為，錄下來的 wire 資料依然有效**。改變的只有 binding 對它的解讀。
+
+所以 P5 實際做的是：`expected/*.json` **手工重推**（不得由 binding 產生，repo
+硬規則）。四份的推導說明段落都要改（"floored to the minute" 那句），但只有
+`smoke.jsonl` 帶非零秒數（`13:30:45`），所以只有它的 6 個 `bar_time` 值會變：
+
+```
+2026-04/18-13:30:45 ET (EDT, UTC-4)  →  2026-04-18T17:30:45Z   （原本寫 17:30:00Z）
+```
+
+其餘三份（`bars` / `noquote` / `session`）的 `ts_str` 秒數全是 `:00`，值不變。
+
+**仍然缺的（需要 C++ toolchain，見 P4）**：沒有任何 fixture 涵蓋
+`BarType=14`（秒級圖）。現在整條鏈的正確性只靠 `smoke` 的 `:45` 間接驗到「秒數
+有保留」，但沒有一個 fixture 真正示範「同一分鐘內兩根不同的 bar」——而那正是這
+整個修正要解決的情境。
 
 ### P6 — 文件
 

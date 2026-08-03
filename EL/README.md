@@ -105,16 +105,19 @@ Every chart type is forwarded — there is no refusal and no idle state.
 | 1 / 5 / 15 / 30 / 60 minute and any other intraday interval (`BarType = 1`) | full OHLC sent, `bar_type`/`bar_interval` travel verbatim |
 | Daily (`BarType = 2`, `BarInterval = 0` or `1`) | full OHLC sent. TradeStation 10 reports `0` here — `1` is accepted too, because that is what the ABI documented before a live install was measured |
 | Weekly / monthly / P&F / any other bar type | forwarded the same way; `bar_type` names it, nothing maps or rejects it |
-| Sub-minute / sub-second chart (`BarType = 1`, two consecutive bars sharing one minute-resolution `Date`/`Time`) | detected and logged once, publishing continues — **see the caveat below** |
+| Second chart (`BarType = 14`, `BarInterval` = seconds per bar) | fully supported — `TsStr` carries real seconds, so a 30-second chart's `07:20:00` and `07:20:30` bars stay distinct. Detected and logged once, publishing continues |
 
-> **A sub-second chart is wire-indistinguishable from a 1-minute chart.** Both
-> report `BarType = 1`, and `TsStr` only has minute resolution. The reference
-> Python binding treats two frames sharing a `bar_time` as refinements of one
-> forming bar — correct for a real 1-minute chart under "Update Every Tick" —
-> so it currently coalesces a genuinely sub-minute chart's distinct bars down
-> to one per minute. Use a tick chart (`BarType = 0`, forwarded print by print)
-> for sub-second data; see the exporter's header comment for the full
-> explanation.
+> **This was broken until 2026-08-03, and the failure was silent.** `TsStr` was
+> built from EL's `Date`/`Time`, which carry no seconds — so both bars above
+> formatted as `07:20:00`, the reference binding's intra-bar buffer read the
+> second as a refinement of the first (correct behaviour for a real 1-minute
+> chart under "Update Every Tick"), and a 30-second chart stored one bar per
+> minute. Nothing raised.
+>
+> The publisher now uses `BarDateTime`, which TradeStation documents as
+> carrying seconds, and the binding no longer floors them away. If you are
+> running an older `.ELD` or an older binding, sub-minute charts still lose
+> data — upgrade both. `contract/semantics.md` §1.3 has the measurement.
 
 ### Why all five quantity words go out, and none is chosen for you
 
