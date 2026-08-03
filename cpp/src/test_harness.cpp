@@ -136,10 +136,12 @@ int run_smoke(const Options& o) {
         }
     }
 
-    // Also exercise the OHLC bar path so subscribers see at least one
-    // {"kind":"bar"} message on SPY. Reuses the tick's :45 timestamp on
-    // purpose — that is what gives the smoke fixture coverage of the
-    // floor-to-the-minute rule in semantics.md §2.1.
+    // Also exercise the OHLC bar path so subscribers see at least one bar
+    // frame on SPY. Reuses the tick's :45 timestamp on purpose — that is what
+    // gives the smoke fixture coverage of semantics.md §2.1, which now
+    // requires those seconds to be KEPT. The rule used to say the opposite
+    // (floor to the minute) and this same frame was what covered it; the
+    // fixture is unchanged, only the expectation moved.
     const int rc_bar = pub("SPY", ts_el, 1, 1,
                         /*category*/ 2, 450.10, 450.75, 449.80, 450.40,
                         kBarQty, /*bid*/ 0.0, /*ask*/ 0.0);
@@ -202,23 +204,34 @@ int run_bars(const Options& o) {
     std::printf("[harness] bars: EL_Publish across every BarType/BarInterval\n");
     const char* ts_el = "2026-04/20-13:30:00";
 
-    struct Case { int bar_type; int bar_interval; const char* label; };
+    // Each case carries its own timestamp so the two BarType 14 frames can
+    // sit inside one minute — see the note below.
+    struct Case { int bar_type; int bar_interval; const char* ts; const char* label; };
     const Case charts[] = {
-        {1,  5,  "5m"},
-        {1, 15,  "15m"},
-        {1, 30,  "30m"},
-        {1, 60,  "1h"},
-        {2,  0,  "1d (BarInterval 0 — what TradeStation 10 reports)"},
-        {2,  1,  "1d (BarInterval 1 — what the ABI documented first)"},
-        {1,  2,  "2 minute — no longer refused; the wire carries the raw pair"},
-        {3,  1,  "weekly — same"},
-        {2,  2,  "2 day — same"},
+        {1,  5,  ts_el, "5m"},
+        {1, 15,  ts_el, "15m"},
+        {1, 30,  ts_el, "30m"},
+        {1, 60,  ts_el, "1h"},
+        {2,  0,  ts_el, "1d (BarInterval 0 — what TradeStation 10 reports)"},
+        {2,  1,  ts_el, "1d (BarInterval 1 — what the ABI documented first)"},
+        {1,  2,  ts_el, "2 minute — no longer refused; the wire carries the raw pair"},
+        {3,  1,  ts_el, "weekly — same"},
+        {2,  2,  ts_el, "2 day — same"},
+        // TWO 30-second bars INSIDE ONE MINUTE. This pair is the whole point
+        // of semantics.md §2.1: they are distinct closed bars and differ only
+        // in the seconds field, so a binding that floors ts_str to the minute
+        // collapses them onto one bar_time, its intra-bar buffer reads the
+        // second as an update of the first, and one of them is silently lost.
+        // That is precisely what shipped, measured live on SPY 2026-08-03.
+        // BarType 14 is TradeStation's own value for a Second chart.
+        {14, 30, "2026-04/20-13:30:00", "30 second — first half of the minute"},
+        {14, 30, "2026-04/20-13:30:30", "30 second — second half, SAME minute"},
     };
     for (const auto& c : charts) {
         // BarType 2 is the daily chart, where the reserved words carry the
         // other meaning entirely — see the note on kDailyQty.
         const Quantities& q = (c.bar_type == 2) ? kDailyQty : kBarQty;
-        const int rc = pub("SPY", ts_el, c.bar_type, c.bar_interval,
+        const int rc = pub("SPY", c.ts, c.bar_type, c.bar_interval,
                         /*category*/ 2, 450.10, 450.75, 449.80, 450.40,
                         q, /*bid*/ 0.0, /*ask*/ 0.0);
         if (rc != 0) {

@@ -29,7 +29,7 @@
     {
       "symbol": "SPY",
       "seq": 1,
-      "sid": 1785647506020010,
+      "sid": 1785759094460990,
       "bar_time": "2026-04-20T17:30:00Z",
       "bar_type": 1,
       "bar_interval": 5,
@@ -45,12 +45,12 @@
       "el_open_interest": 0,
       "bid": null,
       "ask": null,
-      "ts": 1785647516.030071
+      "ts": 1785759109.469888
     },
     {
       "symbol": "SPY",
       "seq": 2,
-      "sid": 1785647506020010,
+      "sid": 1785759094460990,
       "bar_time": "2026-04-20T17:30:00Z",
       "bar_type": 1,
       "bar_interval": 15,
@@ -66,12 +66,12 @@
       "el_open_interest": 0,
       "bid": null,
       "ask": null,
-      "ts": 1785647516.030131
+      "ts": 1785759109.470277
     },
     {
       "symbol": "SPY",
       "seq": 3,
-      "sid": 1785647506020010,
+      "sid": 1785759094460990,
       "bar_time": "2026-04-20T17:30:00Z",
       "bar_type": 1,
       "bar_interval": 30,
@@ -87,12 +87,12 @@
       "el_open_interest": 0,
       "bid": null,
       "ask": null,
-      "ts": 1785647516.030134
+      "ts": 1785759109.470286
     },
     {
       "symbol": "SPY",
       "seq": 4,
-      "sid": 1785647506020010,
+      "sid": 1785759094460990,
       "bar_time": "2026-04-20T17:30:00Z",
       "bar_type": 1,
       "bar_interval": 60,
@@ -108,12 +108,12 @@
       "el_open_interest": 0,
       "bid": null,
       "ask": null,
-      "ts": 1785647516.030138
+      "ts": 1785759109.47029
     },
     {
       "symbol": "SPY",
       "seq": 5,
-      "sid": 1785647506020010,
+      "sid": 1785759094460990,
       "bar_time": "2026-04-20T17:30:00Z",
       "bar_type": 2,
       "bar_interval": 0,
@@ -129,12 +129,12 @@
       "el_open_interest": 0,
       "bid": null,
       "ask": null,
-      "ts": 1785647516.030141
+      "ts": 1785759109.470294
     },
     {
       "symbol": "SPY",
       "seq": 6,
-      "sid": 1785647506020010,
+      "sid": 1785759094460990,
       "bar_time": "2026-04-20T17:30:00Z",
       "bar_type": 2,
       "bar_interval": 1,
@@ -150,12 +150,12 @@
       "el_open_interest": 0,
       "bid": null,
       "ask": null,
-      "ts": 1785647516.030144
+      "ts": 1785759109.470297
     },
     {
       "symbol": "SPY",
       "seq": 7,
-      "sid": 1785647506020010,
+      "sid": 1785759094460990,
       "bar_time": "2026-04-20T17:30:00Z",
       "bar_type": 1,
       "bar_interval": 2,
@@ -171,12 +171,12 @@
       "el_open_interest": 0,
       "bid": null,
       "ask": null,
-      "ts": 1785647516.030147
+      "ts": 1785759109.4703
     },
     {
       "symbol": "SPY",
       "seq": 8,
-      "sid": 1785647506020010,
+      "sid": 1785759094460990,
       "bar_time": "2026-04-20T17:30:00Z",
       "bar_type": 3,
       "bar_interval": 1,
@@ -192,12 +192,12 @@
       "el_open_interest": 0,
       "bid": null,
       "ask": null,
-      "ts": 1785647516.03015
+      "ts": 1785759109.470303
     },
     {
       "symbol": "SPY",
       "seq": 9,
-      "sid": 1785647506020010,
+      "sid": 1785759094460990,
       "bar_time": "2026-04-20T17:30:00Z",
       "bar_type": 2,
       "bar_interval": 2,
@@ -213,7 +213,49 @@
       "el_open_interest": 0,
       "bid": null,
       "ask": null,
-      "ts": 1785647516.030153
+      "ts": 1785759109.470306
+    },
+    {
+      "symbol": "SPY",
+      "seq": 10,
+      "sid": 1785759094460990,
+      "bar_time": "2026-04-20T17:30:00Z",
+      "bar_type": 14,
+      "bar_interval": 30,
+      "category": 2,
+      "open": 450.1,
+      "high": 450.75,
+      "low": 449.8,
+      "close": 450.4,
+      "el_volume": 12000,
+      "el_ticks": 22500,
+      "el_upticks": 12000,
+      "el_downticks": 9000,
+      "el_open_interest": 0,
+      "bid": null,
+      "ask": null,
+      "ts": 1785759109.470309
+    },
+    {
+      "symbol": "SPY",
+      "seq": 11,
+      "sid": 1785759094460990,
+      "bar_time": "2026-04-20T17:30:30Z",
+      "bar_type": 14,
+      "bar_interval": 30,
+      "category": 2,
+      "open": 450.1,
+      "high": 450.75,
+      "low": 449.8,
+      "close": 450.4,
+      "el_volume": 12000,
+      "el_ticks": 22500,
+      "el_upticks": 12000,
+      "el_downticks": 9000,
+      "el_open_interest": 0,
+      "bid": null,
+      "ask": null,
+      "ts": 1785759109.470312
     }
   ],
   "expected_messages_lost": 0
