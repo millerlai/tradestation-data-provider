@@ -4,7 +4,7 @@ Every test here asks a question of what is on disk. None of them expect an
 answer the store had to compute: there is no resampler, no bar cache and no
 coverage bookkeeping left to exercise, because a bar that TradeStation did not
 publish is a bar that does not exist. The one behaviour worth pinning hardest
-is the negative — see `test_load_bars_never_derives_from_ticks`.
+is the negative — see `test_load_bars_never_derives_bars_it_was_not_given`.
 """
 
 from __future__ import annotations
@@ -84,6 +84,26 @@ def test_load_bars_only_answers_the_timeframe_it_was_asked_for(tmp_path: Path) -
     assert (
         store.load_bars("SPY", T0, T0 + timedelta(hours=1), bar_type=1, bar_interval=15).height == 0
     )
+
+
+# ---- the store never computes what it was not given ------------------------
+
+
+def test_load_bars_never_derives_bars_it_was_not_given(tmp_path: Path) -> None:
+    """A derived bar is indistinguishable from a published one, so there must be none.
+
+    This is the whole point of the read side being read-only. Asking for a
+    bar_type/bar_interval combination nothing ever wrote must answer zero
+    rows — never a plausible rollup from a different interval on the same
+    symbol — and must never write the partition it was asked about.
+    """
+    _populate_bars(tmp_path, [_bar("SPY", T0, 450.0, bar_type=1, bar_interval=5)])
+    store = HistoryStore(tmp_path)
+
+    out = store.load_bars("SPY", T0, T0 + timedelta(hours=1), bar_type=1, bar_interval=60)
+    assert out.height == 0
+    # Nothing was written on the way out, either.
+    assert not (tmp_path / "bars" / "bartype=1" / "interval=60").exists()
 
 
 def test_an_interval_with_no_wire_name_is_stored_and_readable(tmp_path: Path) -> None:
