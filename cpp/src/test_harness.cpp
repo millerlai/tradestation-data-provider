@@ -169,9 +169,11 @@ int run_noquote(const Options& o) {
     }
 
     // A *non-index* symbol with no quote. $TICK alone cannot pin semantics.md
-    // §3.1 down: a binding that ignores wire nulls entirely still passes,
-    // because §3.2 makes it blank $TICK's quotes anyway. SPY has no such
-    // fallback — reading 0.0 here is the failure the rule exists to catch.
+    // §3.1 down: a binding that blanked quotes by symbol name — which the
+    // superseded §3.2 mandated, and semantics.md §3.3 now forbids — would
+    // blank $TICK's anyway and pass without ever reading the wire's null.
+    // SPY has no such fallback: reading 0.0 here is the failure §3.1 exists
+    // to catch.
     const int rc_spy_tick = pub("SPY", ts_el, /*bar_type*/ 0, /*bar_interval*/ 1,
                         /*category*/ 2, 450.40, 450.40, 450.40, 450.40,
                         kTickQty, 0.0, 0.0);

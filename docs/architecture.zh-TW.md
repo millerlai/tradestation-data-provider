@@ -315,13 +315,11 @@ belt-and-braces 檢查（`_quote_or_none`）。**程式碼裡沒有硬編碼的 
 成交量，它的真實報價被白白丟棄。`category`（§5.2）現在逐 frame 都在，消費端要那個行為時
 有事實可查，不必用猜的清單。
 
-> ⚠️ **未解決的 spec-vs-code drift —— 不要只看單一邊就動手寫第二個 binding。**
-> `contract/semantics.md` §3.2/§3.3 仍然**強制要求**那份清單
-> （`$TICK $ADD $VOLD $TRIN $PCVA VXX`），並且指名一個早已不存在的參數
-> `TradeStationELProvider(index_symbols=...)`；§3 開頭也還寫著報價只適用於 tick
-> （「bar 不帶報價」），這與本文 §5.2 直接矛盾。contract 是 SSoT，所以這種不一致
-> 不該由一份描述性文件默默蓋過去。解決計畫：
-> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md)（D2）。
+`contract/semantics.md` 已經一致：§3.2 的判定只有兩條（`null`、`<= 0`），並明文規定
+binding **不得**依 symbol 名稱丟棄報價；§3.3 把刪掉的那份清單保留為非規範的來龍去脈，
+因為找不到這條規則的實作者往往會以為少了什麼而把它加回去。reference binding 以
+`test_the_binding_blanks_nobodys_quote` 釘住行為 —— `smoke` fixture 裡 `VXX` 的真實
+報價必須存活，所以任何重新引入清單的 binding 都會在 conformance 失敗。
 
 ### 6.4 Session 規則
 
@@ -692,13 +690,16 @@ C++ 側只建置 Win32（x86）——TradeStation 是 32-bit process。MSBuild �
 | EasyLanguage indicator 安裝 | [`EL/README.md`](../EL/README.md) |
 | Python binding 使用方式 | [`bindings/python/README.md`](../bindings/python/README.md) |
 
-> **只剩一項未解決的 spec-vs-code drift**，已在 §6.3 就地標註：index/breadth 報價
-> 清單——`contract/semantics.md` §3.2/§3.3 仍然強制要求，而沒有任何 binding 實作它。
-> 它列為 [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md)
-> 的 **D2**，也是四項中唯一會改變「binding 必須做什麼」的一項，因此不在此單方面決定。
+> **已無已知的 spec-vs-code drift。** 本文件那次 review 找出的四項全部解決，紀錄於
+> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md)：
 >
-> 其餘三項已修正：`breadth` session 邊界是程式碼的 bug，已修程式（D1，§6.4）；
-> ABI 矩陣「缺哪個匯出」的說法在 `contract/wire.md` 同樣是錯的，兩處都已更正
-> （D3，§4.3）；`README.md`、`README.zh-TW.md` 與 `contract/README.md` 的
-> `proto`/ABI `1` 已全部改為 `2`（D4）。`CHANGELOG.md` 仍有「proto 1」字樣，
-> **刻意不動**——那是歷史紀錄，不是現況宣告。
+> - **D1** —— `breadth` session 邊界是程式碼的 bug，不是規格錯誤。已修程式，並由三個
+>   測試釘住（§6.4）。
+> - **D2** —— index/breadth 報價清單已從 `contract/semantics.md` §3.2 刪除，並在
+>   §3.3 保留為非規範的來龍去脈（§6.3）。
+> - **D3** —— ABI 矩陣「缺哪個匯出」的說法在 `contract/wire.md` 同樣是錯的，兩處
+>   都已更正（§4.3）。
+> - **D4** —— `README.md`、`README.zh-TW.md` 與 `contract/README.md` 已改為
+>   `proto`/ABI `2`。
+>
+> `CHANGELOG.md` 仍有「proto 1」字樣，**刻意不動**——那是歷史紀錄，不是現況宣告。

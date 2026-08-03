@@ -366,14 +366,13 @@ being thrown away for nothing. `category` (§5.2) now travels on every frame, so
 consumer that wants that behavior has a fact to key off instead of a guessed
 list.
 
-> ⚠️ **Unresolved spec-vs-code drift — do not implement a second binding from
-> either side alone.** `contract/semantics.md` §3.2/§3.3 still *mandates* that
-> list (`$TICK $ADD $VOLD $TRIN $PCVA VXX`) and names a
-> `TradeStationELProvider(index_symbols=...)` parameter that no longer exists;
-> §3's preamble also still says quotes apply to ticks only ("bar 不帶報價"), which
-> §5.2 of this document contradicts. The contract is the SSoT, so this is not a
-> drift a descriptive document may silently paper over. Resolution plan:
-> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md) (D2).
+`contract/semantics.md` agrees: §3.2's test has exactly two conditions (`null`,
+`<= 0`) and states that a binding **must not** discard a quote by symbol name.
+§3.3 keeps the deleted list as non-normative history, because an implementer who
+finds no such rule tends to assume one is missing and add it back. The reference
+binding pins the behaviour with
+`test_the_binding_blanks_nobodys_quote` — `VXX`'s real quote in the `smoke`
+fixture must survive, so any binding that reintroduces the list fails conformance.
 
 ### 6.4 Session Rules
 
@@ -801,16 +800,18 @@ pins this down as a test.
 | EasyLanguage indicator installation | [`EL/README.md`](../EL/README.md) |
 | How to use the Python binding | [`bindings/python/README.md`](../bindings/python/README.md) |
 
-> **One unresolved spec-vs-code drift remains**, flagged inline at §6.3: the
-> index/breadth quote list, which `contract/semantics.md` §3.2/§3.3 still mandates
-> and no binding implements. It is scoped as **D2** in
-> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md) and
-> is the only one of the four that changes what a binding must *do*, so it is not
-> resolved unilaterally here.
+> **No known spec-vs-code drift remains.** All four items found by the review of
+> this document are resolved and recorded in
+> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md):
 >
-> The other three are fixed: the `breadth` session boundary was a code bug and the
-> code was corrected (D1, §6.4); the ABI matrix's missing-export claim was wrong in
-> `contract/wire.md` too and both are now accurate (D3, §4.3); and the `proto`/ABI
-> `1` labels in `README.md`, `README.zh-TW.md` and `contract/README.md` now read
-> `2` (D4). `CHANGELOG.md` still mentions "proto 1" and is left alone — those are
-> historical entries, not current claims.
+> - **D1** — the `breadth` session boundary was a code bug, not a spec error. The
+>   code was fixed and three tests now pin it (§6.4).
+> - **D2** — the index/breadth quote list was deleted from `contract/semantics.md`
+>   §3.2 and kept as non-normative history in §3.3 (§6.3).
+> - **D3** — the ABI matrix's missing-export claim was wrong in `contract/wire.md`
+>   as well; both are now accurate (§4.3).
+> - **D4** — `README.md`, `README.zh-TW.md` and `contract/README.md` now read
+>   `proto`/ABI `2`.
+>
+> `CHANGELOG.md` still mentions "proto 1" and is left alone — those are historical
+> entries, not current claims.

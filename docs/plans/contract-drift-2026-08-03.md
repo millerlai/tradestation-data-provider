@@ -1,17 +1,18 @@
 # Plan — resolving spec-vs-code drift in `contract/`
 
-> **Status** (2026-08-03): **D1, D3, D4 resolved. D2 open.**
+> **Status** (2026-08-03): **all four resolved.**
 >
 > | | Item | Outcome |
 > |---|---|---|
 > | D1 | `breadth` session reset | **Code was wrong** — fixed in `MarketSnapshot.on_bar` with 3 new tests. Contract §4.1 was right and is unchanged. |
-> | D2 | index/breadth quote list | **Open** — needs a decision, see below |
+> | D2 | index/breadth quote list | **Contract was wrong** — §3.2's mandate deleted, kept as non-normative history in §3.3. No fixture change needed. |
 > | D3 | ABI matrix missing export | **Fixed** in `contract/wire.md` + both architecture docs |
 > | D4 | `proto`/ABI still labelled 1 | **Fixed** in `README.md`, `README.zh-TW.md`, `contract/README.md` |
 >
-> D1's resolution inverted this plan's original recommendation (it proposed
-> changing the contract to match the code); see the D1 section for why that was
-> wrong.
+> Two of the four went the opposite way from this plan's first guess. D1's original
+> recommendation was to change the contract to match the code; the code turned out
+> to be the wrong side. D2 was expected to require hand-re-deriving fixture
+> expectations; they were already correct.
 > **Scope**: changes to `contract/` (the SSoT) and, for D1, possibly to
 > `bindings/python/` code. **Nothing in this plan is a documentation-only edit**
 > — that is exactly why it was split out of the `docs/architecture.md` fixes
@@ -120,7 +121,38 @@ chosen and implemented** — see the resolution note at the top of this section.
 
 ---
 
-## D2 — index/breadth quote list: contract mandates it, code deleted it
+## D2 — index/breadth quote list — ✅ RESOLVED (contract fixed, A+B as recommended)
+
+**Outcome: the contract was the wrong side.** §3's preamble, §3.2 and §3.3 were
+rewritten:
+
+- The preamble no longer claims quotes apply to ticks only — proto 2 carries
+  `bid`/`ask` on every point, bars included, and the old "a live-quote function
+  describes the moment of the call" reasoning is recorded as *true but the
+  consumer's judgement to make*.
+- §3.2 is now the combined test, with exactly two conditions (`null`, `<= 0`) and
+  an explicit prohibition: a binding **must not** discard a quote by symbol name.
+- §3.3 is a new non-normative section holding the deleted list, the two reasons it
+  was wrong, the `VXX` measurement, and the pointer to `category` as the fact that
+  replaces it. Written because an implementer who finds no such rule tends to
+  assume one is missing.
+
+**The fixture risk this plan flagged did not materialise.** `expected/smoke.json`
+already keeps `VXX`'s real quote (`bid` 449.99 / `ask` 450.01) — the expectations
+had been re-derived under the code's semantics when proto 2 landed, so only the
+prose in `fixtures/README.md` was stale. Better still, the conformance suite
+already asserts the *opposite* of the deleted rule
+(`test_the_binding_blanks_nobodys_quote`: "a real quote must survive"), so a
+binding that reintroduces the list fails CI. No `expected/*.json` was touched.
+
+Also corrected in passing: `cpp/src/test_harness.cpp`'s comment justified the
+non-index no-quote frame by citing §3.2's blanking as a live rule; it now names it
+as the superseded rule and points at the current §3.3.
+
+<details>
+<summary>Original analysis (kept for the record)</summary>
+
+### The contradiction as originally found
 
 ### The contradiction
 
@@ -173,6 +205,12 @@ binding doesn't.
 > rule 2, expectations must be derived independently from `semantics.md` and never
 > produced by the code under test. Do this by hand and review it as a separate
 > commit.
+>
+> **It did not.** Step 4's premise was wrong: `expected/smoke.json` already keeps
+> `VXX`'s quote, so no expectation needed re-deriving — only the README prose was
+> stale. See the resolution note at the top of this section.
+
+</details>
 
 ---
 
