@@ -44,7 +44,7 @@ Print Log 看到一句 `EL_Init2 FAILED rc=-6`，而不是一個沒有上下文�
 
 ## 版本識別
 
-`EL_DllVersion()` 回傳目前 DLL 的 ABI 版本（整數），本協定為 **1**。
+`EL_DllVersion()` 回傳目前 DLL 的 ABI 版本（整數），本協定為 **2**。
 
 indicator **應該**在 init 成功後檢查它：`EL_DllVersion` 是 0 參數的匯出，簽章永遠不會
 變，所以呼叫它在任何 DLL 版本上都是安全的 —— 它是唯一可以無條件先問一句「你是誰」的

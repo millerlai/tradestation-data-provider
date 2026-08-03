@@ -229,7 +229,7 @@ TA 側需配合的事項：
 
 - 部署的 `TS2Python.dll` 需為 **ABI 2**，且 **`.ELD` 必須同時更新** —— indicator 綁
   `EL_Init3`，舊 DLL 沒有這個匯出。`scripts/deploy_dll.py` 的部署驗證應檢查
-  `EL_DllVersion() == 1`。
+  `EL_DllVersion() == 2`。
 - 不相容的組合不會降級，而是**明確拒收**：舊 payload 沒有 `proto` 欄位，binding 直接
   丟棄並記錄一則指名該重裝什麼的訊息。這與原本「降級為不偵測缺漏」的預期相反。
 - 每個 proto-1 frame 都帶 `seq`，所以 `messages_lost` 不再有「無法判斷」這個狀態。

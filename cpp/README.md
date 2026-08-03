@@ -216,7 +216,7 @@ Then, in the EasyLanguage editor, Verify the indicator that imports the DLL.
 
 ## C ABI
 
-DLL version `EL_DllVersion() == 1`. See [`../contract/error_codes.md`](../contract/error_codes.md) for return codes.
+DLL version `EL_DllVersion() == 2`. See [`../contract/error_codes.md`](../contract/error_codes.md) for return codes.
 
 ```c
 int __stdcall EL_DllVersion(void);
@@ -265,4 +265,4 @@ cpp\Release\TS2Python_TestHarness.exe --mode stress --rate 10000 --seconds 10
 
 A successful harness exits with code `0` (no dropped sends). The subscriber should print ~100 000 `SPY`-topic messages and per-percentile latency stats. Other harness modes: `--mode smoke` (3 topics plus one bar), `--mode noquote`, `--mode bars` (every `BarType`/`BarInterval` combination, none refused — including ones a `-5` mapping used to reject outright), `--mode session`, `--mode multithread --threads 8 --per-thread 5000`. Each fixture's mode and frame count is tabulated in [`../contract/fixtures/README.md`](../contract/fixtures/README.md).
 
-**Every run first asserts the ABI**: `EL_DllVersion() == 1`, and both tombstones returning `-6`, before any init. A check that only runs when someone remembers to run it is not a check.
+**Every run first asserts the ABI**: `EL_DllVersion() == 2`, and both tombstones returning `-6`, before any init. A check that only runs when someone remembers to run it is not a check.
