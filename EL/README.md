@@ -20,7 +20,7 @@ TradeStation Chart → TS2Python_Exporter.el → TS2Python.dll → ZMQ PUB → s
 ## Deploying
 
 > **The DLL and the `.ELD` are a matched pair — always install both.**
-> `EL_PublishTick` and `EL_PublishBar` kept their names across the protocol
+> `EL_PublishTick` and `EL_PublishBar` once kept their names across a protocol
 > rewrite but not their signatures, and under `__stdcall` a mismatched call
 > corrupts the stack rather than returning an error. Two guards make every
 > mismatched combination fail readably instead: this indicator binds
@@ -147,7 +147,7 @@ A tick series is one print per call only when `BarInterval = 1`. On a 100-tick
 chart each call carries a finished bar: `Close` is the last of the hundred
 prints, and the volume words cover all hundred under the intraday rule above —
 `Ticks` their total share volume, `Volume` the up-tick part. Neither reports
-`100`; EL has no count intraday. `EL_PublishTick` has no field to say the call
+`100`; EL has no count intraday. `bar_interval` now travels on the wire and says the call
 is a bar either, so Tier 1 would store it as **one trade priced at the last
 print and carrying a hundred prints' volume** — wrong by about two orders of
 magnitude in the volume column, with nothing downstream able to notice.
@@ -156,7 +156,7 @@ Unlike the second-based case, the information needed to detect this survives:
 `BarInterval` says exactly how many prints went into the call. Measured on a
 live install — a 100-tick chart reports `bar_interval=100.00` at init and
 `Ticks = 760951` (the hundred prints' share volume, not `100`), while a 1-tick
-chart reports `1.00` and calls `EL_PublishTick` once per print.
+chart reports `1.00` and calls `EL_Publish` once per print.
 
 Note this also means `TsStr` cannot separate the prints inside one minute: a
 1-tick chart happily emits eight calls all stamped `19:48:00`, because `Time`
@@ -168,7 +168,7 @@ that — not `ts_str` — the tick's authoritative time.
 
 `BarType` and `BarInterval` **cannot tell** a 1-second chart from a 1-minute one —
 both can report `1` / `1`. Sent as minutes, those bars would land in the
-`bars/timeframe=1m/` partition and be undetectable downstream: `TsStr` is built
+`bartype=1/interval=1/` partition and be undetectable downstream: `TsStr` is built
 from `Time`, and `Time` has minute resolution, so **the seconds are gone before
 they ever leave the indicator**.
 

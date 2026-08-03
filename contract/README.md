@@ -14,8 +14,7 @@
 | 檔案 | 內容 |
 | --- | --- |
 | [`wire.md`](wire.md) | frame 結構與 payload 格式、匯出清單、新舊部署不相容時的行為 |
-| [`tick.schema.json`](tick.schema.json) | `EL_PublishTick` payload |
-| [`bar.schema.json`](bar.schema.json) | `EL_PublishBar` payload（含 `tf`） |
+| [`point.schema.json`](point.schema.json) | `EL_Publish` payload —— 唯一的 frame 形狀 |
 | [`semantics.md`](semantics.md) | **schema 管不到但 binding 必須一致的規則** |
 | [`error_codes.md`](error_codes.md) | DLL C ABI 回傳碼 |
 | [`fixtures/`](fixtures/) | 錄自真實 DLL 的 frame + 語言中立期望解析結果 |
@@ -39,7 +38,7 @@ payload 的版本欄位是 `proto`，目前恆為 `1`，**沒有需要相容的�
 但 binding 之間真正會產生分歧的是**語意**：
 
 - 哪個時間戳是 bar 邊界的權威來源
-- bar 用左標籤還是右標籤
+- bar 的時間是 publisher 給的,不做位移
 - 哪些 symbol 的 `bid`/`ask` 該視為無效
 - 收到比預期小的 `seq` 時該不該回退期望值
 - 各 timeframe 的 bucket 錨在哪裡
@@ -53,7 +52,7 @@ payload 的版本欄位是 `proto`，目前恆為 `1`，**沒有需要相容的�
 
 > 歷史教訓：規格曾寫在消費端 repo 的 `docs/design.md` §5，結果與實作脫節而長期無人
 > 發現 —— 該文件描述的欄位是 `ts_el`，實作早已改為 `ts_utc` + `ts_str`；文件沒有
-> `kind` 欄位，實作已支援 `bar_1m`；文件說用 `mktime`（system-local），實作用的是
+> 舊協定的 `kind` 欄位與其歷史，見 wire.md〈為什麼版本欄位叫 `proto` 而不是 `v`〉。
 > `std::chrono::zoned_time`（America/New_York）。
 >
 > 契約與實作放在同一個 repo、且被 conformance fixtures 綁住，就是為了讓這種漂移

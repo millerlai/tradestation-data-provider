@@ -22,14 +22,16 @@ hand-written one would only restate what we believe the wire looks like.
 
 Available fixtures:
 
-    smoke        ticks + a bar across three symbols; index-symbol quote
-                 invalidation; bucket_start floored to the minute
+    smoke        points across three symbols; bar_time floored to the minute
     noquote      absent quotes as JSON null, on an index and a normal symbol
-    bars         every non-1m timeframe: 5m/15m/30m/1h/1d
-    session      first and last bar of an RTH session (09:30 / 15:59 ET)
+    bars         nine BarType/BarInterval combinations, none refused —
+                 including 2-minute, weekly and 2-day, which the superseded
+                 wire rejected with rc -5 and never published at all
+    session      first and last point of an RTH session, landed as EL stamped
+                 them (09:31 / 16:00 ET — the close times, verbatim)
 
 There is no superseded-protocol fixture to replay. A publisher older than
-`proto` 1 is refused outright rather than read on a compatibility path, so
+`proto` 2 is refused outright rather than read on a compatibility path, so
 there is nothing for such a fixture to certify.
 """
 
@@ -44,7 +46,6 @@ import _compat
 import zmq
 import zmq.asyncio
 
-from tradestation_data.domain.bar import Bar
 from tradestation_data.sinks import SinkPipeline
 from tradestation_data.sinks.memory import InMemorySink
 from tradestation_data.wire.el_subscriber import TradeStationELProvider
@@ -114,34 +115,26 @@ async def main() -> int:
                 event = await asyncio.wait_for(anext(events), timeout=2.0)
             except (TimeoutError, StopAsyncIteration):
                 # Fewer events than frames means the binding refused some —
-                # an unknown timeframe, say. That is a legitimate outcome,
+                # an unreadable ts_str, say. That is a legitimate outcome,
                 # not a hang: it logs and skips rather than raising.
                 break
             received += 1
 
-            if isinstance(event, Bar):
-                pipeline.on_bar(event)
-                print(
-                    f"BAR  {event.symbol:<6} {event.timeframe:>3}  "
-                    f"{event.bucket_start_et:%Y-%m-%d %H:%M} ET  "
-                    f"O={event.open:.2f} H={event.high:.2f} "
-                    f"L={event.low:.2f} C={event.close:.2f}"
-                )
-            else:
-                pipeline.on_tick(event)
-                # Each side is independently optional — see format_quote in
-                # 01_print_events.py for why testing only `bid` is a trap.
-                quote = (
-                    "no quote"
-                    if event.bid is None and event.ask is None
-                    else f"{'-' if event.bid is None else format(event.bid, '.2f')}"
-                    f"/{'-' if event.ask is None else format(event.ask, '.2f')}"
-                )
-                print(
-                    f"TICK {event.symbol:<6}      "
-                    f"{event.timestamp_et:%Y-%m-%d %H:%M:%S} ET  "
-                    f"px={event.price:.2f}  {quote}"
-                )
+            pipeline.on_bar(event)
+            # Each side is independently optional — see format_quote in
+            # 01_print_events.py for why testing only `bid` is a trap.
+            quote = (
+                "no quote"
+                if event.bid is None and event.ask is None
+                else f"{'-' if event.bid is None else format(event.bid, '.2f')}"
+                f"/{'-' if event.ask is None else format(event.ask, '.2f')}"
+            )
+            print(
+                f"{event.symbol:<6} bt={event.bar_type} iv={event.bar_interval:<3} "
+                f"cat={event.category}  {event.bar_time_et:%Y-%m-%d %H:%M} ET  "
+                f"O={event.open:.2f} H={event.high:.2f} "
+                f"L={event.low:.2f} C={event.close:.2f}  {quote}"
+            )
 
         await events.aclose()
     finally:
@@ -153,7 +146,7 @@ async def main() -> int:
         ctx.destroy(linger=0)
 
     print(f"\ndecoded {received}/{len(frames)} frame(s)")
-    print(f"buffered in the sink: {len(sink.ticks())} tick(s), {len(sink.bars())} bar(s)")
+    print(f"buffered in the sink: {len(sink.bars())} point(s)")
 
     lost = provider.messages_lost
     if lost is None:

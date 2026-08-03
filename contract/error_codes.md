@@ -8,19 +8,18 @@
 |-----:|---|---|---|
 | `0` | 成功 | 全部 | — |
 | `1` | 在 DLL 已綁定後再次呼叫 init。沿用既有 socket，第二次為 no-op | `EL_Init3` | 不需處理。Indicator 可選擇不重複輸出 "init ok" |
-| `-1` | 未初始化 —— 在成功的 init 之前呼叫了 publish | `EL_PublishTick` `EL_PublishBar` | 先呼叫 `EL_Init3` |
-| `-2` | ZeroMQ 送出失敗。可能是觸及 high-water mark 導致 `send()` 回傳 `EAGAIN`，或非預期的 `zmq::error_t` | `EL_PublishTick` `EL_PublishBar` | 記錄後繼續，下一筆會重試。若持續發生，檢查 SUB 端是否存在 |
+| `-1` | 未初始化 —— 在成功的 init 之前呼叫了 publish | `EL_Publish` | 先呼叫 `EL_Init3` |
+| `-2` | ZeroMQ 送出失敗。可能是觸及 high-water mark 導致 `send()` 回傳 `EAGAIN`，或非預期的 `zmq::error_t` | `EL_Publish` | 記錄後繼續，下一筆會重試。若持續發生，檢查 SUB 端是否存在 |
 | `-3` | init 的 bind / socket 建立失敗 —— 最常見是 TCP endpoint 已被其他 process 佔用（或前一個 TradeStation session 殘留的 DLL handle） | `EL_Init3` | 檢查 `netstat -ano \| findstr :5555`，結束佔用者後重新 Verify indicator |
-| `-4` | 參數無效。`zmq_endpoint` 或 `symbol` 為 null；**或 payload `snprintf` 被截斷**（代表數值輸入異常超出範圍） | `EL_Init3` `EL_PublishTick` `EL_PublishBar` | 上游資料問題，確認 EL indicator 傳入的型別 |
-| `-5` | `bar_type` / `bar_interval` 無法對應到任何 wire timeframe | `EL_PublishBar` | **不是錯誤處理問題，是設定問題**：把 indicator 掛到支援的圖表間隔上（1/5/15/30/60 分或日線）。DLL 刻意不猜 —— 猜錯會把某區間的 bar 歸進另一區間的分區，下游偵測不到 |
+| `-4` | 參數無效。`zmq_endpoint` 或 `symbol` 為 null；**或 payload `snprintf` 被截斷**（代表數值輸入異常超出範圍） | `EL_Init3` `EL_Publish` | 上游資料問題，確認 EL indicator 傳入的型別 |
 | `-6` | **ABI 不符 —— 呼叫端是早於本協定的 `.ELD`** | `EL_Init` `EL_Init2`（兩者皆為墓碑） | 重新匯入隨這顆 DLL 一起發布的 `.ELD`。見下節 |
 
 ## `-6` 與墓碑匯出
 
-`EL_Init` 與 `EL_Init2` 是前一代協定的 init 匯出。它們**仍然存在於 `.def` 裡**，但函式體
-只有 `return -6;`。
+`EL_Init`、`EL_Init2`、`EL_PublishTick`、`EL_PublishBar` 都是前一代協定的匯出。它們
+**仍然存在於 `.def` 裡**，但函式體只有 `return -6;`。
 
-理由是 `__stdcall`：`EL_PublishTick` 與 `EL_PublishBar` 沿用了前一代的名字但**簽章不同**，
+理由是 `__stdcall`：`EL_PublishTick` 與 `EL_PublishBar` 曾經沿用前一代的名字但**簽章不同**，
 而 `__stdcall` 由被呼叫端清堆疊，所以簽章不符的呼叫會**損毀堆疊** —— 不是回傳錯誤碼，是
 TradeStation 崩潰或隨機行為。
 

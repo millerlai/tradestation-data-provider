@@ -4,31 +4,15 @@ from datetime import UTC, date, datetime, timedelta
 
 from tradestation_data.aggregation import MarketSnapshot, SessionPolicy, SymbolView
 from tradestation_data.domain.bar import Bar
-from tradestation_data.domain.tick import Tick
 
 # 13:30 UTC == 09:30 ET on 2026-04-20 (EDT). Aligned to the regular session open.
 T0 = datetime(2026, 4, 20, 13, 30, 0, tzinfo=UTC)
 
 
-def _tick(symbol: str, ts: datetime, price: float) -> Tick:
-    return Tick(
-        symbol=symbol,
-        timestamp=ts,
-        price=price,
-        el_volume=100,
-        el_ticks=200,
-        el_upticks=100,
-        el_downticks=100,
-        el_open_interest=0,
-        bid=None,
-        ask=None,
-    )
-
-
 def _bar(symbol: str, bucket: datetime, close: float) -> Bar:
     return Bar(
         symbol=symbol,
-        bucket_start=bucket,
+        bar_time=bucket,
         open=close,
         high=close,
         low=close,
@@ -38,21 +22,10 @@ def _bar(symbol: str, bucket: datetime, close: float) -> Bar:
         el_upticks=100,
         el_downticks=100,
         el_open_interest=0,
+        bar_type=1,
+        bar_interval=1,
+        category=2,
     )
-
-
-def test_on_tick_creates_state_and_updates_last_tick() -> None:
-    snap = MarketSnapshot()
-    assert snap.state_of("SPY") is None
-
-    snap.on_tick(_tick("SPY", T0, 450.0))
-    st = snap.state_of("SPY")
-    assert st is not None
-    assert st.last_tick is not None
-    assert st.last_tick.price == 450.0
-
-    snap.on_tick(_tick("SPY", T0 + timedelta(seconds=5), 450.5))
-    assert snap.state_of("SPY").last_tick.price == 450.5  # type: ignore[union-attr]
 
 
 def test_on_bar_appends_and_updates_last_closed_bar() -> None:
@@ -79,41 +52,9 @@ def test_recent_bars_is_bounded_by_max() -> None:
     assert [b.close for b in st.recent_bars] == [457.0, 458.0, 459.0]
 
 
-def test_symbols_lists_all_seen() -> None:
-    snap = MarketSnapshot()
-    snap.on_tick(_tick("SPY", T0, 450.0))
-    snap.on_bar(_bar("QQQ", T0, 400.0))
-    assert sorted(snap.symbols()) == ["QQQ", "SPY"]
-
-
 def test_view_of_returns_none_for_unknown() -> None:
     snap = MarketSnapshot()
     assert snap.view_of("SPY") is None
-
-
-def test_view_of_returns_immutable_snapshot_decoupled_from_live_state() -> None:
-    snap = MarketSnapshot()
-    snap.on_tick(_tick("SPY", T0, 450.0))
-    snap.on_bar(_bar("SPY", T0, 450.0))
-    snap.on_bar(_bar("SPY", T0 + timedelta(minutes=1), 451.0))
-
-    view = snap.view_of("SPY")
-    assert view is not None
-    assert isinstance(view, SymbolView)
-    assert view.last_tick is not None
-    assert view.last_tick.price == 450.0
-    assert view.last_closed_bar is not None
-    assert view.last_closed_bar.close == 451.0
-    assert isinstance(view.recent_bars, tuple)
-    assert len(view.recent_bars) == 2
-    assert [b.close for b in view.recent_bars] == [450.0, 451.0]
-
-    # Mutate live state *after* snapshotting — view must stay stable.
-    snap.on_tick(_tick("SPY", T0 + timedelta(seconds=30), 452.0))
-    snap.on_bar(_bar("SPY", T0 + timedelta(minutes=2), 453.0))
-    assert view.last_tick.price == 450.0
-    assert len(view.recent_bars) == 2
-    assert view.last_closed_bar.close == 451.0
 
 
 def test_views_batch_returns_immutable_copies_for_all_known_symbols() -> None:
@@ -147,7 +88,9 @@ def test_session_reset_clears_deque_across_session_boundary() -> None:
     assert st.session_date == date(2026, 4, 20)
 
     # Next bar belongs to 2026-04-21 session → deque must reset.
-    next_open = T0 + timedelta(days=1)  # 09:30 ET on the next day
+    # bar_time is the bar's CLOSE, so the first RTH bar closes 09:31 —
+    # a close of exactly 09:30 would be the last pre-market bar.
+    next_open = T0 + timedelta(days=1, minutes=1)  # closes 09:31 ET next day
     snap.on_bar(_bar("$ADD", next_open, 500.0))
 
     st = snap.state_of("$ADD")
@@ -156,7 +99,7 @@ def test_session_reset_clears_deque_across_session_boundary() -> None:
     assert st.recent_bars[0].close == 500.0
     assert st.session_date == date(2026, 4, 21)
     assert st.session_open_bar is not None
-    assert st.session_open_bar.bucket_start == next_open
+    assert st.session_open_bar.bar_time == next_open
 
 
 def test_session_reset_within_same_session_keeps_history() -> None:
@@ -197,13 +140,16 @@ def test_continuous_policy_keeps_intraday_bars() -> None:
 def test_session_open_bar_recorded_at_session_open() -> None:
     snap = MarketSnapshot(symbol_policies={"SPY": _CONTINUOUS_POLICY})
     snap.on_bar(_bar("SPY", T0.replace(hour=12, minute=45), 449.0))  # pre-market
-    snap.on_bar(_bar("SPY", T0, 450.0))  # 09:30 ET open
+    # Closes exactly 09:30 ET — the LAST pre-market minute, not the open.
+    snap.on_bar(_bar("SPY", T0, 449.5))
+    # Closes 09:31 ET — the first bar of the regular session.
+    snap.on_bar(_bar("SPY", T0 + timedelta(minutes=1), 450.0))
     snap.on_bar(_bar("SPY", T0 + timedelta(minutes=5), 451.0))
 
     st = snap.state_of("SPY")
     assert st is not None
     assert st.session_open_bar is not None
-    assert st.session_open_bar.bucket_start == T0
+    assert st.session_open_bar.bar_time == T0 + timedelta(minutes=1)
     assert st.session_open_bar.open == 450.0
 
 
@@ -228,7 +174,8 @@ def test_default_policy_none_preserves_legacy_behavior() -> None:
 
 def test_view_of_exposes_session_fields() -> None:
     snap = MarketSnapshot(symbol_policies={"SPY": _CONTINUOUS_POLICY})
-    snap.on_bar(_bar("SPY", T0, 450.0))
+    # Closes 09:31 ET — a close of exactly 09:30 would be pre-market.
+    snap.on_bar(_bar("SPY", T0 + timedelta(minutes=1), 450.0))
 
     view = snap.view_of("SPY")
     assert view is not None

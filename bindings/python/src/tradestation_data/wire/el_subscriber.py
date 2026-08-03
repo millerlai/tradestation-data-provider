@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -11,12 +11,6 @@ import zmq
 import zmq.asyncio
 
 from tradestation_data.domain.bar import Bar
-from tradestation_data.domain.tick import Tick
-from tradestation_data.domain.timeframe import (
-    SESSION_ANCHORED_TIMEFRAMES,
-    SUPPORTED_TIMEFRAMES,
-    align_bucket_start,
-)
 from tradestation_data.wire.base import MarketEvent
 
 log = logging.getLogger(__name__)
@@ -34,19 +28,18 @@ _ET_TZ: ZoneInfo = ZoneInfo("America/New_York")
 _EL_TS_FORMAT = "%Y-%m/%d-%H:%M:%S"
 _EL_TS_FORMAT_HUMAN = "yyyy-MM/dd-HH:mm:ss (24-hour)"
 
-# Symbols TradeStation emits as indices / breadth, with no bid/ask/volume
-# semantics. The wire carries bid/ask as plain floats for these (usually 0.0
-# or stale), so the invalidation has to happen here — it is a contract rule,
-# not a local convenience. See ../../../../contract/semantics.md §3.
-DEFAULT_INDEX_SYMBOLS: frozenset[str] = frozenset(
-    {"$TICK", "$ADD", "$VOLD", "$TRIN", "$PCVA", "VXX"}
-)
-
-# Timeframes this binding will accept on the wire live in
-# domain.timeframe.SUPPORTED_TIMEFRAMES — deliberately the same vocabulary the
-# storage layer partitions on. A `tf` we cannot place is a frame we must not
-# file, because filing it under a default would put bars of one interval into
-# another interval's partition.
+# The binding no longer blanks anyone's quote.
+#
+# There used to be a hard-coded list of index / breadth symbols whose
+# bid/ask were discarded at parse time, on the grounds that their live
+# numbers mean nothing. Two things were wrong with it. It is a guess: a
+# symbol nobody thought to list keeps its meaningless quote, and one listed
+# by mistake loses a real one — measured, `VXX` was on it, and VXX is a
+# tradeable ETN that reported 567,776 shares in a single bar. And it is an
+# opinion about what a number means, which is the consumer's to hold.
+#
+# `category` now travels on every frame (4 = Index), so a consumer that
+# wants the old behaviour has a fact to key off instead of a list.
 
 # The protocol version, carried in `proto`. There is exactly one, and a frame
 # without the key is not this protocol at all.
@@ -57,7 +50,7 @@ DEFAULT_INDEX_SYMBOLS: frozenset[str] = frozenset(
 # failed in the worst possible way — the old v1 bar used kind "bar_1m", which
 # the unknown-kind rule skips silently, while an old v1 tick would have
 # matched on shape and only diverged at field level. See contract/wire.md.
-PROTO_VERSION = 1
+PROTO_VERSION = 2
 
 # The five quantity fields, EasyLanguage's reserved words verbatim. Read as
 # REQUIRED, never with a default: a missing quantity must raise, because the
@@ -73,12 +66,12 @@ _QUANTITY_FIELDS = (
 )
 
 
-def _quantities(data: dict[str, Any], payload_kind: str) -> dict[str, int]:
+def _quantities(data: dict[str, Any]) -> dict[str, int]:
     try:
         return {name: int(data[name]) for name in _QUANTITY_FIELDS}
     except KeyError as exc:
         raise ValueError(
-            f"{payload_kind} payload is missing {exc.args[0]!r}. This is likely a "
+            f"payload is missing {exc.args[0]!r}. This is likely a "
             f"publisher older than proto {PROTO_VERSION}; reinstall TS2Python.dll "
             f"and re-import the .ELD that shipped with it."
         ) from exc
@@ -168,43 +161,28 @@ class TradeStationELProvider:
 
     Wire format (see ../../../../contract/wire.md):
       Frame 1: topic = symbol (UTF-8 bytes, e.g. b"SPY", b"VXX")
-      Frame 2: JSON payload. Two shapes, discriminated by ``kind``:
+      Frame 2: JSON payload. One shape, whatever the chart is:
 
-        Tick (EL_PublishTick):
           {
-            "proto":  1,
-            "seq":    <int>,      # monotonic sequence per symbol
-            "sid":    <int>,      # publisher session id, epoch microseconds
-            "kind":   "tick",
-            "ts":     <float>,    # DLL receive time, unix epoch UTC
-            "ts_str": "<str>",    # Raw EL timestamp "yyyy-MM/dd-HH:mm:ss"
-            "px":     <float>,    # last trade price
-            "el_volume": <int>, "el_ticks": <int>, "el_upticks": <int>,
-            "el_downticks": <int>, "el_open_interest": <int>,
-            "bid":    <float>,    # null when no quote
-            "ask":    <float>
-          }
-
-        Bar (EL_PublishBar, complete OHLC):
-          {
-            "proto":  1,
-            "seq":    <int>,
-            "sid":    <int>,
-            "kind":   "bar",
-            "tf":     "<str>",    # timeframe, e.g. "1m", "5m", "1d"
-            "ts":     <float>,
-            "ts_str": "<str>",
+            "proto":  2,
+            "seq":    <int>,       # per-symbol, monotonic
+            "sid":    <int>,       # publisher session; changes on restart
+            "ts":     <float>,     # DLL receive clock, UTC epoch
+            "ts_str": "<str>",     # EL Date+Time, ET wall clock. AUTHORITATIVE
+            "bar_type":     <int>, # EL BarType, verbatim
+            "bar_interval": <int>, # EL BarInterval, verbatim
+            "category":     <int>, # EL Category, verbatim
             "o": <float>, "h": <float>, "l": <float>, "c": <float>,
             "el_volume": <int>, "el_ticks": <int>, "el_upticks": <int>,
-            "el_downticks": <int>, "el_open_interest": <int>
+            "el_downticks": <int>, "el_open_interest": <int>,
+            "bid": <float|null>, "ask": <float|null>
           }
 
-    The DLL stamps ``ts`` when the EL call lands — for live ticks this is
-    within a millisecond of the exchange event, and semantics.md §1 makes it
-    a tick's authoritative time. ``bar.bucket_start`` instead comes from
-    ``ts_str``, parsed here as ET: it is the publisher's raw fact, and
-    parsing it locally keeps the answer correct even if the DLL host's tz
-    database is stale. Bars carry no quote.
+      There is no `kind` and no `tf`. The publisher used to split tick from
+      bar and map BarType/BarInterval to a timeframe name, refusing any pair
+      it could not name — three decisions taken off the wire, where nothing
+      downstream could see them.
+
     """
 
     source_id = "tradestation_el"
@@ -213,11 +191,9 @@ class TradeStationELProvider:
         self,
         endpoint: str = "tcp://127.0.0.1:5555",
         *,
-        index_symbols: frozenset[str] | None = None,
         context: zmq.asyncio.Context | None = None,
     ) -> None:
         self._endpoint = endpoint
-        self._index_symbols = index_symbols if index_symbols is not None else DEFAULT_INDEX_SYMBOLS
         self._ctx = context
         self._ctx_owned = context is None
         self._socket: zmq.asyncio.Socket | None = None
@@ -296,7 +272,7 @@ class TradeStationELProvider:
             log.debug("Subscribed to topic %s", sym)
 
     async def events(self) -> AsyncIterator[MarketEvent]:
-        """Yield every decoded event (Tick or Bar) until close()."""
+        """Yield every decoded point until close()."""
         if self._socket is None:
             raise RuntimeError("connect() must be called before events()")
         socket = self._socket
@@ -366,12 +342,6 @@ class TradeStationELProvider:
                 continue
             yield event
 
-    async def ticks(self) -> AsyncIterator[Tick]:
-        """Tick-only convenience view. Silently drops Bar events."""
-        async for event in self.events():
-            if isinstance(event, Tick):
-                yield event
-
     def _parse_payload(self, symbol: str, payload: bytes) -> MarketEvent:
         data = json.loads(payload)
 
@@ -419,41 +389,19 @@ class TradeStationELProvider:
                 f"and a clean-looking run would be unverifiable."
             )
 
-        kind = data.get("kind")
-        if kind == "tick":
-            return self._parse_tick(symbol, data)
-        if kind == "bar":
-            # An unknown interval must be refused, never defaulted. A bar
-            # filed under the wrong timeframe= partition is undetectable
-            # downstream — it looks exactly like real data at that interval.
-            tf_val = data.get("tf")
-            if not tf_val:
-                raise ValueError(f"bar payload carries no 'tf': {payload!r}")
-            tf = str(tf_val)
-            if tf not in SUPPORTED_TIMEFRAMES:
-                raise ValueError(f"Unsupported timeframe: {tf!r}")
-            return self._parse_bar(symbol, data, tf)
-        raise ValueError(f"Unknown event kind: {kind!r}")
+        return self._parse_point(symbol, data, payload)
 
-    def _parse_tick(self, symbol: str, data: dict[str, Any]) -> Tick:
-        timestamp = datetime.fromtimestamp(float(data["ts"]), tz=UTC)
+    def _parse_point(self, symbol: str, data: dict[str, Any], payload: bytes) -> Bar:
+        """One frame shape, one parse. No `kind`, no tf allow-list.
 
-        # Two independent reasons a quote can be meaningless, and both apply:
-        # the wire says null when EL had none to report (§3.1), and an
-        # index/breadth symbol's live numbers mean nothing even when present
-        # (§3.2). The DLL cannot do the second — it holds no symbol taxonomy.
-        is_index = symbol in self._index_symbols
-        return Tick(
-            symbol=symbol,
-            timestamp=timestamp,
-            price=float(data["px"]),
-            bid=None if is_index else _quote_or_none(data.get("bid")),
-            ask=None if is_index else _quote_or_none(data.get("ask")),
-            **_quantities(data, "tick"),
-        )
-
-    def _parse_bar(self, symbol: str, data: dict[str, Any], timeframe: str = "1m") -> Bar:
-        # Priority for bucket_start (UTC) — semantics.md §1.1:
+        The wire used to carry two shapes discriminated by `kind`, and the
+        bar shape carried a `tf` string the DLL had derived from BarType and
+        BarInterval — refusing, with rc -5, any combination it could not
+        name. Both were the publisher deciding. `bar_type` and `bar_interval`
+        now travel as EasyLanguage reports them and nothing is refused for
+        being an interval this binding has no name for.
+        """
+        # Priority for bar_time (UTC) — semantics.md §1.1:
         #   1. ts_str (authoritative) — EL wall-clock string, parsed here
         #      as America/New_York. Zone-correct on any DLL host because
         #      we never rely on the host's system tz.
@@ -465,81 +413,54 @@ class TradeStationELProvider:
         # DLL-side format check that used to catch a bad string is gone; this
         # is the only place left that can notice. Falling back on a string we
         # could not read is what makes that failure silent AND wrong: `ts` is
-        # the receive clock, so during a chart replay every bar of a session
-        # arrives within the same minute, collapses onto one bucket_start, and
-        # the runtime's dedupe discards all but one — a whole session reduced
-        # to a single plausible-looking bar in today's partition. That is the
-        # zh-TW FormatTime("tt") incident this repo already shipped once.
-        bucket_start: datetime | None = None
+        # the receive clock, so during a chart replay every point of a session
+        # arrives within the same minute, collapses onto one bar_time, and the
+        # runtime's dedupe discards all but one — a whole session reduced to a
+        # single plausible-looking bar in today's partition. That is the zh-TW
+        # FormatTime("tt") incident this repo already shipped once.
+        bar_time: datetime | None = None
 
         ts_str_raw = data.get("ts_str")
         if isinstance(ts_str_raw, str) and ts_str_raw:
-            bucket_start = _parse_el_str_as_et(ts_str_raw)
-            if bucket_start is None:
+            bar_time = _parse_el_str_as_et(ts_str_raw)
+            if bar_time is None:
                 # Refuse. events() logs the payload and drops the frame; the
-                # stream survives, and no invented bucket reaches storage.
+                # stream survives, and no invented timestamp reaches storage.
                 raise ValueError(
-                    f"bar payload carries an unparseable 'ts_str': {ts_str_raw!r}. "
+                    f"payload carries an unparseable 'ts_str': {ts_str_raw!r}. "
                     f"Expected {_EL_TS_FORMAT_HUMAN}, read as America/New_York. "
                     f"A localised or reformatted time string from the indicator "
-                    f"is the usual cause; the DLL no longer validates it."
+                    f"is the usual cause; the DLL no longer validates it. "
+                    f"(payload={payload[:200]!r})"
                 )
 
-        if bucket_start is None:
+        if bar_time is None:
             # No ts_str at all. §1.1 allows the degradation but requires it be
             # recorded — an operator seeing this on every frame is looking at a
             # publisher that will collapse any replay onto one bucket.
             log.warning(
-                "bar_ts_str_absent_using_recv_clock",
-                extra={"symbol": symbol, "timeframe": timeframe},
+                "ts_str_absent_using_recv_clock",
+                extra={"symbol": symbol},
             )
-            bucket_start = _floor_to_minute_utc(float(data["ts"]))
+            bar_time = _floor_to_minute_utc(float(data["ts"]))
 
-        # §2 — the wire is right-labelled, the contract is left-labelled.
-        # EasyLanguage's `Time` is the bar's *close*, and TsStr is built from
-        # it verbatim (EL/TS2Python_Exporter.el), so an RTH 1m session arrives
-        # as 09:31…16:00 where §2 requires 09:30…15:59. Both are 390 bars and
-        # both look correct in isolation — the whole series is simply shifted
-        # one slot. Step back onto the left edge before the grid snap.
-        #
-        # Session-anchored frames are exempt: align_bucket_start replaces a 1d
-        # timestamp with that session's 04:00 ET anchor outright, so a shift
-        # here would only move the bar into the previous session.
-        # Step back one MINUTE, not one whole `tf`. The bucket a bar belongs
-        # to is the grid cell holding the instant just before its close, and
-        # subtracting a full interval only finds that cell when the bar
-        # actually spans one. A session-truncated bar does not: a 60-minute
-        # RTH chart is six full bars plus a 15:30-16:00 stub that EL stamps
-        # 16:00, and 16:00 minus 60m is 15:00, which floors onto the
-        # 09:30-anchored hour grid at 14:30 — the *previous* bar's bucket.
-        # `_handle_provider_bar` then reads the stub as an intra-bar refresh
-        # and overwrites the real 14:30-15:30 hour with the half-hour's OHLC
-        # and quantities.
-        #
-        # One minute is exact here rather than approximate: every candidate
-        # is already minute-floored, by `_parse_el_str_as_et` or by
-        # `_floor_to_minute_utc`. For a bar that does span its interval the
-        # answer is identical to subtracting the interval, so this changes
-        # nothing except the truncated case.
-        if timeframe not in SESSION_ANCHORED_TIMEFRAMES:
-            bucket_start -= timedelta(minutes=1)
-
-        # §2.2 — the grid is the contract's, not the publisher's. EL stamps a
-        # bar with its chart's own Date/Time, which for a daily bar is nowhere
-        # near the 04:00 ET session anchor. Left alone, one trading day could
-        # end up as two rows in bars/timeframe=1d/ with different
-        # bucket_starts, and every join downstream would double-count it.
-        bucket_start = align_bucket_start(bucket_start, timeframe)
-
+        # The timestamp is EasyLanguage's, verbatim. Nothing here shifts it or
+        # snaps it to a grid — see the Bar docstring and semantics.md §2 for
+        # the bar that cost.
         return Bar(
             symbol=symbol,
-            bucket_start=bucket_start,
+            bar_time=bar_time,
+            bar_type=int(data["bar_type"]),
+            bar_interval=int(data["bar_interval"]),
+            category=int(data["category"]),
             open=float(data["o"]),
             high=float(data["h"]),
             low=float(data["l"]),
             close=float(data["c"]),
-            timeframe=timeframe,
-            **_quantities(data, "bar"),
+            bid=_quote_or_none(data.get("bid")),
+            ask=_quote_or_none(data.get("ask")),
+            ts=float(data["ts"]),
+            **_quantities(data),
         )
 
     async def close(self) -> None:

@@ -4,14 +4,14 @@ from collections.abc import AsyncIterator
 from typing import Protocol, runtime_checkable
 
 from tradestation_data.domain.bar import Bar
-from tradestation_data.domain.tick import Tick
 
-# An event on the wire is either a single trade print (Tick) or a complete
-# OHLC bar (Bar). Both come straight from the EL indicator; this binding
-# builds neither from the other.
+# The wire carries one shape: a data point on a chart, whatever kind of
+# chart it is. There is no Tick/Bar split any more — TradeStation supplies
+# the same reserved words for every point, and dropping some of them by
+# chart type was the publisher deciding what a number meant.
 #
-# This union is the value range of the wire — see contract/wire.md.
-MarketEvent = Tick | Bar
+# See contract/wire.md.
+MarketEvent = Bar
 
 
 @runtime_checkable
@@ -49,11 +49,7 @@ class MarketDataProvider(Protocol):
         ...
 
     def events(self) -> AsyncIterator[MarketEvent]:
-        """Yield ticks and/or bars as they arrive. Runs until `close()`."""
-        ...
-
-    def ticks(self) -> AsyncIterator[Tick]:
-        """Tick-only convenience view. Bars are silently skipped."""
+        """Yield points as they arrive. Runs until `close()`."""
         ...
 
     async def close(self) -> None:

@@ -34,7 +34,7 @@ no code change on this side. (The file you are reading cannot be used as that
 target as-is: a module name starting with a digit is not importable with a
 normal `import` statement.)
 
-Keep on_tick / on_bar fast — they run inline in the ingest loop. Anything
+Keep on_bar fast — it runs inline in the ingest loop. Anything
 slow belongs behind should_flush() / flush(), which the runtime drives from
 a separate loop, or off in a task you spawn.
 """
@@ -49,7 +49,6 @@ import _compat
 
 from tradestation_data.aggregation.snapshot import MarketSnapshot
 from tradestation_data.domain.bar import Bar
-from tradestation_data.domain.tick import Tick
 from tradestation_data.runtime.ingestion import IngestionRuntime
 from tradestation_data.sinks import SinkPipeline
 from tradestation_data.sinks.base import BaseSink
@@ -58,7 +57,6 @@ from tradestation_data.wire.el_subscriber import TradeStationELProvider
 
 @dataclass
 class _Stats:
-    ticks: int = 0
     bars: int = 0
     high: float = float("-inf")
     low: float = float("inf")
@@ -84,13 +82,6 @@ class SessionStatsSink(BaseSink):
     def _stats(self, symbol: str) -> _Stats:
         return self._by_symbol.setdefault(symbol, _Stats())
 
-    def on_tick(self, tick: Tick) -> None:
-        st = self._stats(tick.symbol)
-        st.ticks += 1
-        st.last = tick.price
-        st.high = max(st.high, tick.price)
-        st.low = min(st.low, tick.price)
-
     def on_bar(self, bar: Bar) -> None:
         # Every bar arriving here was shipped whole by the EL indicator and
         # is already closed. There is no other kind: nothing in this binding
@@ -99,7 +90,11 @@ class SessionStatsSink(BaseSink):
         st.bars += 1
         st.high = max(st.high, bar.high)
         st.low = min(st.low, bar.low)
-        print(f"  bar closed  {bar.symbol:<6} {bar.timeframe:>3}  C={bar.close:.2f}")
+        st.last = bar.close
+        print(
+            f"  point closed  {bar.symbol:<6} "
+            f"bt={bar.bar_type} iv={bar.bar_interval}  C={bar.close:.2f}"
+        )
 
     def close(self) -> None:
         # The Sink protocol requires close() to be idempotent (sinks/base.py).
@@ -116,7 +111,7 @@ class SessionStatsSink(BaseSink):
         for symbol in sorted(self._by_symbol):
             st = self._by_symbol[symbol]
             print(
-                f"{symbol:<6} ticks={st.ticks:<5} bars={st.bars:<4} "
+                f"{symbol:<6} points={st.bars:<4} "
                 f"high={st.high:<8.2f} low={st.low:<8.2f} last={st.last:.2f}"
             )
 
@@ -156,8 +151,8 @@ async def main() -> int:
     # you want from anything that spans an await.
     for symbol in args.symbols:
         view = snapshot.view_of(symbol)
-        if view is not None and view.last_tick is not None:
-            print(f"snapshot {symbol:<6} last tick px={view.last_tick.price:.2f}")
+        if view is not None and view.last_closed_bar is not None:
+            print(f"snapshot {symbol:<6} last close={view.last_closed_bar.close:.2f}")
 
     return 0
 

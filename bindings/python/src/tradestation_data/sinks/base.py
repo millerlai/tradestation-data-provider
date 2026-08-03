@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Protocol, runtime_checkable
 
 from tradestation_data.domain.bar import Bar
-from tradestation_data.domain.tick import Tick
 
 
 @runtime_checkable
@@ -14,7 +13,7 @@ class Sink(Protocol):
     runtime fans every event out to every registered sink via
     :class:`SinkPipeline`.
 
-    Implementations should keep ``on_tick`` / ``on_bar`` non-blocking;
+    Implementations should keep ``on_bar`` non-blocking;
     they run inside the ingest loop. Heavy work (large parquet writes,
     network IO) belongs behind a buffer that :meth:`should_flush` /
     :meth:`flush` drives from the runtime's flush loop.
@@ -22,7 +21,7 @@ class Sink(Protocol):
     Contract:
       * ``name`` — stable identifier from ``sinks.yaml``. Used for
         logging and for :func:`tradestation_data.sinks.callback.get_sink`.
-      * ``on_tick`` / ``on_bar`` — called once per emitted event in
+      * ``on_bar`` — called once per emitted point in
         ingest order. Sinks that do not care about one of these may
         implement it as a no-op.
       * ``should_flush`` — return True when ``flush`` should be called
@@ -34,8 +33,6 @@ class Sink(Protocol):
     """
 
     name: str
-
-    def on_tick(self, tick: Tick) -> None: ...
 
     def on_bar(self, bar: Bar) -> None: ...
 
@@ -56,9 +53,6 @@ class BaseSink:
     """
 
     name: str = ""
-
-    def on_tick(self, tick: Tick) -> None:
-        return None
 
     def on_bar(self, bar: Bar) -> None:
         return None

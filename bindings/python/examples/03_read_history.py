@@ -2,14 +2,14 @@
 """Read stored data back, and see what the read API does and does not do.
 
 **Runs offline** — no TradeStation, no DLL. It fabricates a session's worth
-of bars and ticks, writes them exactly as the live runtime would, and reads
+of points, writes them exactly as the live runtime would, and reads
 them back.
 
     uv run python examples/03_read_history.py
 
 The thing worth noticing is what is NOT here. `load_bars` reads Parquet and
 nothing else: there is no cache to miss, no resampling, no backfill. Ask for
-a timeframe the collector never recorded and you get zero rows, not a
+a chart the collector never recorded and you get zero rows, not a
 computed substitute — because a bar assembled here would be indistinguishable
 from one TradeStation published the moment it hit disk, and you would have no
 way to tell later which you were looking at. Building 5-minute bars out of
@@ -17,20 +17,20 @@ way to tell later which you were looking at. Building 5-minute bars out of
 rules, downstream of this package.
 
     data/
-      ticks/symbol=SPY/date=2026-04-20/ticks.parquet
-      bars/timeframe=1m/symbol=SPY/date=2026-04-20/bars.parquet
-      bars/timeframe=1d/symbol=SPY/bars.parquet     <- one file, no date=
+      bars/bartype=1/interval=1/symbol=SPY/date=2026-04-20/bars.parquet
+      bars/bartype=2/interval=1/symbol=SPY/bars.parquet   <- one file, no date=
 
-Bars are LEFT-labelled: `bucket_start` covers [t, t+step). A 09:30 bar spans
-09:30 to 09:31, and an RTH 1m session ends at 15:59, not 16:00
-(contract/semantics.md §2).
+`bar_time` is the publisher's own timestamp, landed verbatim: EasyLanguage's
+`Time` is the point's CLOSE, so an RTH 1m session runs 09:31 through 16:00.
+There is no left-edge conversion and no grid — a consumer wanting left edges
+subtracts for itself (contract/semantics.md §2).
 
 Times are Eastern. This is a US-equity store, so a bare `datetime(...)` passed
-to `load_bars` / `load_ticks` means `America/New_York` (§2.3) — you never do
+to `load_bars` means `America/New_York` (§2.3) — you never do
 offset arithmetic to ask a question. Every frame still carries both views,
-`bucket_start` in UTC beside `bucket_start_et`.
+`bar_time` in UTC beside `bar_time_et`.
 
-An *event* timestamp is different: `Tick.timestamp` is an absolute instant, so
+An *event* timestamp is different: `Bar.bar_time` is an absolute instant, so
 give it a timezone-aware value. Only the query bounds have a default.
 """
 
@@ -43,10 +43,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from tradestation_data.domain.bar import Bar
-from tradestation_data.domain.tick import Tick
 from tradestation_data.storage.bar_writer import BarWriter
 from tradestation_data.storage.history_store import HistoryStore
-from tradestation_data.storage.tick_writer import TickWriter
 
 ET = ZoneInfo("America/New_York")
 # The session open, said the way a US-equity desk says it.
@@ -54,8 +52,8 @@ SESSION_OPEN = datetime(2026, 4, 20, 9, 30, tzinfo=ET)
 SYMBOL = "SPY"
 
 
-def write_synthetic_store(root: Path, *, minutes: int = 30) -> tuple[int, int]:
-    """Write bars and ticks the way the live sinks would.
+def write_synthetic_store(root: Path, *, minutes: int = 30) -> int:
+    """Write points the way the live sink would.
 
     The quantities are shaped like real intraday data: EasyLanguage's
     `Volume` is the up-tick share volume (so it equals `UpTicks`) and
@@ -64,9 +62,9 @@ def write_synthetic_store(root: Path, *, minutes: int = 30) -> tuple[int, int]:
     neither is called "volume".
     """
     price = 450.0
-    bars = ticks = 0
+    bars = 0
 
-    with BarWriter(root / "bars") as bar_writer, TickWriter(root / "ticks") as tick_writer:
+    with BarWriter(root / "bars") as bar_writer:
         for step in range(minutes):
             bucket = SESSION_OPEN + timedelta(minutes=step)
             open_ = round(price, 2)
@@ -76,7 +74,10 @@ def write_synthetic_store(root: Path, *, minutes: int = 30) -> tuple[int, int]:
             bar_writer.write(
                 Bar(
                     symbol=SYMBOL,
-                    bucket_start=bucket,
+                    bar_time=bucket,
+                    bar_type=1,  # EL `BarType`     — intraday minutes
+                    bar_interval=1,  # EL `BarInterval` — how many
+                    category=2,  # EL `Category`     — 2 = Stock
                     open=open_,
                     high=round(max(open_, close) + 0.04, 2),
                     low=round(min(open_, close) - 0.03, 2),
@@ -85,57 +86,41 @@ def write_synthetic_store(root: Path, *, minutes: int = 30) -> tuple[int, int]:
                     el_ticks=up + down,  # EL `Ticks`   — total shares
                     el_upticks=up,
                     el_downticks=down,
-                    el_open_interest=0,  # 0 on equities; futures only
-                    timeframe="1m",
+                    el_open_interest=down,  # EL `OpenInt` — returns DownTicks here
+                    bid=round(close - 0.01, 2),
+                    ask=round(close + 0.01, 2),
                 )
             )
             bars += 1
 
-            # A couple of prints inside the minute, as the tick sink stores them.
-            for sub in (0, 30):
-                tick_writer.write(
-                    Tick(
-                        symbol=SYMBOL,
-                        timestamp=bucket + timedelta(seconds=sub),
-                        price=close,
-                        el_volume=up // 2,
-                        el_ticks=(up + down) // 2,
-                        el_upticks=up // 2,
-                        el_downticks=down // 2,
-                        el_open_interest=0,
-                        bid=round(close - 0.01, 2),
-                        ask=round(close + 0.01, 2),
-                    )
-                )
-                ticks += 1
-
-        # One daily bar. Daily lives in a flat single-file layout, and on a
-        # daily chart EasyLanguage's words mean the opposite of the above:
-        # `Volume` is total shares, and `Ticks` is documented as a trade
-        # count — documented, not confirmed. semantics.md §3.4 has it under
-        # suspicion: across 499 live SPY rows it came back byte-for-byte
-        # equal to `el_volume`, which no trade count would be. Still
-        # verbatim — the inversion is a table the consumer reads, not
-        # something any layer here reconciles.
+        # One daily point. BarType 2 lives in a flat single-file layout, and
+        # on a daily chart EasyLanguage's words mean the opposite of the
+        # above: `Volume` is total shares, and `Ticks` is "Volume plus Open
+        # Interest" — which for a stock, whose OI is 0, is just the volume
+        # again. It is not a trade count. semantics.md §3.4 has the table.
         bar_writer.write(
             Bar(
                 symbol=SYMBOL,
-                bucket_start=datetime(2026, 4, 20, 4, 0, tzinfo=ET),
+                bar_time=datetime(2026, 4, 20, 16, 0, tzinfo=ET),
+                bar_type=2,
+                bar_interval=1,
+                category=2,
                 open=450.0,
                 high=round(price + 0.5, 2),
                 low=449.5,
                 close=round(price, 2),
                 el_volume=55_437_545,
-                el_ticks=612_004,
+                el_ticks=55_437_545,
                 el_upticks=55_437_545,
                 el_downticks=0,
                 el_open_interest=0,
-                timeframe="1d",
+                bid=None,
+                ask=None,
             )
         )
         bars += 1
 
-    return bars, ticks
+    return bars
 
 
 def main() -> int:
@@ -158,8 +143,8 @@ def main() -> int:
         print(f"error: {root} is not empty - pass --root to point somewhere disposable")
         return 2
 
-    n_bars, n_ticks = write_synthetic_store(root)
-    print(f"wrote {n_bars} bars and {n_ticks} ticks under {root}\n")
+    n_bars = write_synthetic_store(root)
+    print(f"wrote {n_bars} points under {root}\n")
 
     store = HistoryStore(root)
     # Bare datetimes, no tzinfo and no offset arithmetic: on the read API these
@@ -167,11 +152,14 @@ def main() -> int:
     start = datetime(2026, 4, 20, 9, 29)
     end = datetime(2026, 4, 20, 10, 30)
 
-    bars = store.load_bars(SYMBOL, start, end, "1m")
+    # The chart is named the way EasyLanguage names it -- BarType 1 with
+    # BarInterval 1 is a one-minute chart. There is no "1m" string anywhere,
+    # and no allow-list to fail against.
+    bars = store.load_bars(SYMBOL, start, end, bar_type=1, bar_interval=1)
     first, last = bars.row(0, named=True), bars.row(-1, named=True)
-    print(f" 1m: {bars.height} bars")
+    print(f" bartype=1 interval=1: {bars.height} points")
     print(
-        f"     first  {first['bucket_start_et']:%H:%M} ET  "
+        f"     first  {first['bar_time_et']:%H:%M} ET  "
         f"O={first['open']:.2f} H={first['high']:.2f} "
         f"L={first['low']:.2f} C={first['close']:.2f}"
     )
@@ -179,31 +167,26 @@ def main() -> int:
         f"            el_volume={first['el_volume']} (up-tick shares)  "
         f"el_ticks={first['el_ticks']} (total shares)"
     )
-    print(f"     last   {last['bucket_start_et']:%H:%M} ET  C={last['close']:.2f}")
+    print(f"            bid={first['bid']} ask={first['ask']}  <- every point carries them")
+    print(f"     last   {last['bar_time_et']:%H:%M} ET  C={last['close']:.2f}")
 
-    # A daily bar is anchored at 04:00 ET, the start of the extended session
-    # — so the 09:29-10:30 window above does not contain it. Ask for the day.
+    # The daily point. Its timestamp is EL's own close time, landed verbatim,
+    # so it is 16:00 ET -- outside the 09:29-10:30 window above.
     day_start = datetime(2026, 4, 20, 0, 0)
     day_end = datetime(2026, 4, 20, 23, 59)
-    daily = store.load_bars(SYMBOL, day_start, day_end, "1d")
+    daily = store.load_bars(SYMBOL, day_start, day_end, bar_type=2, bar_interval=1)
     d = daily.row(0, named=True)
-    print(f"\n 1d: {daily.height} bar   {d['bucket_start_et']:%H:%M} ET (04:00 session anchor)")
-    print("     note the intraday window above does not reach it: anchors differ by tf")
+    print(f"\n bartype=2: {daily.height} point   {d['bar_time_et']:%H:%M} ET")
     print(
         f"     el_volume={d['el_volume']:,} (total shares here)  "
-        f"el_ticks={d['el_ticks']:,} (documented as a trade count — unconfirmed)"
+        f"el_ticks={d['el_ticks']:,} (Volume + OpenInterest, so the same again)"
     )
-    print("     the two words swap meaning between intraday and daily: semantics.md 3.4")
-    print("     3.4 also flags daily el_ticks: on live SPY it equalled el_volume exactly,")
-    print("     so do not consume it as a count until that is explained.")
+    print("     the words swap meaning between intraday and daily: semantics.md 3.4")
 
-    ticks = store.load_ticks(SYMBOL, start, end)
-    print(f"\n ticks: {ticks.height} rows, bid/ask preserved: {ticks.row(0, named=True)['bid']}")
-
-    # The part that used to compute something. A timeframe nobody recorded is
-    # simply absent, and an absent answer is a real answer.
-    empty = store.load_bars(SYMBOL, start, end, "5m")
-    print(f"\n 5m: {empty.height} rows - nothing recorded this timeframe, so nothing is returned.")
+    # A chart nobody recorded is simply absent, and an absent answer is a real
+    # answer -- not an error, and not something this binding computes.
+    empty = store.load_bars(SYMBOL, start, end, bar_type=1, bar_interval=5)
+    print(f"\n interval=5: {empty.height} rows - nothing recorded, so nothing is returned.")
     print(f"     Same columns as a populated answer ({len(empty.columns)}), so stacking")
     print("     results across days does not break on a quiet one (semantics.md 2.4).")
 

@@ -1,6 +1,6 @@
-# wire — envelope（`proto` 1）
+# wire — envelope（`proto` 2）
 
-> 權威來源：`cpp/src/ts2python.cpp`（`EL_PublishTick` / `EL_PublishBar`）。
+> 權威來源：`cpp/src/ts2python.cpp`（`EL_Publish`）。
 > 本文如與實作不符，以實作為準並修正本文。
 >
 > 本文自成一體。**沒有舊版本可以相容** —— 理由見〈為什麼版本欄位叫 `proto` 而不是 `v`〉
@@ -14,7 +14,7 @@
 | Publisher | DLL 端 `bind`，預設 `tcp://127.0.0.1:5555` |
 | Subscriber | `connect` 同一 endpoint |
 | 送達保證 | **無**，但可偵測（`seq`） |
-| 對應 DLL ABI | `EL_DllVersion() == 1` |
+| 對應 DLL ABI | `EL_DllVersion() == 2` |
 
 ## Frame 結構
 
@@ -22,110 +22,59 @@
 JSON payload。**逐一精確訂閱，並在收訊後以字串完全相等再過濾一次**
 （ZMQ 訂閱是 prefix match，訂 `SPY` 會收到 `SPYG`）—— 見 [`semantics.md`](semantics.md) §5。
 
-## Payload — `kind: "tick"`
+## Payload —— 只有一種
 
-由 `EL_PublishTick` 產生（EasyLanguage 的 `BarType = 0`，tick 資料序列）。
-
-```json
-{"proto":1,"kind":"tick","seq":1,"sid":1784998823554057,
- "ts":1784998835.554057,"ts_str":"2026-04/18-13:31:00",
- "px":450.400000,
- "el_volume":300,"el_ticks":812,"el_upticks":300,"el_downticks":512,
- "el_open_interest":0,
- "bid":450.390000,"ask":450.410000}
-```
-
-## Payload — `kind: "bar"`
-
-由 `EL_PublishBar` 產生（`BarType <> 0`）。
+**一個 frame 形狀,不論來自什麼圖。** 沒有 `kind`,也沒有 `tf`。
 
 ```json
-{"proto":1,"kind":"bar","tf":"1m","seq":3,"sid":1784998804189929,
- "ts":1784998816.189929,"ts_str":"2026-04/18-13:30:45",
- "o":450.100000,"h":450.750000,"l":449.800000,"c":450.400000,
- "el_volume":6100,"el_ticks":12000,"el_upticks":6100,"el_downticks":5900,
- "el_open_interest":0}
+{
+  "proto": 2,
+  "seq": 1,
+  "sid": 1785646054360588,
+  "ts": 1785646062.364744,
+  "ts_str": "2026-04/18-13:30:45",
+  "bar_type": 0,
+  "bar_interval": 1,
+  "category": 2,
+  "o": 450.0, "h": 450.0, "l": 450.0, "c": 450.0,
+  "el_volume": 100, "el_ticks": 195,
+  "el_upticks": 100, "el_downticks": 80, "el_open_interest": 0,
+  "bid": 449.99, "ask": 450.01
+}
 ```
 
-**bar 不帶 `bid` / `ask`。** `InsideBid` / `InsideAsk` 是即時報價函式，不是 bar 的欄位；
-一根 bar 上的報價其實只屬於它的最後一筆成交，掛在整根 bar 上是誤導。報價只出現在 tick。
-
-## 欄位
-
-| 欄位 | 型別 | 說明 |
+| 欄位 | 型別 | 意義 |
 | --- | --- | --- |
-| `proto` | int | 協定版本，固定 `1`。**缺席即非本協定** |
-| `kind` | string | `"tick"`（有 `px`、`bid`、`ask`）或 `"bar"`（有 `o` `h` `l` `c`） |
-| `tf` | string | **僅 `bar` 有**。`1m` `5m` `15m` `30m` `1h` `1d` |
-| `seq` | uint64 | per-symbol 單調遞增，從 `1` 起算，tick 與 bar 共用。見 `semantics.md` §6 |
-| `sid` | uint64 | publisher session id（init 當下的 UTC epoch **微秒**）。只需比較是否相等，**不得**解讀為時間戳 |
-| `ts` | float | DLL 收訊端 wall clock，UTC epoch 秒。**Tick 事件時間的權威來源**；對 bar 而言僅供延遲量測 |
-| `ts_str` | string | EL 原始字串 `yyyy-MM/dd-HH:mm:ss`，逐字透傳。**bar bucket 的權威來源**，但它是 bar 的**收盤**時間（EL 的 `Time`）—— binding 必須依 `semantics.md` §2 減一個 `tf` 才得到左標籤的 `bucket_start` |
-| `px` | float | 成交價（僅 `tick`） |
-| `o` `h` `l` `c` | float | OHLC（僅 `bar`） |
-| `el_volume` | **int64** | EasyLanguage 的 `Volume`，**原樣** |
-| `el_ticks` | **int64** | EasyLanguage 的 `Ticks`，**原樣** |
-| `el_upticks` | **int64** | EasyLanguage 的 `UpTicks`，**原樣** |
-| `el_downticks` | **int64** | EasyLanguage 的 `DownTicks`，**原樣** |
-| `el_open_interest` | **int64** | EasyLanguage 的 `OpenInt`，**原樣**。股票 / ETF 恆為 0 |
-| `bid` `ask` | float \| **null** | **僅 `tick`**。無報價時為 `null` —— 見 `semantics.md` §3.1 |
+| `proto` | int | 協定版本。**目前只有 2**,缺這個鍵就不是這個協定 |
+| `seq` | int | 每個 symbol 各自單調遞增。**每一個 frame 都必須有** |
+| `sid` | int | publisher session id。DLL 重啟會變 —— 那是重置,不是遺漏 |
+| `ts` | float | DLL 收訊端 wall clock（UTC epoch 秒）。量測延遲用,也是 `ts_str` 缺席時的最後手段 |
+| `ts_str` | string | EL 的 `Date` + `Time`,`yyyy-MM/dd-HH:mm:ss`,ET 牆鐘,逐字。**`bar_time` 的權威來源**,原樣落地（`semantics.md` §2） |
+| `bar_type` | int | EL 的 `BarType`,逐字。0 = tick 序列,1 = 盤中分鐘,2 = 日線 |
+| `bar_interval` | int | EL 的 `BarInterval`,逐字。`bar_type` 為 1 時就是分鐘數 |
+| `category` | int | EL 的 `Category`,逐字。0 期貨 / 2 股票 / 3 股票選擇權 / 4 指數 …（`semantics.md` §3.5） |
+| `o` `h` `l` `c` | float | EL 的 `Open`/`High`/`Low`/`Close`。1-tick 序列上四者是同一筆成交 |
+| `el_volume` `el_ticks` `el_upticks` `el_downticks` `el_open_interest` | int | EL 的五個保留字,逐字（`semantics.md` §3.4） |
+| `bid` `ask` | float \| null | EL 的 `InsideBid` / `InsideAsk`,publisher 沒有報價時為 `null` |
 
-`seq` / `sid` 是真正的無號 64 位元整數，`proto` 是小整數，五個 `el_*` 是帶號 64 位元
-整數，`ts` / `px` / OHLC / `bid` / `ask` 是 double。`seq` 可能超過 IEEE 754 double 能
-精確表示的 2^53，預設把 JSON 數字解析成 double 的函式庫**必須**確保它以整數型別讀取。
+### 為什麼不再分 tick 與 bar
 
-### 五個 `el_*` 欄位：publisher 不做任何選擇
+wire 曾經有兩種形狀,用 `kind` 區分:tick 只送 `Close`、丟掉 `BarType`/`BarInterval`;
+bar 送 OHLC、丟掉 `bid`/`ask`。兩邊都在**丟掉圖表已經提供的欄位**,依據是這個
+publisher 自己對「哪些數字在哪種圖上有意義」的判斷 —— 而那個判斷發生在 wire 之外,
+消費端看不出它做過。
 
-**欄位名就是 EasyLanguage 的保留字，值就是那個保留字當下的內容。** publisher 不判斷、
-不換算、不依圖表型態挑選欄位。
+TradeStation 對每一種圖都提供同一組保留字。1-tick 序列的 `Open = High = Low = Close`
+是一個**事實**,值得落地,不是值得省略的冗餘。全部送出去也是唯一能撐過
+「TradeStation 改變某個字的定義」的做法:這一層沒有會過時的意見。
 
-這一點是本協定與前一代最大的差別。前一代的 wire 只有一個 `vol`，而 publisher 依
-`BarType` 決定要把 EL 的 `Volume` 還是 `Ticks` 填進去 —— 因為 EasyLanguage 這兩個保留字
-在 intraday 與 daily 上語意相反（見 [`semantics.md`](semantics.md) §3.4）。那個選擇發生在
-wire 之外，數字看起來永遠合理，於是需要另一個版本欄位來宣告「這批數字是照哪一版規則
-算的」。
+### 為什麼 `bar_type` / `bar_interval` 不再映射成 `tf`
 
-**把五個保留字各給一欄，那個宣告就不需要存在了。** intraday 與 daily 的語意反轉仍然是
-事實，但它現在是 consumer 查表就能解決的事，而不是 publisher 代為決定、事後無從追查的事。
+DLL 曾經把這一對映射成 `"5m"`、`"1d"` 之類的字串,並對**映射不出來的組合回 `-5`、
+整根不送**。2 分鐘圖、週線圖、2 日圖因此完全不會出現在 wire 上。
 
-`el_` 前綴是刻意的：看到 `el_volume` 的人會去查 EasyLanguage 的定義，看到 `volume` 的人
-不會 —— 而在 intraday 上，EL 的 `Volume` **不是**成交量，是上漲 tick 的成交股數。
-
-> **EasyLanguage 傳不了 int64。** `DefineDLLFunc` 沒有 64 位元整數型別，所以 EL → DLL 的
-> 這五個參數仍是 `double`，由 DLL `static_cast<long long>` 後以 `%lld` 寫進 JSON。
-> double 的 53-bit 尾數可精確表示到 9×10¹⁵ 股，遠超任何實際成交量。
-> **不可改用 EL 的 `int`** —— 那是 32-bit，日成交量超過 21.4 億股的個股會溢位。
-
-## `kind` 表形狀，`tf` 表區間
-
-| 欄位 | 語意 | 取值 |
-| --- | --- | --- |
-| `kind` | **形狀** —— 決定有哪些欄位 | `tick`（有 `px` / `bid` / `ask`）/ `bar`（有 `o` `h` `l` `c`） |
-| `tf` | **區間** —— 僅 `bar` 有 | `1m` `5m` `15m` `30m` `1h` `1d` |
-
-`tf` 用的就是儲存層 `timeframe=` 分區的那組字串。**這是刻意的**：
-
-> binding 若遇到無法對應的 `tf`，**必須拒收該 frame**，不得以預設值歸檔。
-> 歸到預設分區會讓某個區間的 bar 混進另一個區間的分區，而下游無從分辨。
-
-各區間的 bucket 對齊規則不同 —— 見 [`semantics.md`](semantics.md) §2.2。
-
-## 區間映射由 DLL 負責
-
-| BarType | BarInterval | `tf` |
-| ---: | ---: | --- |
-| 1（intraday） | 1 / 5 / 15 / 30 / 60 | `1m` `5m` `15m` `30m` `1h` |
-| 2（daily） | **0 或 1** | `1d` |
-| 其他 | — | **無**，`EL_PublishBar` 回傳 `-5` 且不送出 |
-
-放在 C ABI 而非 EL，理由與報價正規化相同：只有一個實作，所有呼叫端自動一致。
-**不猜測** —— `BarType = 1` 涵蓋所有 intraday 分鐘圖，猜錯就是把 5 分鐘 bar 歸進
-1 分鐘分區，而下游偵測不到。
-
-日線的 `BarInterval` 兩個值都收：**TradeStation 10 實測回報 `0`**（SPY 日線圖的
-EL log：`bar_type=2.00 bar_interval=0.00`），而 `1` 是文件值 —— DLL 裝在本 repo 看不到的
-機器上，兩個都得認。`2` 以上仍然拒絕：`BarType = 2` 的 interval 是「幾天一根」，收下去
-就是把 2 日線混進 `1d` 分區，而它長得跟真的日線一模一樣。
+現在原值直接上 wire,不映射也不拒收。落地的分區就是 `bartype={N}/interval={M}/`,
+所以「這個 binding 沒有名字的間隔」不再等於「這筆資料不存在」。
 
 ## 為什麼版本欄位叫 `proto` 而不是 `v`
 
@@ -145,11 +94,13 @@ EL log：`bar_type=2.00 bar_interval=0.00`），而 `1` 是文件值 —— DLL 
 
 ### binding 的義務
 
-- **`proto` 缺席或不等於 `1` → 拒收該 frame 並記錄。** 錯誤訊息必須點名可能的原因是
+- **`proto` 缺席或不等於 `2` → 拒收該 frame 並記錄。** 錯誤訊息必須點名可能的原因是
   「DLL 早於本協定」，並指出修法是同時更新 `TS2Python.dll` 與 `.ELD`。
 - **五個 `el_*` 欄位一律以「必填」讀取。** 缺欄位必須拋錯，**不得**套用預設值 ——
   靜默寫 0 的成本遠高於解析失敗。
-- **未知的 `kind` → 跳過並記錄，不得拋錯。** 形狀不認得不代表整條串流壞了。
+- **讀不了的 frame → 跳過並記錄，不得拋錯。** proto 2 沒有 `kind` 可以未知了；一個
+  frame 現在只會因為缺必填欄位或型別不對而讀不了。壞一個 frame 不代表整條串流壞了 ——
+  但它必須被算進 `frames_refused`，不能只是消失。
 
 ## 兩個時間戳，不是三個
 
@@ -168,25 +119,27 @@ EL log：`bar_type=2.00 bar_interval=0.00`），而 `1` 是文件值 —— DLL 
 「存在但不得作權威用」的欄位需要每個 binding 各自記得別用。時間權威的完整規則見
 [`semantics.md`](semantics.md) §1。
 
-## 兩個 publish 匯出，一個 init 匯出，兩個墓碑
+## 一個 publish 匯出,一個 init 匯出,四個墓碑
 
-| 匯出 | 簽章 | 說明 |
+| 匯出 | 簽章 | 用途 |
 | --- | --- | --- |
 | `EL_Init3` | `(const char* endpoint)` | **唯一的 init** |
-| `EL_Init` | `(const char* endpoint)` | **墓碑**，一律回 `-6` |
-| `EL_Init2` | `(const char* endpoint, int)` | **墓碑**，一律回 `-6` |
-| `EL_PublishTick` | 10 個參數 | tick |
-| `EL_PublishBar` | 13 個參數 | bar |
+| `EL_Publish` | 16 個參數 | **唯一的 publish** |
+| `EL_Init` | `(const char* endpoint)` | **墓碑**,一律回 `-6` |
+| `EL_Init2` | `(const char* endpoint, int)` | **墓碑**,一律回 `-6` |
+| `EL_PublishTick` | 10 個參數 | **墓碑**,一律回 `-6` |
+| `EL_PublishBar` | 13 個參數 | **墓碑**,一律回 `-6` |
 | `EL_Shutdown` | `()` | |
-| `EL_DllVersion` | `()` | 回 `1` |
+| `EL_DllVersion` | `()` | 回 `2` |
 
-`EL_PublishTick` 與 `EL_PublishBar` **沿用前一代的名字但簽章不同**。這兩個是
-`__stdcall`（由被呼叫端清堆疊），所以簽章不符的呼叫**會損毀堆疊** —— 不是回傳錯誤碼，
-是崩潰或隨機行為。
+`EL_PublishTick` 與 `EL_PublishBar` 曾經在改簽章時沿用名字。它們是 `__stdcall`
+（由被呼叫端清堆疊）,所以簽章不符的呼叫**會弄壞堆疊** —— 不是回傳錯誤碼,是後續
+無法預期的行為。這一次它們沒有再沿用:新的 publish 叫 `EL_Publish`,舊的兩個名字
+留在 `.def` 裡當墓碑,舊 `.ELD` 打進來會拿到一個可讀的 `-6`,而不是崩潰。
 
-安全性由 init 保證，不是由名字保證：**EasyLanguage 端的每一個 publish 呼叫都在
-「init 成功」的守衛之內**（`EL/TS2Python_Exporter.el`），init 失敗時 indicator 永遠不會
-走到 publish。所以只要 init 攔得住，改過簽章的 publish 函式就一次都碰不到。
+安全性由 init 保證,而不是由名字保證:**EasyLanguage 端的每一個 publish 呼叫都在
+「init 成功」的閘門後面**（`EL/TS2Python_Exporter.el`）,init 失敗時 indicator 永遠不會
+執行 publish。所以只要 init 攔得住,其他簽章的 publish 函式就一次都碰不到。
 
 ### 新舊部署不相容時會發生什麼
 

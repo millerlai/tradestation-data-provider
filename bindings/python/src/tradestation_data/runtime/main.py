@@ -8,8 +8,8 @@ interrupted.
 
 This is the data-collection-only fork of the runtime — strategy /
 broker / risk wiring has been removed. The ingestion loop dispatches
-ticks and bars to a user-configurable sink pipeline; the default
-``config/sinks.yaml`` writes both as Hive-partitioned Parquet under
+every point to a user-configurable sink pipeline; the default
+``config/sinks.yaml`` writes them as Hive-partitioned Parquet under
 ``data/`` (matching the historical layout), but users can swap in any
 sink declared in ``sinks.yaml`` — see ``sinks/`` for the protocol.
 
@@ -40,7 +40,7 @@ from tradestation_data.sinks import (
     build_pipeline_from_config,
 )
 from tradestation_data.sinks.base import BaseSink
-from tradestation_data.sinks.parquet import ParquetBarSink, ParquetTickSink
+from tradestation_data.sinks.parquet import ParquetBarSink
 from tradestation_data.storage.bar_writer import BAR_SCHEMA, _bars_to_table
 from tradestation_data.wire.el_subscriber import TradeStationELProvider
 
@@ -181,7 +181,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=Path("data"),
         help="Root dir for the built-in default Parquet sinks (used only when "
         "--sinks-config is missing or --no-storage is set together with "
-        "--print-bars). Ticks go under {root}/ticks/, bars under {root}/bars/.",
+        "--print-bars). Points go under {root}/bars/, partitioned by the chart's "
+        "own BarType/BarInterval.",
     )
     p.add_argument(
         "--no-storage",
@@ -216,7 +217,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def _build_default_pipeline(data_root: Path) -> SinkPipeline:
-    """Construct the historical-default pipeline: Parquet bars + Parquet ticks.
+    """Construct the default pipeline: one Parquet sink for every point.
 
     Mirrors what the pre-sink runtime did automatically when no
     ``--no-storage`` flag was passed.
@@ -224,7 +225,6 @@ def _build_default_pipeline(data_root: Path) -> SinkPipeline:
     return SinkPipeline(
         [
             ParquetBarSink(name="bars_parquet", root=data_root / "bars"),
-            ParquetTickSink(name="ticks_parquet", root=data_root / "ticks"),
         ]
     )
 

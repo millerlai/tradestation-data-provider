@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/millerlai/tradestation-data-provider/contract/point.schema.json",
+  "title": "TS2Python wire frame (proto 2)",
+  "description": "One shape for every point on every chart. There is no tick/bar split: TradeStation supplies the same reserved words whatever the chart is, and dropping some of them by chart type was the publisher deciding what a number meant.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "proto",
+    "seq",
+    "sid",
+    "ts",
+    "ts_str",
+    "bar_type",
+    "bar_interval",
+    "category",
+    "o",
+    "h",
+    "l",
+    "c",
+    "el_volume",
+    "el_ticks",
+    "el_upticks",
+    "el_downticks",
+    "el_open_interest",
+    "bid",
+    "ask"
+  ],
+  "properties": {
+    "proto": {
+      "type": "integer",
+      "const": 2,
+      "description": "Wire protocol version. Exactly one is supported."
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Per-symbol monotonic sequence. Required on every frame; without it loss cannot be detected."
+    },
+    "sid": {
+      "type": "integer",
+      "description": "Publisher session id. Changes on DLL restart, which is a reset rather than a gap."
+    },
+    "ts": {
+      "type": "number",
+      "description": "DLL receive-side wall clock, UTC epoch seconds. Latency measurement and the last-resort time source."
+    },
+    "ts_str": {
+      "type": "string",
+      "description": "EasyLanguage Date+Time, yyyy-MM/dd-HH:mm:ss (24-hour), America/New_York wall clock. AUTHORITATIVE for bar_time: parse as ET, convert to UTC, floor to the minute, store it. It is the point's CLOSE time and lands that way -- no shift onto a left edge, no grid alignment. See semantics.md 2."
+    },
+    "bar_type": {
+      "type": "integer",
+      "description": "EasyLanguage BarType, verbatim. 0 = tick series, 1 = intraday minutes, 2 = daily. Nothing maps it to a timeframe name."
+    },
+    "bar_interval": {
+      "type": "integer",
+      "description": "EasyLanguage BarInterval, verbatim. For BarType 1 this is the minutes. No combination is refused."
+    },
+    "category": {
+      "type": "integer",
+      "description": "EasyLanguage Category, verbatim: 0 Future, 2 Stock, 3 Stock Option, 4 Index, ... The meaning of the five el_* words depends on it -- see semantics.md 3.4 and 3.5."
+    },
+    "o": {
+      "type": "number",
+      "description": "EasyLanguage Open."
+    },
+    "h": {
+      "type": "number",
+      "description": "EasyLanguage High."
+    },
+    "l": {
+      "type": "number",
+      "description": "EasyLanguage Low."
+    },
+    "c": {
+      "type": "number",
+      "description": "EasyLanguage Close. On a 1-tick series all four are the same print."
+    },
+    "el_volume": {
+      "type": "integer",
+      "description": "EasyLanguage Volume, verbatim. NOT 'the volume' -- see semantics.md 3.4."
+    },
+    "el_ticks": {
+      "type": "integer",
+      "description": "EasyLanguage Ticks, verbatim."
+    },
+    "el_upticks": {
+      "type": "integer",
+      "description": "EasyLanguage UpTicks, verbatim."
+    },
+    "el_downticks": {
+      "type": "integer",
+      "description": "EasyLanguage DownTicks, verbatim."
+    },
+    "el_open_interest": {
+      "type": "integer",
+      "description": "EasyLanguage OpenInt, verbatim. Measured to return DownTicks on every intraday chart -- see semantics.md 3.4."
+    },
+    "bid": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "EasyLanguage InsideBid, or null where the publisher had none. Sent on every point, bars included."
+    },
+    "ask": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "description": "EasyLanguage InsideAsk, or null where the publisher had none."
+    }
+  }
+}

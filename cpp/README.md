@@ -4,7 +4,7 @@
 
 C++ DLL that bridges TradeStation EasyLanguage calls to a ZeroMQ PUB socket. The Python side ([`tradestation-data-provider`](../README.md), root of this repo) subscribes over `tcp://127.0.0.1:5555` and routes the events through its pluggable sink pipeline.
 
-This subdirectory is the **publisher** half of the system. The current ABI is **DLL version 1**, carrying wire `proto` 1. There is exactly one of each — see [`../contract/wire.md`](../contract/wire.md).
+This subdirectory is the **publisher** half of the system. The current ABI is **DLL version 2**, carrying wire `proto` 2. There is exactly one of each — see [`../contract/wire.md`](../contract/wire.md).
 
 ## Wire format
 
@@ -16,25 +16,19 @@ Every publish call sends a two-frame ZMQ message:
 | 2 | Payload | JSON; one of two shapes below |
 
 ```jsonc
-// Tick (EL_PublishTick) — single trade print
-{ "proto": 1, "kind": "tick", "seq": 1, "sid": 1784998823554057,
-  "ts": 1747700000.123, "ts_str": "2026-04/18-13:30:45",
-  "px": 450.0,
-  "el_volume": 300, "el_ticks": 812, "el_upticks": 300,
-  "el_downticks": 512, "el_open_interest": 0,
+// One shape, whatever the chart is. No `kind`, no `tf`.
+{ "proto": 2, "seq": 1, "sid": 1785646054360588,
+  "ts": 1785646062.364744, "ts_str": "2026-04/18-13:30:45",
+  "bar_type": 0, "bar_interval": 1, "category": 2,
+  "o": 450.0, "h": 450.0, "l": 450.0, "c": 450.0,
+  "el_volume": 100, "el_ticks": 195, "el_upticks": 100,
+  "el_downticks": 80, "el_open_interest": 0,
   "bid": 449.99, "ask": 450.01 }
-
-// Bar (EL_PublishBar) — an already-formed OHLC bar at any interval
-{ "proto": 1, "kind": "bar", "tf": "1m", "seq": 3, "sid": 1784998823554057,
-  "ts": 1747700060.0, "ts_str": "2026-04/18-13:31:00",
-  "o": 450.1, "h": 450.75, "l": 449.8, "c": 450.4,
-  "el_volume": 6100, "el_ticks": 12000, "el_upticks": 6100,
-  "el_downticks": 5900, "el_open_interest": 0 }
 ```
 
 **The five `el_*` fields are EasyLanguage's reserved words forwarded verbatim.** This ABI selects nothing and converts nothing — notably, `Volume` and `Ticks` mean opposite things on an intraday chart and a daily one, and reconciling them here is what previously made the numbers unauditable. [`../contract/semantics.md`](../contract/semantics.md) §3.4 has the table.
 
-`ts` is the DLL's receive-side wall clock (UTC epoch), useful only for latency measurement; `ts_str` is the raw EL `yyyy-MM/dd-HH:mm:ss` 24-hour timestamp passed through verbatim, and subscribers treat it as authoritative for bar `bucket_start`. **The DLL no longer parses `ts_str`, so it no longer validates it** — an unparseable string travels intact and fails in the subscriber. Bars carry no `bid`/`ask`: a live quote describes the moment of the call, not the bar. For the normative rules see [`../contract/wire.md`](../contract/wire.md) and [`../contract/semantics.md`](../contract/semantics.md) §1–2.
+`ts` is the DLL's receive-side wall clock (UTC epoch), useful only for latency measurement; `ts_str` is the raw EL `yyyy-MM/dd-HH:mm:ss` 24-hour timestamp passed through verbatim, and subscribers treat it as authoritative for `bar_time`, landing it as sent — no shift, no grid. **The DLL no longer parses `ts_str`, so it no longer validates it** — an unparseable string travels intact and fails in the subscriber. Bars carry no `bid`/`ask`: a live quote describes the moment of the call, not the bar. For the normative rules see [`../contract/wire.md`](../contract/wire.md) and [`../contract/semantics.md`](../contract/semantics.md) §1–2.
 
 ## Requirements
 
@@ -230,40 +224,20 @@ int __stdcall EL_Init3(const char* zmq_endpoint);
 
 // Single trade print. Quantities are EasyLanguage reserved words, verbatim.
 // They arrive as double because DefineDLLFunc has no 64-bit integer type;
-// the DLL casts to long long before writing them out as %lld.
-int __stdcall EL_PublishTick(
-    const char* symbol,
-    const char* el_timestamp,   // "yyyy-MM/dd-HH:mm:ss" 24h, America/New_York; may be NULL/""
-    double price,
-    double volume, double ticks, double upticks, double downticks,
-    double open_interest,
-    double inside_bid, double inside_ask);
-
-// An already-formed OHLC bar at whatever interval the chart runs.
-// bar_type / bar_interval are EasyLanguage's BarType and BarInterval; the
-// DLL maps them to the `tf` string and refuses (-5) an interval it cannot
-// place, rather than filing it under a default.
-int __stdcall EL_PublishBar(
-    const char* symbol,
-    const char* el_timestamp,
-    int bar_type, int bar_interval,
-    double bar_open, double bar_high, double bar_low, double bar_close,
-    double volume, double ticks, double upticks, double downticks,
-    double open_interest);
-
-int __stdcall EL_Shutdown(void);
-
-// TOMBSTONES — the init exports of the superseded protocol. Both return -6
-// and initialise nothing. See below.
-int __stdcall EL_Init(const char* zmq_endpoint);
-int __stdcall EL_Init2(const char* zmq_endpoint, int publisher_version);
+int __stdcall EL_Publish(
+    const char* symbol, const char* el_timestamp,
+    int bar_type, int bar_interval, int category,
+    double o, double h, double l, double c,
+    double volume, double ticks, double upticks,
+    double downticks, double open_interest,
+    double bid, double ask);
 ```
 
 Return codes: `0` success, `1` already initialized (idempotent re-init), `-1` not initialized, `-2` ZMQ send failed, `-3` init failed (bind / socket create), `-4` invalid argument, `-5` unmappable bar interval, `-6` ABI mismatch (tombstone).
 
 ### Why the tombstones exist
 
-`EL_PublishTick` and `EL_PublishBar` **kept their names while changing signature**. They are `__stdcall`, where the callee cleans the stack, so a call with the wrong argument count corrupts the stack — TradeStation crashes or misbehaves rather than returning an error.
+`EL_PublishTick` and `EL_PublishBar` once **kept their names while changing signature**. They are `__stdcall`, where the callee cleans the stack, so a call with the wrong argument count corrupts the stack — TradeStation crashes or misbehaves rather than returning an error.
 
 Renaming init instead is what makes that unreachable. Every publish call in the indicator is guarded by `InitDone`, which stays False whenever `InitRC < 0`, so **init is the only interception point**:
 

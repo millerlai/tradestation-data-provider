@@ -6,29 +6,13 @@ from datetime import UTC, datetime
 import pytest
 
 from tradestation_data.domain.bar import Bar
-from tradestation_data.domain.tick import Tick
 from tradestation_data.sinks.callback import CallbackSink, get_sink
-
-
-def _tick(symbol: str = "SPY") -> Tick:
-    return Tick(
-        symbol=symbol,
-        timestamp=datetime(2026, 4, 18, 13, 30, tzinfo=UTC),
-        price=1.0,
-        el_volume=1,
-        el_ticks=2,
-        el_upticks=1,
-        el_downticks=1,
-        el_open_interest=0,
-        bid=None,
-        ask=None,
-    )
 
 
 def _bar(symbol: str = "SPY") -> Bar:
     return Bar(
         symbol=symbol,
-        bucket_start=datetime(2026, 4, 18, 13, 30, tzinfo=UTC),
+        bar_time=datetime(2026, 4, 18, 13, 30, tzinfo=UTC),
         open=1.0,
         high=1.5,
         low=0.5,
@@ -38,6 +22,9 @@ def _bar(symbol: str = "SPY") -> Bar:
         el_upticks=10,
         el_downticks=10,
         el_open_interest=0,
+        bar_type=1,
+        bar_interval=1,
+        category=2,
     )
 
 
@@ -56,17 +43,6 @@ def test_callback_sink_dispatch_per_symbol() -> None:
     assert len(aapl_bars) == 1 and aapl_bars[0].symbol == "AAPL"
 
 
-def test_callback_sink_on_any_receives_every_symbol() -> None:
-    sink = CallbackSink(name="cb2")
-    seen: list[str] = []
-    sink.on_any("tick", lambda t: seen.append(t.symbol))
-
-    for sym in ("SPY", "AAPL", "MSFT"):
-        sink.on_tick(_tick(sym))
-
-    assert seen == ["SPY", "AAPL", "MSFT"]
-
-
 def test_callback_sink_off_removes_handler() -> None:
     sink = CallbackSink(name="cb3")
     calls: list[Bar] = []
@@ -83,7 +59,7 @@ def test_callback_sink_off_removes_handler() -> None:
 
 def test_callback_sink_invalid_kind_raises() -> None:
     sink = CallbackSink(name="cb4")
-    with pytest.raises(ValueError, match="kind must be 'tick' or 'bar'"):
+    with pytest.raises(ValueError, match="kind must be 'bar'"):
         sink.on("SPY", "candle", lambda _: None)  # type: ignore[arg-type]
 
 

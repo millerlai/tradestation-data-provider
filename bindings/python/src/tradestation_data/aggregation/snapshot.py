@@ -10,7 +10,6 @@ from tradestation_data.aggregation.session import (
     session_start_utc,
 )
 from tradestation_data.domain.bar import Bar
-from tradestation_data.domain.tick import Tick
 
 DEFAULT_RECENT_BARS: int = 100
 
@@ -20,20 +19,21 @@ class SymbolState:
     """
     In-memory snapshot of a symbol's recent market state.
 
-    - `last_tick`        : most recent Tick received
     - `last_closed_bar`  : most recent closed bar the publisher shipped
     - `recent_bars`      : bounded deque of recent closed bars
                            (oldest→newest), filtered per SessionPolicy
     - `session_date`     : NY trading date the current buffer belongs to
-    - `session_open_bar` : the first bar at/after 09:30 ET for
-                           `session_date`, populated once crossed.
+    - `session_open_bar` : the first regular-session point for
+                           `session_date`, populated once crossed. Its
+                           `bar_time` is a CLOSE, so the test is strictly
+                           after 09:30 ET — a point closing exactly at
+                           09:30 is the last pre-market one.
                            May remain None if the session opened while
                            the symbol was offline / we only have pre-
                            market data.
     """
 
     symbol: str
-    last_tick: Tick | None = None
     last_closed_bar: Bar | None = None
     recent_bars: deque[Bar] = field(default_factory=deque)
     session_date: date | None = None
@@ -51,7 +51,6 @@ class SymbolView:
     """
 
     symbol: str
-    last_tick: Tick | None
     last_closed_bar: Bar | None
     recent_bars: tuple[Bar, ...]
     session_date: date | None = None
@@ -91,14 +90,11 @@ class MarketSnapshot:
         # No policy at all → legacy behaviour (pure bar-count window).
         self._default_policy = default_policy
 
-    def on_tick(self, tick: Tick) -> None:
-        self._ensure_state(tick.symbol).last_tick = tick
-
     def on_bar(self, bar: Bar) -> None:
         st = self._ensure_state(bar.symbol)
         policy = self._policy_for(bar.symbol)
 
-        bar_session = session_date_of(bar.bucket_start)
+        bar_session = session_date_of(bar.bar_time)
 
         if policy is not None:
             if (
@@ -116,12 +112,15 @@ class MarketSnapshot:
 
         st.session_date = bar_session
         # Capture the first regular-session bar we see for this date.
-        if st.session_open_bar is None and bar.bucket_start >= session_start_utc(bar_session):
+        # STRICTLY greater: bar_time is the bar's CLOSE, so the pre-market
+        # bar ending exactly at 09:30 carries bar_time == session start and
+        # must not win — the first RTH bar is the one closing after it.
+        if st.session_open_bar is None and bar.bar_time > session_start_utc(bar_session):
             st.session_open_bar = bar
         elif (
             st.session_open_bar is not None
-            and st.session_open_bar.bucket_start > bar.bucket_start
-            and bar.bucket_start >= session_start_utc(bar_session)
+            and st.session_open_bar.bar_time > bar.bar_time
+            and bar.bar_time > session_start_utc(bar_session)
         ):
             # Out-of-order ingest that precedes the currently recorded
             # open — keep the earliest.
@@ -140,7 +139,6 @@ class MarketSnapshot:
             return None
         return SymbolView(
             symbol=symbol,
-            last_tick=st.last_tick,
             last_closed_bar=st.last_closed_bar,
             recent_bars=tuple(st.recent_bars),
             session_date=st.session_date,
@@ -177,5 +175,5 @@ class MarketSnapshot:
         pre_market_minutes: int,
     ) -> None:
         cutoff = session_start_utc(bar_session) - timedelta(minutes=pre_market_minutes)
-        while st.recent_bars and st.recent_bars[0].bucket_start < cutoff:
+        while st.recent_bars and st.recent_bars[0].bar_time < cutoff:
             st.recent_bars.popleft()

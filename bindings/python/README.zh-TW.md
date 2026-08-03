@@ -21,7 +21,7 @@
 ## 為什麼用它
 
 - **能自訂輸出格式**：在 `config/sinks.yaml` 宣告一個 sink、指向任何可 `import` 的 `module:attr`，runtime 就會把每筆 tick / bar 派給它。不必 fork 本專案。
-- **開箱即用的 Hive-partitioned Parquet**：內建 `ParquetBarSink` / `ParquetTickSink`，依 timeframe / symbol / 日期各一層目錄。
+- **開箱即用的 Hive-partitioned Parquet**：內建 `ParquetBarSink`，依 timeframe / symbol / 日期各一層目錄。
 - **能在自己程式裡接收資料**：`CallbackSink` 讓你註冊 Python function，依 symbol 或全收，從 ingest loop 同步派發。
 - **從圖表到欄位之間沒有任何加工**：五個量值欄位是 EasyLanguage reserved word 的原文，以 `el_*` 命名，所以你讀到的數字可以直接跟終端機對帳。
 - **Operator 工具**：[`scripts/`](scripts/) 下有完整性驗證、去重、傾印、缺值補全等腳本 —— 除了 `dedupe_bars.py` 會就地改寫（除非加 `--dry-run`），其餘都只讀不寫。
@@ -38,20 +38,16 @@ flowchart TD
     OnBar(["optional on_bar callback"])
 
     PBar["ParquetBarSink<br/>(預設)"]
-    PTick["ParquetTickSink<br/>(預設)"]
     Memory["InMemorySink"]
     Callback["CallbackSink"]
     Custom["你自訂的 sink"]
 
     DLL -- "ZMQ PUB" --> Provider
-    Provider -- "Tick" --> Runtime
-    Provider -- "Bar (EL_PublishBar)" --> Runtime
-    Runtime -- "Tick" --> Snapshot
-    Runtime -- "closed Bar" --> Snapshot
-    Runtime -- "Tick / closed Bar" --> Pipeline
+    Provider -- "point (EL_Publish)" --> Runtime
+    Runtime -- "closed point" --> Snapshot
+    Runtime -- "closed point" --> Pipeline
     Runtime --> OnBar
     Pipeline --> PBar
-    Pipeline --> PTick
     Pipeline --> Memory
     Pipeline --> Callback
     Pipeline --> Custom
@@ -109,7 +105,7 @@ from tradestation_data.aggregation import MarketSnapshot
 from tradestation_data.wire.el_subscriber import TradeStationELProvider
 from tradestation_data.runtime.ingestion import IngestionRuntime
 from tradestation_data.sinks import SinkPipeline
-from tradestation_data.sinks.parquet import ParquetBarSink, ParquetTickSink
+from tradestation_data.sinks.parquet import ParquetBarSink
 
 async def main() -> None:
     runtime = IngestionRuntime(
@@ -117,8 +113,7 @@ async def main() -> None:
         symbols=["SPY", "QQQ"],
         snapshot=MarketSnapshot(),
         sinks=SinkPipeline([
-            ParquetBarSink(name="bars",  root="data/bars"),
-            ParquetTickSink(name="ticks", root="data/ticks"),
+            ParquetBarSink(name="bars", root="data/bars"),
         ]),
     )
     await runtime.run()
@@ -187,7 +182,6 @@ in-process ZeroMQ socket 重播，讓你的 sink 走的是與正式環境完全�
 | Sink | 用途 |
 | --- | --- |
 | `tradestation_data.sinks.parquet:ParquetBarSink` | 寫 Hive-partitioned bar Parquet，依 bar 自己的 timeframe 分區（預設啟用）|
-| `tradestation_data.sinks.parquet:ParquetTickSink` | 寫 Hive-partitioned tick Parquet（預設啟用）|
 | `tradestation_data.sinks.memory:InMemorySink` | 在記憶體緩衝（測試 / notebook）；不適合長時間運行 |
 | `tradestation_data.sinks.callback:CallbackSink` | 派發給動態註冊的 Python callback，可依 symbol 或全收 |
 
@@ -241,7 +235,6 @@ class HourlyCsvSink(BaseSink):
 ```python
 class Sink(Protocol):
     name: str
-    def on_tick(self, tick: Tick) -> None: ...
     def on_bar(self, bar: Bar) -> None: ...
     def should_flush(self) -> bool: ...   # 預設 False — 只有 buffered sink 需要 override
     def flush(self) -> None: ...          # 預設 no-op
@@ -261,7 +254,7 @@ def on_spy_bar(bar):
     print(bar.symbol, bar.close)
 
 sink.on("SPY", "bar", on_spy_bar)
-sink.on_any("tick", lambda t: ...)   # 所有 symbol
+sink.on_any("bar", lambda b: ...)   # 所有 symbol
 ```
 
 Callback 在 ingest loop 中**同步**呼叫，請保持輕量（微秒級）。需要做重活就在 callback 內 spawn `asyncio.create_task` 或 thread。Callback 拋 exception 會被 log、隔離，其他 callback 仍會執行。
@@ -310,7 +303,7 @@ python examples/04_replay_fixtures.py # 把 contract/fixtures/ 的 frame 餵給�
 `03` 會自己在 `data-example/` 下產生 bar 與 tick（該目錄若已有東西它會拒絕動手），所以它檢視的那份 store 是你可以重新產生、也可以隨意修改的。接著就能傾印它寫出來的內容：
 
 ```powershell
-python scripts/dump_parquet.py data-example/bars/timeframe=1m/symbol=SPY/date=<它印出來的日期>/bars.parquet --head 3
+python scripts/dump_parquet.py data-example/bars/bartype=1/interval=1/symbol=SPY/date=<它印出來的日期>/bars.parquet --head 3
 ```
 
 **不要拿 intraday 加總去核對 `1d` 的 bar。** 兩者是不同口徑，本來就不會相等 —— `contract/semantics.md` §3.4 列了四個原因。另外要注意：intraday bar 上的 `el_volume` **不是**總成交股數 —— EasyLanguage 的 `Volume` 與 `Ticks` 在 intraday 圖與 daily 圖上意義互換，而這正是每個量值欄位都帶 `el_` 前綴、而不是取一個會讓人自行假設的名字的原因。
@@ -326,10 +319,10 @@ bindings/python/                   # 本 binding；repo 根目錄在上兩層
 │   └── symbols.yaml               # symbol universe + 每 symbol 的 session policy
 ├── scripts/                       # 給人用的 CLI 包裝（見上）
 ├── src/tradestation_data/
-│   ├── domain/                    # Bar / Tick —— wire 的值域
+│   ├── domain/                    # Bar —— wire 的值域
 │   ├── wire/                      # frame 解碼、缺漏偵測          [core]
 │   ├── aggregation/               # MarketSnapshot / session policy  [app]
-│   ├── storage/                   # BarWriter / TickWriter / HistoryStore
+│   ├── storage/                   # BarWriter / HistoryStore
 │   ├── sinks/                     # Sink protocol、pipeline、registry、內建 sinks
 │   └── runtime/                   # IngestionRuntime + CLI entry
 └── tests/

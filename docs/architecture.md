@@ -50,14 +50,14 @@ flowchart TB
         direction TB
         TS["TradeStation Desktop"]
         EL["EL Exporter Indicator<br/>TS2Python_Exporter.el"]
-        DLL["TS2Python.dll<br/>C++ / Win32 x86 / ABI 1"]
+        DLL["TS2Python.dll<br/>C++ / Win32 x86 / ABI 2"]
         TS --> EL
         EL -->|"DefineDLLFunc __stdcall"| DLL
     end
 
     subgraph CON["② Contract — dp 真正的產品"]
         direction TB
-        WIRE["wire proto 1<br/>2-frame: topic + payload"]
+        WIRE["wire proto 2<br/>2-frame: topic + payload"]
         SCHEMA["JSON Schema<br/>tick / bar"]
         SEM["semantics.md<br/>時間權威 · session 規則"]
         FIX["conformance fixtures<br/>錄自 test_harness"]
@@ -89,7 +89,7 @@ flowchart TB
 | 層 | 可變性 | 誰負責 |
 | --- | --- | --- |
 | ① Producer | 固定 | 本 repo（EL + cpp） |
-| ② Contract | **單一版本**（`proto` 1 / ABI 1；更舊的一律拒收） | 本 repo（contract/） |
+| ② Contract | **單一版本**（`proto` 2 / ABI 2；更舊的一律拒收） | 本 repo（contract/） |
 | ③ Bindings | 增生 | 本 repo（Python）+ 未來各語言 |
 
 ---
@@ -104,19 +104,19 @@ tradestation-data-provider/
 ├─ contract/                             ② 語言中立 SSoT — 本 repo 最高優先資產
 │  ├─ README.md                          　 入口：讀者是「要寫新 binding 的人」
 │  ├─ semantics.md                       　 schema 表達不了的規則（§1 時間權威、
-│  │                                     　 §2 左標籤+分鐘取整、§3 報價有效性、
+│  │                                     　 §2 時間戳原樣+分鐘取整、§3 報價有效性、
 │  │                                     　 §4 session、§5 前綴、§6 序號）
 │  ├─ error_codes.md                     　 C ABI 回傳碼（含墓碑的 -6）
 │  ├─ wire.md                            　 frame 結構與 payload，自成一體
 │  │                                     　 （為何叫 proto、刪 ts_utc 的取捨、
 │  │                                     　 　新舊部署不相容的四種情境）
-│  ├─ tick.schema.json · bar.schema.json 　 單一版本，不再有 v*/ 目錄
+│  ├─ point.schema.json 　　　　　　　 一個 frame 形狀，單一版本
 │  ├─ fixtures/
 │  │  ├─ README.md                       　 錄製規矩：不得手寫、expected 不得由 binding 產生
 │  │  ├─ smoke.jsonl                     　 3 topic + 1 bar · per-symbol seq
 │  │  ├─ noquote.jsonl                   　 無報價（歷史回放形狀）→ wire 上是 null
 │  │  ├─ bars.jsonl                      　 每個非 1m 的 tf + `-5` 拒收路徑
-│  │  ├─ session.jsonl                   　 RTH 首尾 bar（左標籤的錨）
+│  │  ├─ session.jsonl                   　 RTH 首尾 bar（原樣落地的錨）
 │  │  └─ expected/{smoke,noquote,bars,session}.json
 │  └─ tools/
 │     └─ record.py                        　 wire 檢視器 + fixture 錄製器，不依賴任何 binding
@@ -133,7 +133,7 @@ tradestation-data-provider/
 │  ├─ verify-build-env.bat               　 逐項檢查環境，每項附修正指令
 │  ├─ build.bat                          　 x86 + x64 一次建完
 │  ├─ README.md · README.zh-TW.md
-│  ├─ include/ts2python.h                　 C ABI（EL_Init3 / EL_PublishTick / EL_PublishBar
+│  ├─ include/ts2python.h                　 C ABI（EL_Init3 / EL_Publish
 │  │                                     　 　+ EL_Init·EL_Init2 墓碑）
 │  ├─ src/ts2python.cpp                  　 ZMQ PUB publisher · seq/sid · 報價正規化
 │  ├─ src/test_harness.cpp               　 不依賴 TradeStation 的 frame 產生器
@@ -259,19 +259,14 @@ EL indicator 是 TradeStation 訊號的**源頭**。缺了它，dp 無法端到�
 | 2 | Payload | JSON，兩種 shape 之一 |
 
 ```jsonc
-// tick — EL_PublishTick，單筆成交
-{ "proto": 1, "kind": "tick", "seq": 1, "sid": ..., "ts": ...,
-  "ts_str": "2026-04/18-13:30:45", "px": 450.0,
-  "el_volume": 300, "el_ticks": 812, "el_upticks": 300,
-  "el_downticks": 512, "el_open_interest": 0,
+// 一種形狀，不論來自什麼圖。沒有 kind，沒有 tf。
+{ "proto": 2, "seq": 1, "sid": 1785646054360588,
+  "ts": 1785646062.364744, "ts_str": "2026-04/18-13:30:45",
+  "bar_type": 0, "bar_interval": 1, "category": 2,
+  "o": 450.0, "h": 450.0, "l": 450.0, "c": 450.0,
+  "el_volume": 100, "el_ticks": 195, "el_upticks": 100,
+  "el_downticks": 80, "el_open_interest": 0,
   "bid": 449.99, "ask": 450.01 }
-
-// bar — EL_PublishBar，已成形的 bar，間隔由 tf 表示
-{ "proto": 1, "kind": "bar", "tf": "1m", "seq": 3, "sid": ..., "ts": ...,
-  "ts_str": "2026-04/18-13:31:00",
-  "o": ..., "h": ..., "l": ..., "c": ...,
-  "el_volume": ..., "el_ticks": ..., "el_upticks": ...,
-  "el_downticks": ..., "el_open_interest": ... }
 ```
 
 Topic 放在獨立 frame 是為了讓 subscriber 的 filter 在 topic 上做，payload 擴充
@@ -301,7 +296,7 @@ schema 時不影響訂閱行為。
 | 欄位 | 來源 | 用途 |
 | --- | --- | --- |
 | `ts` | DLL 收訊端 wall clock（UTC epoch） | 延遲量測。**不可**用於 bar 對齊；歷史回放時每根 bar 共用同一個 `ts` |
-| `ts_str` | EL 原始 `yyyy-MM/dd-HH:mm:ss`，逐字透傳 | **bar `bucket_start` 的唯一權威來源** |
+| `ts_str` | EL 原始 `yyyy-MM/dd-HH:mm:ss`，逐字透傳 | **bar `bar_time` 的唯一權威來源** |
 
 > 「以 `ts_str` 為權威」是**跨 binding 的強制規範**。這類決策不能只存在於某一個
 > binding 的實作裡。
@@ -312,22 +307,17 @@ schema 時不影響訂閱行為。
 **且 DLL 從此不再解析 `ts_str`，也就不再驗證它**：無效的時間字串會原樣送出，錯誤
 發現點往後移一層到 binding。兩件事都明寫在 `contract/wire.md`。
 
-#### bucket_start 為左標籤
+#### bar_time 是 publisher 給的時間，原樣落地
 
-Bar 以 **`bucket_start` 左標籤**表示，區間為半開的 `[t, t+step)`。
-一個 US RTH 09:30–16:00 的 1m session 產生 390 根 bar，`bucket_start` 為
-**09:30 … 15:59**（最後一根涵蓋 `[15:59, 16:00)`），**不是** 09:31 … 16:00。
+`bar_time` = `ts_str` 以 `America/New_York` 解析、轉 UTC、秒歸零。**沒有位移，
+也沒有格線對齊。** EasyLanguage 的 `Time` 是 bar 的收盤時間，所以 `bar_time`
+也是收盤時間；要左緣標籤的消費端自己減。
 
-**但 wire 上的 `ts_str` 是右標籤** —— EasyLanguage 的 `Time` 是 bar 的收盤時間，
-indicator 逐字透傳。左標籤是 contract 的規範，不是 publisher 的行為，所以轉換點只有
-一個：`wire/el_subscriber.py::_parse_bar` 在對齊格線前減去一個 `tf`（`1d` 這類
-session 錨定的 interval 例外）。這一步曾經缺席，落地的 1m 資料就是 09:31…16:00。
-
-> 這條規範是被真實 bug 逼出來的：`scripts/verify_parquet.py` 的 `_expected_bars()`
-> 原本產生右標籤序列（09:31…16:00），與 `BAR_SCHEMA.bucket_start` 不符，導致完整的
-> session 被誤判為缺漏。左/右標籤是市場資料最典型的靜默錯誤來源之一 —— 兩邊都「看起來
-> 對」，但差一根 bar。正因如此它必須是 contract 級規範，且 conformance fixtures 要涵蓋
-> session 首尾兩根 bar。
+> 這裡曾經做過轉換：減一分鐘，再對齊一條錨在 09:30 ET 的格線。**它每天吃掉一根
+> bar。** TradeStation 的盤中格線在 RTH 開盤與收盤各重啟一次，所以 06:00 session
+> 的 60 分鐘圖一天發 15 根、含兩根殘根 —— 收盤 09:00 與 09:30 雙雙落在 08:30，
+> 後者覆蓋前者。段長取決於使用者的 chart session 設定，而 wire 上沒有這個資訊，
+> 所以沒有任何格線修得好。實測與規範見 `contract/semantics.md` §2。
 
 ### 4.3 資料遺漏偵測
 
@@ -492,7 +482,7 @@ flowchart LR
   on the `tradestation_data` package"*，正因如此才有資格當中立錄製器
 
 **現在四份 fixture 全數錄自真 DLL，沒有例外。** 前一代留過一份手寫的 `v1_legacy`，
-理由是當時的 DLL 已不再發 wire v1；proto 1 之後不再有「需要支援的舊版本」，那份
+理由是當時的 DLL 已不再發 wire v1；proto 2 之後不再有「需要支援的舊版本」，那份
 連同其餘 legacy fixture 一併刪除。
 
 `expected/*.json` 則是另一條規矩：**必須依 `semantics.md` 手工推導，不得由 binding
@@ -504,9 +494,9 @@ flowchart LR
 | --- | --- | --- |
 | breadth symbol（`$TICK` / `$ADD`） | 五個 `el_*` 全為 0、`bid`/`ask` 為 `null`，易被 binding 誤判 | `noquote` |
 | 非 index symbol 的 null 報價 | 只測 index symbol 分不出 §3.1（publisher 送 null）與 §3.2（binding 判無效） | `noquote` |
-| 非 1m 的 native bar | `tf` → `timeframe=` 分區的對應，出錯下游偵測不到 | `bars` |
+| 每一個 BarType/BarInterval | 原值 → `bartype=`/`interval=` 分區，沒有任何組合被拒收 | `bars` |
 | 無法對應的間隔 | 必須回 `-5` 且不送出，而不是塞進預設值 | `bars` |
-| session 首尾 bar | 左／右標籤是市場資料最典型的靜默錯誤 | `session` |
+| session 首尾 bar | 釘住「publisher 給什麼就存什麼」 | `session` |
 | bar 全程無報價 | bar quote 在本協定結構上不存在，binding 不該有任何判斷 | 四份皆驗 |
 | DST 轉換日 | `ts_str` → UTC 的正確性，跨 binding 最容易不一致 | 尚無（單元測試有，fixture 無） |
 | multithread 模式 | frame 交錯順序 | 尚無 |

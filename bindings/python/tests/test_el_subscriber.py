@@ -15,39 +15,21 @@ from tradestation_data.wire.el_subscriber import TradeStationELProvider
 TS = datetime(2026, 4, 18, 13, 30, 45, tzinfo=UTC).timestamp()
 
 
-def _tick_frame(**over: object) -> dict[str, object]:
-    """A complete proto-1 tick payload; override any field per test."""
-    base: dict[str, object] = {
-        "proto": 1,
-        "kind": "tick",
-        "seq": 1,
-        "sid": 7001,
-        "ts": TS,
-        "ts_str": "2026-04/18-09:30:45",
-        "px": 450.23,
-        "el_volume": 300,
-        "el_ticks": 812,
-        "el_upticks": 300,
-        "el_downticks": 512,
-        "el_open_interest": 0,
-        "bid": 450.22,
-        "ask": 450.24,
-    }
-    base.update(over)
-    return base
+def _frame(bar_type: int = 1, bar_interval: int = 1, **over: object) -> dict[str, object]:
+    """A complete proto-2 frame. One shape for every chart.
 
-
-def _bar_frame(tf: str = "1m", **over: object) -> dict[str, object]:
-    """A complete proto-1 bar payload. `ts_str` is right-labelled — EL's
-    `Time` is the bar's close and the indicator forwards it verbatim."""
+    `ts_str` is EL's `Time`, which is the point's CLOSE; the indicator
+    forwards it verbatim and the binding lands it verbatim.
+    """
     base: dict[str, object] = {
-        "proto": 1,
-        "kind": "bar",
-        "tf": tf,
+        "proto": 2,
         "seq": 1,
         "sid": 7001,
         "ts": datetime(2026, 4, 20, 13, 30, tzinfo=UTC).timestamp(),
         "ts_str": "2026-04/20-09:30:00",
+        "bar_type": bar_type,
+        "bar_interval": bar_interval,
+        "category": 2,
         "o": 450.0,
         "h": 451.0,
         "l": 449.0,
@@ -57,6 +39,8 @@ def _bar_frame(tf: str = "1m", **over: object) -> dict[str, object]:
         "el_upticks": 6100,
         "el_downticks": 5900,
         "el_open_interest": 0,
+        "bid": 450.22,
+        "ask": 450.24,
     }
     base.update(over)
     return base
@@ -64,11 +48,6 @@ def _bar_frame(tf: str = "1m", **over: object) -> dict[str, object]:
 
 async def _publish(pub: zmq.asyncio.Socket, topic: str, payload: dict[str, object]) -> None:
     await pub.send_multipart([topic.encode(), json.dumps(payload).encode()])
-
-
-async def _next_tick(provider: TradeStationELProvider, timeout: float = 1.0):
-    gen = provider.ticks()
-    return await asyncio.wait_for(anext(gen), timeout=timeout), gen
 
 
 async def _connected(zmq_inproc_bus, symbols: list[str]):
@@ -82,76 +61,6 @@ async def _connected(zmq_inproc_bus, symbols: list[str]):
 
 
 # ---- tick parsing ----------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_provider_parses_spy_tick(zmq_inproc_bus) -> None:
-    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    await _publish(pub, "SPY", _tick_frame())
-
-    tick, gen = await _next_tick(provider)
-    assert tick.symbol == "SPY"
-    assert tick.price == pytest.approx(450.23)
-    assert tick.bid == pytest.approx(450.22)
-    assert tick.ask == pytest.approx(450.24)
-    assert tick.timestamp.tzinfo is UTC
-    assert tick.timestamp.year == 2026
-
-    await gen.aclose()
-    await provider.close()
-
-
-@pytest.mark.asyncio
-async def test_tick_carries_all_five_el_quantities_verbatim(zmq_inproc_bus) -> None:
-    """Each reserved word gets its own column and none is reconciled.
-
-    The distinct values matter: reading `el_ticks` as a trade count or
-    `el_volume` as total share volume is exactly the misreading this
-    protocol removed, and equal placeholders would not catch a swap.
-    """
-    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    await _publish(pub, "SPY", _tick_frame())
-
-    tick, gen = await _next_tick(provider)
-    assert tick.el_volume == 300
-    assert tick.el_ticks == 812
-    assert tick.el_upticks == 300
-    assert tick.el_downticks == 512
-    assert tick.el_open_interest == 0
-
-    await gen.aclose()
-    await provider.close()
-
-
-@pytest.mark.asyncio
-async def test_index_symbol_has_no_bid_ask(zmq_inproc_bus) -> None:
-    provider, pub = await _connected(zmq_inproc_bus, ["VXX"])
-    await _publish(
-        pub,
-        "VXX",
-        _tick_frame(
-            px=18.55,
-            el_volume=0,
-            el_ticks=0,
-            el_upticks=0,
-            el_downticks=0,
-            bid=18.5,
-            ask=18.6,
-        ),
-    )
-
-    tick, gen = await _next_tick(provider)
-    assert tick.symbol == "VXX"
-    # Live numbers that still mean nothing — §3.2, and the DLL cannot know it.
-    assert tick.bid is None
-    assert tick.ask is None
-    assert tick.el_volume == 0
-
-    await gen.aclose()
-    await provider.close()
-
-
-# ---- the version gate ------------------------------------------------------
 
 
 def test_payload_without_proto_is_refused_with_an_actionable_message() -> None:
@@ -171,24 +80,8 @@ def test_payload_without_proto_is_refused_with_an_actionable_message() -> None:
 
 def test_payload_declaring_another_proto_is_refused() -> None:
     provider = TradeStationELProvider(endpoint="inproc://future-proto")
-    with pytest.raises(ValueError, match="proto=2"):
-        provider._parse_payload("SPY", json.dumps(_tick_frame(proto=2)).encode())
-
-
-@pytest.mark.asyncio
-async def test_refused_frame_does_not_end_the_stream(zmq_inproc_bus) -> None:
-    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    await _publish(pub, "SPY", {"v": 4, "kind": "tick", "ts": TS, "px": 1.0})
-    await _publish(pub, "SPY", _tick_frame(seq=2, px=452.0))
-
-    tick, gen = await _next_tick(provider)
-    assert tick.price == pytest.approx(452.0)
-
-    await gen.aclose()
-    await provider.close()
-
-
-# ---- quantities are required, never defaulted ------------------------------
+    with pytest.raises(ValueError, match="proto=1"):
+        provider._parse_payload("SPY", json.dumps(_frame(proto=1)).encode())
 
 
 @pytest.mark.parametrize(
@@ -203,7 +96,7 @@ def test_missing_quantity_raises_rather_than_writing_zero(missing: str) -> None:
     required and the frame is dropped instead.
     """
     provider = TradeStationELProvider(endpoint="inproc://missing-qty")
-    frame = _tick_frame()
+    frame = _frame()
     del frame[missing]
     with pytest.raises(ValueError, match=missing):
         provider._parse_payload("SPY", json.dumps(frame).encode())
@@ -211,19 +104,19 @@ def test_missing_quantity_raises_rather_than_writing_zero(missing: str) -> None:
 
 def test_missing_quantity_on_a_bar_raises_too() -> None:
     provider = TradeStationELProvider(endpoint="inproc://missing-qty-bar")
-    frame = _bar_frame()
+    frame = _frame()
     del frame["el_open_interest"]
     with pytest.raises(ValueError, match="el_open_interest"):
         provider._parse_payload("SPY", json.dumps(frame).encode())
 
 
-# ---- bar parsing: bucket_start authority -----------------------------------
+# ---- bar parsing: bar_time authority -----------------------------------
 
 
 @pytest.mark.asyncio
 async def test_bar_carries_ohlc_and_quantities(zmq_inproc_bus) -> None:
     provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    await _publish(pub, "SPY", _bar_frame())
+    await _publish(pub, "SPY", _frame())
 
     gen = provider.events()
     event = await asyncio.wait_for(anext(gen), timeout=1.0)
@@ -251,12 +144,12 @@ async def test_bar_prefers_ts_str_over_ts(zmq_inproc_bus) -> None:
     would collapse onto a single bucket.
     """
     provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    # 09:31 ET = 13:31 UTC on 2026-04-17 (EDT). EL stamps the close, so that
-    # frame is the left-labelled 09:30 bar → 13:30 UTC.
+    # 09:31 ET = 13:31 UTC on 2026-04-17 (EDT). EL stamps the close and the
+    # binding lands it verbatim.
     await _publish(
         pub,
         "SPY",
-        _bar_frame(
+        _frame(
             ts=datetime(2026, 4, 17, 5, 31, 0, tzinfo=UTC).timestamp(),
             ts_str="2026-04/17-09:31:00",
         ),
@@ -265,7 +158,7 @@ async def test_bar_prefers_ts_str_over_ts(zmq_inproc_bus) -> None:
     gen = provider.events()
     event = await asyncio.wait_for(anext(gen), timeout=1.0)
     assert isinstance(event, Bar)
-    assert event.bucket_start == datetime(2026, 4, 17, 13, 30, 0, tzinfo=UTC)
+    assert event.bar_time == datetime(2026, 4, 17, 13, 31, 0, tzinfo=UTC)
 
     await gen.aclose()
     await provider.close()
@@ -274,14 +167,14 @@ async def test_bar_prefers_ts_str_over_ts(zmq_inproc_bus) -> None:
 @pytest.mark.asyncio
 async def test_bar_ts_str_handles_dst_boundary(zmq_inproc_bus) -> None:
     """Pick a date in standard time (EST, UTC-5) to verify DST-aware
-    conversion. 2026-01-15 09:31 EST = 14:31 UTC, left-labelled 14:30."""
+    conversion. 2026-01-15 09:31 EST = 14:31 UTC."""
     provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    await _publish(pub, "SPY", _bar_frame(ts=0.0, ts_str="2026-01/15-09:31:00"))
+    await _publish(pub, "SPY", _frame(ts=0.0, ts_str="2026-01/15-09:31:00"))
 
     gen = provider.events()
     event = await asyncio.wait_for(anext(gen), timeout=1.0)
     assert isinstance(event, Bar)
-    assert event.bucket_start == datetime(2026, 1, 15, 14, 30, 0, tzinfo=UTC)
+    assert event.bar_time == datetime(2026, 1, 15, 14, 31, 0, tzinfo=UTC)
 
     await gen.aclose()
     await provider.close()
@@ -307,7 +200,7 @@ async def test_bar_with_localized_am_pm_ts_str_is_refused(zmq_inproc_bus, caplog
     await _publish(
         pub,
         "SPY",
-        _bar_frame(
+        _frame(
             ts=datetime(2026, 4, 18, 13, 31, 12, tzinfo=UTC).timestamp(),
             ts_str="2026-04/18-01:31:00 下午",
         ),
@@ -315,7 +208,7 @@ async def test_bar_with_localized_am_pm_ts_str_is_refused(zmq_inproc_bus, caplog
     # A good frame behind it proves the refusal drops one frame, not the stream.
     # ts_str is ET: 09:31 EDT is the 09:30 bar's close, so it left-labels to
     # 09:30 EDT == 13:30 UTC.
-    await _publish(pub, "SPY", _bar_frame(seq=2, ts_str="2026-04/18-09:31:00"))
+    await _publish(pub, "SPY", _frame(seq=2, ts_str="2026-04/18-09:31:00"))
 
     gen = provider.events()
     with caplog.at_level("WARNING", logger="tradestation_data.wire.el_subscriber"):
@@ -323,7 +216,7 @@ async def test_bar_with_localized_am_pm_ts_str_is_refused(zmq_inproc_bus, caplog
 
     # The localized frame never surfaced; the next one did.
     assert isinstance(event, Bar)
-    assert event.bucket_start == datetime(2026, 4, 18, 13, 30, 0, tzinfo=UTC)
+    assert event.bar_time == datetime(2026, 4, 18, 13, 31, 0, tzinfo=UTC)
     assert any("unparseable 'ts_str'" in r.message for r in caplog.records), (
         "the refusal must name the field, or an operator cannot act on it"
     )
@@ -342,7 +235,7 @@ async def test_bar_absent_ts_str_falls_back_but_says_so(zmq_inproc_bus, caplog) 
     replay onto a single bucket.
     """
     provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    frame = _bar_frame(ts=datetime(2026, 4, 18, 13, 31, 12, tzinfo=UTC).timestamp())
+    frame = _frame(ts=datetime(2026, 4, 18, 13, 31, 12, tzinfo=UTC).timestamp())
     del frame["ts_str"]
     await _publish(pub, "SPY", frame)
 
@@ -351,8 +244,8 @@ async def test_bar_absent_ts_str_falls_back_but_says_so(zmq_inproc_bus, caplog) 
         event = await asyncio.wait_for(anext(gen), timeout=1.0)
 
     assert isinstance(event, Bar)
-    assert event.bucket_start == datetime(2026, 4, 18, 13, 30, 0, tzinfo=UTC)
-    assert any("bar_ts_str_absent_using_recv_clock" in r.message for r in caplog.records)
+    assert event.bar_time == datetime(2026, 4, 18, 13, 31, 0, tzinfo=UTC)
+    assert any("ts_str_absent_using_recv_clock" in r.message for r in caplog.records)
 
     await gen.aclose()
     await provider.close()
@@ -362,90 +255,26 @@ async def test_bar_absent_ts_str_falls_back_but_says_so(zmq_inproc_bus, caplog) 
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tf", ["1m", "5m", "15m", "30m", "1h", "1d"])
-async def test_bar_carries_its_timeframe(zmq_inproc_bus, tf: str) -> None:
-    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    await _publish(pub, "SPY", _bar_frame(tf))
+@pytest.mark.parametrize(
+    ("bar_type", "bar_interval"),
+    [(0, 1), (1, 1), (1, 5), (1, 15), (1, 30), (1, 60), (1, 2), (2, 1), (3, 1)],
+)
+async def test_point_carries_the_charts_own_words(
+    zmq_inproc_bus, bar_type: int, bar_interval: int
+) -> None:
+    """BarType and BarInterval land verbatim, including pairs with no name.
 
-    gen = provider.events()
-    bar = await asyncio.wait_for(anext(gen), timeout=1.0)
-    assert bar.timeframe == tf
-
-    await gen.aclose()
-    await provider.close()
-
-
-@pytest.mark.asyncio
-async def test_bar_with_unknown_timeframe_is_refused(zmq_inproc_bus) -> None:
-    """A tf we cannot place must not be filed under a default.
-
-    Defaulting would put one interval's bars into another's partition, which
-    is precisely the corruption this field exists to prevent.
+    (1, 2) is a 2-minute chart and (3, 1) a weekly one: the DLL used to map
+    the pair to a timeframe string and return -5 for anything it could not
+    name, so those two published nothing at all.
     """
     provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    await _publish(pub, "SPY", _bar_frame("4h"))
-    await _publish(pub, "SPY", _bar_frame("5m", seq=2))
+    await _publish(pub, "SPY", _frame(bar_type, bar_interval))
 
     gen = provider.events()
-    bar = await asyncio.wait_for(anext(gen), timeout=1.0)
-    assert bar.timeframe == "5m"  # the 4h frame was dropped, stream continued
-
-    await gen.aclose()
-    await provider.close()
-
-
-@pytest.mark.asyncio
-async def test_bar_without_tf_is_refused_not_defaulted(zmq_inproc_bus) -> None:
-    """Filing an unknown interval as 1m puts it in the 1-minute partition,
-    where nothing downstream can tell it apart from real minute data."""
-    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    headless = _bar_frame("5m")
-    del headless["tf"]
-    await _publish(pub, "SPY", headless)
-    await _publish(pub, "SPY", _bar_frame("5m", seq=2))
-
-    gen = provider.events()
-    bar = await asyncio.wait_for(anext(gen), timeout=1.0)
-    assert bar.timeframe == "5m"  # the tf-less frame was dropped, not filed as 1m
-
-    await gen.aclose()
-    await provider.close()
-
-
-@pytest.mark.asyncio
-async def test_daily_bar_is_aligned_to_the_session_anchor(zmq_inproc_bus) -> None:
-    """§2.2 — EL stamps a daily bar with its chart's own time, not 04:00 ET.
-
-    Left as sent, one trading day could land as two rows in
-    bars/timeframe=1d/ with different bucket_starts, and every join
-    downstream would double-count it.
-    """
-    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    await _publish(pub, "SPY", _bar_frame("1d"))  # ts_str is 09:30 ET
-
-    gen = provider.events()
-    bar = await asyncio.wait_for(anext(gen), timeout=1.0)
-    # 04:00 EDT on the same session date. Session-anchored frames skip the
-    # left-label step, which would otherwise move the bar a day earlier.
-    assert bar.bucket_start == datetime(2026, 4, 20, 8, 0, tzinfo=UTC)
-
-    await gen.aclose()
-    await provider.close()
-
-
-# ---- routing: topics, kinds, malformed frames ------------------------------
-
-
-@pytest.mark.asyncio
-async def test_topic_filter_only_subscribed_symbols(zmq_inproc_bus) -> None:
-    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    # QQQ should be filtered out by the SUB socket
-    await _publish(pub, "QQQ", _tick_frame(px=400.0))
-    await _publish(pub, "SPY", _tick_frame(px=450.0))
-
-    tick, gen = await _next_tick(provider)
-    assert tick.symbol == "SPY"
-    assert tick.price == pytest.approx(450.0)
+    event = await asyncio.wait_for(anext(gen), timeout=1.0)
+    assert event.bar_type == bar_type
+    assert event.bar_interval == bar_interval
 
     await gen.aclose()
     await provider.close()
@@ -459,8 +288,8 @@ async def test_prefix_matched_topic_is_dropped(zmq_inproc_bus) -> None:
     and start writing symbol=SPYG/ partitions for a symbol never subscribed.
     """
     provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    await _publish(pub, "SPYG", _tick_frame(px=1.0))
-    await _publish(pub, "SPY", _tick_frame(seq=2, px=450.0))
+    await _publish(pub, "SPYG", _frame(c=1.0))
+    await _publish(pub, "SPY", _frame(seq=2, c=450.0))
 
     gen = provider.events()
     event = await asyncio.wait_for(anext(gen), timeout=1.0)
@@ -468,61 +297,6 @@ async def test_prefix_matched_topic_is_dropped(zmq_inproc_bus) -> None:
 
     await gen.aclose()
     await provider.close()
-
-
-@pytest.mark.asyncio
-async def test_malformed_payload_is_skipped(zmq_inproc_bus) -> None:
-    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    await pub.send_multipart([b"SPY", b"{not valid json"])
-    await _publish(pub, "SPY", _tick_frame(px=450.0))
-
-    tick, gen = await _next_tick(provider, timeout=2.0)
-    assert tick.symbol == "SPY"
-    assert tick.price == pytest.approx(450.0)
-
-    await gen.aclose()
-    await provider.close()
-
-
-@pytest.mark.asyncio
-async def test_unknown_kind_is_dropped(zmq_inproc_bus) -> None:
-    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    await _publish(pub, "SPY", _tick_frame(kind="some_future_kind"))
-    await _publish(pub, "SPY", _tick_frame(seq=2, px=450.0))
-
-    gen = provider.events()
-    event = await asyncio.wait_for(anext(gen), timeout=1.0)
-    assert getattr(event, "price", None) == pytest.approx(450.0)
-
-    await gen.aclose()
-    await provider.close()
-
-
-@pytest.mark.asyncio
-async def test_ticks_filters_out_bar_events(zmq_inproc_bus) -> None:
-    """ticks() is a tick-only convenience; bar events must be skipped."""
-    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    await _publish(pub, "SPY", _bar_frame())
-    await _publish(pub, "SPY", _tick_frame(seq=2, px=9.0))
-
-    gen = provider.ticks()
-    tick = await asyncio.wait_for(anext(gen), timeout=1.0)
-    assert tick.price == pytest.approx(9.0)
-
-    await gen.aclose()
-    await provider.close()
-
-
-# ---- connect / subscribe / close lifecycle ---------------------------------
-
-
-@pytest.mark.asyncio
-async def test_ticks_requires_connect(zmq_inproc_bus) -> None:
-    _, _, endpoint = zmq_inproc_bus
-    provider = TradeStationELProvider(endpoint=endpoint)
-    with pytest.raises(RuntimeError):
-        _ = provider.ticks().__aiter__()
-        await anext(provider.ticks())
 
 
 @pytest.mark.asyncio
@@ -629,7 +403,7 @@ async def test_events_returns_on_zmq_error_after_close() -> None:
             if not self.raised:
                 self.raised = True
                 raise zmq.error.ZMQError(errno=0)
-            return (b"SPY", json.dumps(_tick_frame()).encode())
+            return (b"SPY", json.dumps(_frame()).encode())
 
     provider = TradeStationELProvider(endpoint="inproc://zmq-err")
     provider._socket = _StubSocket()  # type: ignore[assignment]
@@ -656,7 +430,7 @@ async def test_events_logs_and_continues_on_transient_zmq_error(caplog) -> None:
             self.calls += 1
             if self.calls == 1:
                 raise zmq.error.ZMQError(errno=0)
-            return (b"SPY", json.dumps(_tick_frame()).encode())
+            return (b"SPY", json.dumps(_frame()).encode())
 
     provider = TradeStationELProvider(endpoint="inproc://zmq-warn")
     provider._socket = _StubSocket()  # type: ignore[assignment]
@@ -740,52 +514,6 @@ def test_sequence_regression_does_not_rewind_expectation() -> None:
     assert t.messages_lost == 0
 
 
-@pytest.mark.asyncio
-async def test_provider_exposes_messages_lost(zmq_inproc_bus) -> None:
-    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    assert provider.messages_lost is None  # nothing seen yet — cannot tell
-
-    await _publish(pub, "SPY", _tick_frame(seq=1, px=450.0))
-    tick, gen = await _next_tick(provider)
-    assert tick.price == pytest.approx(450.0)
-    assert provider.gap_detection_available is True
-    assert provider.messages_lost == 0
-
-    await _publish(pub, "SPY", _tick_frame(seq=4, px=451.0))
-    tick2 = await asyncio.wait_for(anext(gen), timeout=1.0)
-    assert tick2.price == pytest.approx(451.0)
-    assert provider.messages_lost == 2  # seq 2 and 3 dropped
-
-    await gen.aclose()
-    await provider.close()
-
-
-@pytest.mark.asyncio
-async def test_refused_frame_still_counts_against_the_sequence(zmq_inproc_bus) -> None:
-    """A frame we drop still occupied a slot in the publisher's counter.
-
-    Skipping observe() on the refusal path would park `_expected` at the last
-    accepted seq, so the next accepted frame would report a gap that never
-    happened — an operator whose link lost nothing watching steady loss.
-    """
-    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    await _publish(pub, "SPY", _tick_frame(seq=1, px=450.0))
-    tick, gen = await _next_tick(provider)
-    assert tick.price == pytest.approx(450.0)
-
-    await _publish(pub, "SPY", _tick_frame(seq=2, proto=99))  # refused
-    await _publish(pub, "SPY", _tick_frame(seq=3, px=452.0))
-    tick3 = await asyncio.wait_for(anext(gen), timeout=1.0)
-    assert tick3.price == pytest.approx(452.0)
-    assert provider.messages_lost == 0
-
-    await gen.aclose()
-    await provider.close()
-
-
-# ---- quote availability (semantics.md §3) ---------------------------------
-
-
 def _quote(v):
     from tradestation_data.wire.el_subscriber import _quote_or_none
 
@@ -813,21 +541,6 @@ def test_real_quotes_pass_through():
 
 
 @pytest.mark.asyncio
-async def test_history_replay_tick_has_no_quotes(zmq_inproc_bus) -> None:
-    """End to end: a null quote must not reach the caller as a number."""
-    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    await _publish(pub, "SPY", _tick_frame(bid=None, ask=None))
-
-    tick, gen = await _next_tick(provider)
-    assert tick.price == pytest.approx(450.23)
-    assert tick.bid is None
-    assert tick.ask is None
-
-    await gen.aclose()
-    await provider.close()
-
-
-@pytest.mark.asyncio
 async def test_null_quantity_drops_the_frame_instead_of_killing_the_stream(
     zmq_inproc_bus, caplog
 ) -> None:
@@ -840,14 +553,14 @@ async def test_null_quantity_drops_the_frame_instead_of_killing_the_stream(
     nothing was ever ingested again. One frame must not be able to do that.
     """
     provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    await _publish(pub, "SPY", _tick_frame(el_volume=None))
-    await _publish(pub, "SPY", _tick_frame(seq=2, px=452.0))
+    await _publish(pub, "SPY", _frame(el_volume=None))
+    await _publish(pub, "SPY", _frame(seq=2, c=452.0))
 
     gen = provider.events()
     with caplog.at_level("ERROR", logger="tradestation_data.wire.el_subscriber"):
         event = await asyncio.wait_for(anext(gen), timeout=1.0)
 
-    assert event.price == pytest.approx(452.0), "the stream did not survive the bad frame"
+    assert event.close == pytest.approx(452.0), "the stream did not survive the bad frame"
     assert any("Dropping unparseable message" in r.message for r in caplog.records)
 
     await gen.aclose()
@@ -861,13 +574,13 @@ async def test_non_object_payload_drops_the_frame_instead_of_killing_the_stream(
     """A payload that decodes to a list makes `data.get` raise AttributeError."""
     provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
     await pub.send_multipart([b"SPY", b"[]"])
-    await _publish(pub, "SPY", _tick_frame(seq=2, px=453.0))
+    await _publish(pub, "SPY", _frame(seq=2, c=453.0))
 
     gen = provider.events()
     with caplog.at_level("ERROR", logger="tradestation_data.wire.el_subscriber"):
         event = await asyncio.wait_for(anext(gen), timeout=1.0)
 
-    assert event.price == pytest.approx(453.0)
+    assert event.close == pytest.approx(453.0)
     assert any("Dropping unparseable message" in r.message for r in caplog.records)
 
     await gen.aclose()
@@ -875,31 +588,35 @@ async def test_non_object_payload_drops_the_frame_instead_of_killing_the_stream(
 
 
 @pytest.mark.asyncio
-async def test_session_truncated_hour_bar_keeps_its_own_bucket(zmq_inproc_bus) -> None:
-    """A 60-minute RTH chart ends in a half-hour stub, and it is not the 14:30 bar.
+async def test_two_published_hours_do_not_collide(zmq_inproc_bus) -> None:
+    """The 60-minute case that used to lose a bar every single day.
 
-    RTH is 09:30-16:00, so a 1h chart yields six full bars plus 15:30-16:00,
-    which EasyLanguage stamps Time=1600. Subtracting a whole interval put that
-    stub at 15:00, which floors onto the 09:30-anchored hour grid at 14:30 —
-    colliding with the real 14:30-15:30 bar. `_handle_provider_bar` reads a
-    matching bucket as an intra-bar refresh, so the full hour's OHLC and all
-    five quantities were replaced by the stub's.
+    A 1h chart restarts its grid at the RTH open and close, so a session
+    yields fifteen bars, two of them short. Measured on live SPY 2026-07-31
+    with a 06:00 session: EL published closes 09:00 (the full 08:00-09:00
+    hour) and 09:30 (the 09:00-09:30 stub). The binding subtracted a minute
+    and snapped both onto the 09:30-anchored hour grid, and both landed on
+    08:30. `_handle_provider_bar` read the second as an intra-bar refresh of
+    the first, so the whole 08:00-09:00 hour was replaced by the half-hour's
+    numbers -- fifteen published, fourteen stored, every day, no error
+    anywhere.
+
+    No grid could have fixed it: the segment lengths follow the chart's own
+    session template, which the wire does not carry. Landing the publisher's
+    timestamp verbatim does.
     """
     provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    # The real 14:30-15:30 hour, then the stub. Both in ET on the wire.
-    await _publish(pub, "SPY", _bar_frame("1h", seq=1, ts_str="2026-04/20-15:30:00"))
-    await _publish(pub, "SPY", _bar_frame("1h", seq=2, ts_str="2026-04/20-16:00:00"))
+    await _publish(pub, "SPY", _frame(1, 60, seq=1, ts_str="2026-07/31-09:00:00"))
+    await _publish(pub, "SPY", _frame(1, 60, seq=2, ts_str="2026-07/31-09:30:00"))
 
     gen = provider.events()
-    full = await asyncio.wait_for(anext(gen), timeout=1.0)
-    stub = await asyncio.wait_for(anext(gen), timeout=1.0)
+    first = await asyncio.wait_for(anext(gen), timeout=1.0)
+    second = await asyncio.wait_for(anext(gen), timeout=1.0)
 
     et = ZoneInfo("America/New_York")
-    assert full.bucket_start.astimezone(et).strftime("%H:%M") == "14:30"
-    assert stub.bucket_start.astimezone(et).strftime("%H:%M") == "15:30"
-    assert full.bucket_start != stub.bucket_start, (
-        "the stub must not land on the preceding hour's bucket"
-    )
+    assert first.bar_time.astimezone(et).strftime("%H:%M") == "09:00"
+    assert second.bar_time.astimezone(et).strftime("%H:%M") == "09:30"
+    assert first.bar_time != second.bar_time
 
     await gen.aclose()
     await provider.close()
@@ -907,27 +624,34 @@ async def test_session_truncated_hour_bar_keeps_its_own_bucket(zmq_inproc_bus) -
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("tf", "close_et", "expected_et"),
+    ("bar_type", "bar_interval", "close_et"),
     [
-        ("1m", "09:31:00", "09:30"),
-        ("1m", "16:00:00", "15:59"),
-        ("5m", "09:35:00", "09:30"),
-        ("5m", "16:00:00", "15:55"),
-        ("1h", "10:30:00", "09:30"),
-        ("30m", "16:00:00", "15:30"),
+        (1, 1, "09:31:00"),
+        (1, 1, "16:00:00"),
+        (1, 5, "09:35:00"),
+        (1, 5, "16:00:00"),
+        (1, 60, "10:30:00"),
+        (1, 30, "16:00:00"),
+        (2, 1, "09:30:00"),
     ],
 )
-async def test_full_bars_label_exactly_as_before(
-    zmq_inproc_bus, tf: str, close_et: str, expected_et: str
+async def test_every_chart_lands_its_timestamp_verbatim(
+    zmq_inproc_bus, bar_type: int, bar_interval: int, close_et: str
 ) -> None:
-    """A bar that spans its whole interval is unaffected by the stub fix."""
+    """One rule for every chart, daily included: whatever EL stamped.
+
+    There is no interval-dependent shift and no grid, so there is nothing
+    left that can differ between charts. Daily used to be a special case
+    twice over — exempt from the shift, then replaced outright by its
+    session's 04:00 ET anchor — and now it is not a case at all.
+    """
     provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
-    await _publish(pub, "SPY", _bar_frame(tf, ts_str=f"2026-04/20-{close_et}"))
+    await _publish(pub, "SPY", _frame(bar_type, bar_interval, ts_str=f"2026-04/20-{close_et}"))
 
     gen = provider.events()
     bar = await asyncio.wait_for(anext(gen), timeout=1.0)
     et = ZoneInfo("America/New_York")
-    assert bar.bucket_start.astimezone(et).strftime("%H:%M") == expected_et
+    assert bar.bar_time.astimezone(et).strftime("%H:%M") == close_et[:5]
 
     await gen.aclose()
     await provider.close()
@@ -951,13 +675,13 @@ async def test_refused_frames_are_counted_separately_from_lost_ones(
     assert provider.frames_refused == 0
 
     for seq in (1, 2, 3):
-        await _publish(pub, "SPY", _tick_frame(seq=seq, proto=99))
-    await _publish(pub, "SPY", _tick_frame(seq=4, px=450.0))
+        await _publish(pub, "SPY", _frame(seq=seq, proto=99))
+    await _publish(pub, "SPY", _frame(seq=4, c=450.0))
 
     gen = provider.events()
     event = await asyncio.wait_for(anext(gen), timeout=1.0)
 
-    assert event.price == pytest.approx(450.0)
+    assert event.close == pytest.approx(450.0)
     assert provider.frames_refused == 3, "every refused frame must be counted"
     assert provider.messages_lost == 0, (
         "refused frames arrived, so nothing was lost -- that is why the "
@@ -977,7 +701,7 @@ def test_proto1_frame_without_seq_is_refused() -> None:
     §6.6 exists to forbid exactly that conflation.
     """
     provider = TradeStationELProvider(endpoint="inproc://no-seq")
-    frame = _tick_frame()
+    frame = _frame()
     del frame["seq"]
     with pytest.raises(ValueError, match="no 'seq'"):
         provider._parse_payload("SPY", json.dumps(frame).encode())
@@ -1007,7 +731,7 @@ def test_dst_ambiguous_ts_str_is_reported_not_silently_resolved(caplog) -> None:
     """
     provider = TradeStationELProvider(endpoint="inproc://dst-fold")
     # 2026 DST ends Nov 1; the 01:00-02:00 ET hour repeats.
-    frame = _bar_frame(ts_str="2026-11/01-01:30:00")
+    frame = _frame(ts_str="2026-11/01-01:30:00")
 
     with caplog.at_level("WARNING", logger="tradestation_data.wire.el_subscriber"):
         bar = provider._parse_payload("SPY", json.dumps(frame).encode())
@@ -1020,5 +744,5 @@ def test_unambiguous_ts_str_says_nothing(caplog) -> None:
     """Every other day of the year must stay quiet."""
     provider = TradeStationELProvider(endpoint="inproc://dst-normal")
     with caplog.at_level("WARNING", logger="tradestation_data.wire.el_subscriber"):
-        provider._parse_payload("SPY", json.dumps(_bar_frame()).encode())
+        provider._parse_payload("SPY", json.dumps(_frame()).encode())
     assert not [r for r in caplog.records if "dst_ambiguous" in r.message]

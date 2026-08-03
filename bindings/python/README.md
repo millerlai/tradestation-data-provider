@@ -20,9 +20,9 @@ This is the **reference binding** for the wire protocol defined in [`contract/`]
 
 ## Why use it
 
-- **Plug your own output format.** Declare a sink in `config/sinks.yaml`, point it at any `module:attr` you can import, and the runtime fans every tick/bar to it. No fork needed.
-- **Hive-partitioned Parquet out of the box.** Built-in `ParquetBarSink` / `ParquetTickSink`, one directory level per timeframe / symbol / day.
-- **Receive ticks/bars in your own code.** `CallbackSink` lets you register Python functions per symbol or catch-all, dispatched synchronously from the ingest loop.
+- **Plug your own output format.** Declare a sink in `config/sinks.yaml`, point it at any `module:attr` you can import, and the runtime fans every point to it. No fork needed.
+- **Hive-partitioned Parquet out of the box.** Built-in `ParquetBarSink`, one directory level per BarType / BarInterval / symbol / day.
+- **Receive points in your own code.** `CallbackSink` lets you register Python functions per symbol or catch-all, dispatched synchronously from the ingest loop.
 - **Nothing between the chart and the column.** The five quantity fields are EasyLanguage's reserved words verbatim, under `el_*` names, so what you read is auditable against the terminal.
 - **Operator tooling.** Verify completeness, dedupe, dump, and impute the resulting store with the scripts under [`scripts/`](scripts/) — read-only except `dedupe_bars.py`, which rewrites in place unless you pass `--dry-run`.
 - **Checked against the shared contract.** `tests/conformance/` replays recorded DLL output from [`contract/fixtures/`](../../contract/fixtures/) and asserts this binding matches expectations derived independently of it.
@@ -39,20 +39,16 @@ flowchart TD
     OnBar(["optional on_bar callback"])
 
     PBar["ParquetBarSink<br/>(default)"]
-    PTick["ParquetTickSink<br/>(default)"]
     Memory["InMemorySink"]
     Callback["CallbackSink"]
     Custom["Your custom sinks"]
 
     DLL -- "ZMQ PUB" --> Provider
-    Provider -- "Tick" --> Runtime
-    Provider -- "Bar (EL_PublishBar)" --> Runtime
-    Runtime -- "Tick" --> Snapshot
-    Runtime -- "closed Bar" --> Snapshot
-    Runtime -- "Tick / closed Bar" --> Pipeline
+    Provider -- "point (EL_Publish)" --> Runtime
+    Runtime -- "closed point" --> Snapshot
+    Runtime -- "closed point" --> Pipeline
     Runtime --> OnBar
     Pipeline --> PBar
-    Pipeline --> PTick
     Pipeline --> Memory
     Pipeline --> Callback
     Pipeline --> Custom
@@ -110,7 +106,7 @@ from tradestation_data.aggregation import MarketSnapshot
 from tradestation_data.wire.el_subscriber import TradeStationELProvider
 from tradestation_data.runtime.ingestion import IngestionRuntime
 from tradestation_data.sinks import SinkPipeline
-from tradestation_data.sinks.parquet import ParquetBarSink, ParquetTickSink
+from tradestation_data.sinks.parquet import ParquetBarSink
 
 async def main() -> None:
     runtime = IngestionRuntime(
@@ -118,8 +114,7 @@ async def main() -> None:
         symbols=["SPY", "QQQ"],
         snapshot=MarketSnapshot(),
         sinks=SinkPipeline([
-            ParquetBarSink(name="bars",  root="data/bars"),
-            ParquetTickSink(name="ticks", root="data/ticks"),
+            ParquetBarSink(name="bars", root="data/bars"),
         ]),
     )
     await runtime.run()
@@ -190,7 +185,6 @@ Every tick and every closed bar is broadcast to every sink registered in `config
 | Sink | Purpose |
 | --- | --- |
 | `tradestation_data.sinks.parquet:ParquetBarSink` | Hive-partitioned bar Parquet, partitioned on the bar's own timeframe (enabled by default) |
-| `tradestation_data.sinks.parquet:ParquetTickSink` | Hive-partitioned tick Parquet (enabled by default) |
 | `tradestation_data.sinks.memory:InMemorySink` | Buffer events in memory (tests / notebooks); not for long runs |
 | `tradestation_data.sinks.callback:CallbackSink` | Dispatch to Python callbacks registered per-symbol or catch-all |
 
@@ -244,7 +238,6 @@ The full protocol:
 ```python
 class Sink(Protocol):
     name: str
-    def on_tick(self, tick: Tick) -> None: ...
     def on_bar(self, bar: Bar) -> None: ...
     def should_flush(self) -> bool: ...   # default False — only for buffered sinks
     def flush(self) -> None: ...          # default no-op
@@ -264,7 +257,7 @@ def on_spy_bar(bar):
     print(bar.symbol, bar.close)
 
 sink.on("SPY", "bar", on_spy_bar)
-sink.on_any("tick", lambda t: ...)   # every symbol
+sink.on_any("bar", lambda b: ...)   # every symbol
 ```
 
 Callbacks run synchronously inside the ingest loop — keep them fast (a few microseconds). Spawn `asyncio.create_task` or a thread inside the callback if you need to do real work. A callback that raises is logged and isolated; other callbacks for the same event still fire.
@@ -318,7 +311,7 @@ python examples/04_replay_fixtures.py # replays contract/fixtures/ through the r
 `03` generates its own bars and ticks under `data-example/` (it refuses to touch a directory that already holds something), so the store it inspects is one you can regenerate and change. Then dump what it wrote:
 
 ```powershell
-python scripts/dump_parquet.py data-example/bars/timeframe=1m/symbol=SPY/date=<the date it printed>/bars.parquet --head 3
+python scripts/dump_parquet.py data-example/bars/bartype=1/interval=1/symbol=SPY/date=<the date it printed>/bars.parquet --head 3
 ```
 
 **Do not reconcile a `1d` bar against a sum of intraday bars.** They are different measurements and will not match — `contract/semantics.md` §3.4 has the four reasons. And note that `el_volume` on an intraday bar is *not* total share volume: EasyLanguage's `Volume` and `Ticks` swap meaning between intraday and daily charts, which is exactly why every quantity column carries an `el_` prefix instead of a name that invites the assumption.
@@ -334,10 +327,10 @@ bindings/python/                   # this binding; repo root is two levels up
 │   └── symbols.yaml               # symbol universe + per-symbol session policy
 ├── scripts/                       # human-facing CLI wrappers (see above)
 ├── src/tradestation_data/
-│   ├── domain/                    # Bar / Tick — the value range of the wire
+│   ├── domain/                    # Bar — the value range of the wire
 │   ├── wire/                      # frame decoding, gap detection  [core]
 │   ├── aggregation/               # MarketSnapshot / session policy   [app]
-│   ├── storage/                   # BarWriter / TickWriter / HistoryStore
+│   ├── storage/                   # BarWriter / HistoryStore
 │   ├── sinks/                     # Sink protocol, pipeline, registry, built-ins
 │   └── runtime/                   # IngestionRuntime + CLI entry
 └── tests/

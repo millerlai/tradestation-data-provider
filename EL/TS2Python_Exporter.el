@@ -4,17 +4,16 @@
   Job:   Forward every bar/tick on the chart's symbol to TS2Python.dll so the
          Python agent can consume it via ZeroMQ.
 
-  Host:  Insert as an Indicator on any supported chart.
-         - BarType = 0   → EL_PublishTick(Close, ...)
-         - otherwise     → EL_PublishBar(O, H, L, C, ...) carrying BarType and
-                           BarInterval, which the DLL maps to a wire timeframe
+  Host:  Insert as an Indicator on any chart.
+         One call per data point, `EL_Publish`, whatever the chart is. Every
+         reserved word TradeStation supplies for that point goes out: Date and
+         Time, BarType, BarInterval, Category, Open/High/Low/Close, the five
+         quantity words, and InsideBid/InsideAsk.
 
-         Supported intervals: 1 / 5 / 15 / 30 / 60 minute, and daily.
-         Anything else is refused by the DLL with rc = -5 and logged once, and
-         sub-minute charts are refused by this script (see below).
-
-         Bars go out as full OHLC so the subscriber can rebuild them losslessly
-         instead of collapsing to a single close price.
+         No interval is refused and no field is dropped. This script makes no
+         judgement about which numbers are meaningful on which chart — that
+         is the consumer's, and a publisher holding an opinion about what a
+         word means breaks the day TradeStation changes it.
 
   QUANTITIES GO OUT VERBATIM: Volume, Ticks, UpTicks, DownTicks and OpenInt
   each get their own wire field, named after the reserved word. This script
@@ -37,17 +36,30 @@
   vocabulary. Guessing here would file 5-minute bars under the 1-minute
   partition, which nothing downstream can detect.
 
-  SUB-MINUTE CHARTS ARE DETECTED AND REFUSED: a second-based chart also reports
-  BarType = 1, and can report BarInterval = 1 exactly like a 1-minute chart, so
-  the two numbers cannot tell them apart. Published as 1m, those bars would fill
-  the 1-minute partition with sub-minute data wearing minute-shaped timestamps —
-  and nothing downstream could notice, because TsStr is built from Time, which
-  has minute resolution, so the seconds are gone before the bar leaves this
-  script.
+  SUB-MINUTE AND AGGREGATED-TICK CHARTS ARE DETECTED AND LOGGED — publishing
+  CONTINUES. A second-based chart reports BarType = 1 with BarInterval = 1
+  exactly like a 1-minute chart, and TsStr has minute resolution, so its
+  bars land with minute-shaped timestamps; an N-tick chart's frames each
+  carry a whole aggregated bar. Both used to stop publishing here — this
+  script deciding the data was not worth sending. Now each is announced
+  once in the Print Log, bar_type/bar_interval travel on every frame so a
+  consumer can see what the chart was, and the wire's receive-side ts is
+  what separates same-minute frames.
 
   What survives is the repetition: on a minute chart Date and Time advance every
   bar; on a sub-minute chart consecutive bars share both. This script latches on
-  that and stops publishing. The test needs no version-specific constant, unlike
+  that and says so ONCE — it does not stop publishing.
+
+  Know what that costs before attaching one. A sub-minute chart reports
+  BarType 1 / BarInterval 1, exactly like a 1-minute chart, and TsStr has
+  minute resolution — so the wire cannot tell the two apart, and the
+  subscriber cannot either. Its buffer treats same-bar_time frames as
+  refinements of one bar (which is right for a 1-minute chart in "update
+  every tick" mode) and will coalesce a sub-minute chart's distinct bars
+  into one point per minute. The raw frames are on the wire and `ts`
+  separates them, but the reference binding's stored rows will not.
+  Use a tick chart (BarType 0, which the subscriber forwards print by
+  print) or a minute chart. The test needs no version-specific constant, unlike
   BarType_ext — whose values differ across TS releases and have never been
   checked against a live install here. To pin those down, Print(BarType_ext) on
   a known 1-minute chart and on a known 1-second one.
@@ -76,11 +88,11 @@ Inputs:
 
 Variables:
     InitRC(0),
+    Cat(0),
     PubRC(0),
     DllVer(0),
     InitDone(False),
     VersionMismatch(False),
-    UnsupportedLogged(False),
     SubMinuteChart(False),
     AggregatedTickChart(False),
     Sym(""),
@@ -90,28 +102,31 @@ Variables:
   Calling convention is __stdcall (TS default for DefineDLLFunc).
   Keep types in sync with cpp/include/ts2python.h.
 
-  EL_PublishTick and EL_PublishBar kept their names across the protocol
+  EL_PublishTick and EL_PublishBar once kept their names across a protocol
   rewrite but NOT their signatures. Under __stdcall the callee pops the
   arguments, so calling either one with the wrong arity corrupts the stack —
-  TradeStation misbehaves or dies, it does not return an error. What makes
-  that unreachable is the init guard: every publish call below sits behind
-  InitDone, and the DLL this file is built for renamed its init to
-  EL_Init3. An older DLL has no such export, so DefineDLLFunc fails to
-  resolve at verify time and no publish ever runs. Conversely this DLL keeps
-  EL_Init and EL_Init2 as tombstones returning -6, so an older .ELD stops at
-  init too. See contract/wire.md.
+  TradeStation misbehaves or dies, it does not return an error. That is why
+  the publisher this file binds is named EL_Publish rather than reusing
+  either: a name that changed meaning is the hazard, so it did not change
+  meaning.
+
+  Two layers make a mismatch safe. An ABI-1 DLL does not export EL_Publish
+  at all, so DefineDLLFunc fails to resolve at verify time and nothing runs.
+  It DOES export EL_Init3 with this same signature, so init alone would not
+  catch it — the EL_DllVersion latch below is what does, and every publish
+  call sits behind InitDone and VersionMismatch. Conversely this DLL keeps
+  EL_Init, EL_Init2, EL_PublishTick and EL_PublishBar as tombstones
+  returning -6, so an older .ELD stops at its own init. See
+  contract/wire.md.
 
   The quantity parameters are double because EasyLanguage has no 64-bit
   integer type; the DLL casts them to int64 before they reach the wire. }
 DefineDLLFunc: "TS2Python.dll", int, "EL_Init3", LPSTR;
-DefineDLLFunc: "TS2Python.dll", int, "EL_PublishTick",
-    LPSTR, LPSTR, double,
+DefineDLLFunc: "TS2Python.dll", int, "EL_Publish",
+    LPSTR, LPSTR, int, int, int,
+    double, double, double, double,
     double, double, double, double, double,
     double, double;
-DefineDLLFunc: "TS2Python.dll", int, "EL_PublishBar",
-    LPSTR, LPSTR, int, int,
-    double, double, double, double,
-    double, double, double, double, double;
 DefineDLLFunc: "TS2Python.dll", int, "EL_Shutdown";
 DefineDLLFunc: "TS2Python.dll", int, "EL_DllVersion";
 
@@ -139,11 +154,11 @@ If Enabled and InitDone = False Then Begin
     End Else Begin
         InitDone = True;
         DllVer = EL_DllVersion;
-        If DllVer <> 1 Then Begin
+        If DllVer <> 2 Then Begin
             VersionMismatch = True;
             If LogErrors Then
                 Print("[TS2Python] DLL ABI mismatch: EL_DllVersion=", DllVer,
-                      " but this indicator is built for 1.",
+                      " but this indicator is built for 2.",
                       " Publishing stopped on symbol=", GetSymbolName, ".",
                       " Reinstall TS2Python.dll and re-import the .ELD that",
                       " shipped with it — they are versioned together.");
@@ -175,9 +190,10 @@ If Enabled and InitDone and SubMinuteChart = False
     If LogErrors Then
         Print("[TS2Python] sub-minute chart detected on symbol=", GetSymbolName,
               " — two consecutive bars share date=", Date, " time=", Time, ".",
-              " Publishing stopped: these bars carry minute-resolution",
-              " timestamps and would be filed as 1-minute data with nothing",
-              " downstream able to tell. Use minute or daily charts.");
+              " ts_str has minute resolution, so two prints inside one minute",
+              " carry the same string; the DLL's receive-side ts is what",
+              " separates them. Publishing continues — refusing would be",
+              " this script deciding the data is not worth sending.");
 End;
 
 { -- Aggregated tick chart guard. Same shape as the sub-minute one, and for
@@ -203,41 +219,21 @@ If Enabled and InitDone and AggregatedTickChart = False
     If LogErrors Then
         Print("[TS2Python] aggregated tick chart detected on symbol=", GetSymbolName,
               " — bar_interval=", BarInterval, ".",
-              " Publishing stopped: each call carries ", BarInterval,
-              " prints aggregated into one bar, and the tick wire has no way",
-              " to say so — it would be stored as a single trade with the",
-              " volume of ", BarInterval, ". Use a 1-tick chart, or a minute",
-              " chart if you want bars.");
+              " each call carries ", BarInterval,
+              " prints aggregated into one bar. bar_interval goes out on the",
+              " wire, so a consumer can see that; publishing continues.",
+              " This used to stop, back when the tick frame had no field to",
+              " say what the call was — refusing was this script deciding",
+              " the data was not worth sending.");
 End;
 
-{ -- Observation on a refused chart. LogPublish's other two Prints live inside
-     the publish block below, which both guards latch off on the very first
-     bar — so on exactly the chart types nobody has measured yet, the switch
-     documented for measuring them printed nothing at all.
-
-     Only the EasyLanguage words are available here; rc does not exist unless
-     the publish ran. That is enough, because the question a refused chart
-     raises is what the five quantity words return on it — §3.4's table was
-     established from exactly this measurement.
-
-     Gated on the refusal so a supported chart's output is unchanged; it would
-     otherwise print twice per bar. LogPublish defaults False, so opting in is
-     what accepts one line per bar. }
-If Enabled and InitDone and LogPublish
-   and (SubMinuteChart or AggregatedTickChart) Then
-    Print("[TS2Python] refused ", GetSymbolName,
-          " bar_type=", BarType, " bar_interval=", BarInterval,
-          " date=", Date, " time=", Time,
-          " volume=", Volume, " ticks=", Ticks,
-          " upticks=", UpTicks, " downticks=", DownTicks,
-          " openint=", OpenInt);
-
-{ -- Per-bar publish. Dispatch on BarType *and* BarInterval: BarType alone
-     cannot tell a 1-minute chart from a 5-minute one. }
-If Enabled and InitDone and VersionMismatch = False
-   and SubMinuteChart = False
-   and AggregatedTickChart = False Then Begin
+{ -- Publish. One call, every chart, every field. }
+If Enabled and InitDone and VersionMismatch = False Then Begin
     Sym = GetSymbolName;
+    { Category must be assigned to a numeric variable before it can be
+      read — TradeStation's own requirement. Goes out verbatim; this
+      script never branches on it. }
+    Cat = Category;
     { Bar-time string "yyyy-MM/dd-HH:mm:ss" 24-hour (e.g. "2026-04/18-13:30:45").
       Goes on the wire verbatim as ts_str. The authoritative wall-clock ts is
       stamped by the DLL; this string is what the subscriber derives the bar's
@@ -286,8 +282,19 @@ If Enabled and InitDone and VersionMismatch = False
 
       UpTicks / DownTicks carry the up/down share split, which is real
       order-flow information that the old single-field wire had nowhere to
-      put. OpenInt is 0 on stocks and ETFs and only means anything on futures
-      and options. }
+      put.
+
+      OpenInt is NOT open interest on an intraday chart. TradeStation's own
+      table gives it as the DOWN-TICK volume there for futures, and 0 for
+      stocks and forex — and measured on a live install (2026-08-02) it
+      returns DownTicks for every category tried: futures, stock, ETN and
+      stock option alike. Open interest only appears on daily and above, and
+      there it is DownTicks that carries it. Two inversions, not one; both
+      are tabulated in contract/semantics.md 3.4.
+
+      This comment used to claim OpenInt was simply 0 on stocks and ETFs.
+      That was taken from the docs without measuring, and both halves were
+      wrong. }
 
     { InsideBid / InsideAsk are live-quote functions. They return 0 when
       there is no quote to report — during historical replay (chart load,
@@ -299,87 +306,60 @@ If Enabled and InitDone and VersionMismatch = False
       once, in one place, for every caller of the C ABI rather than being
       re-derived by each EL script. See contract/semantics.md §3.
 
-      Ticks only. A bar carries no quote: InsideBid/InsideAsk describe the
-      moment of the call, which on a bar is its last print, not the bar. }
+      They go out on EVERY chart, bars included. This script used to send
+      them only on a tick chart, on the grounds that a live quote describes
+      the moment of the call rather than the bar. That is a statement about
+      what the number MEANS, and this file does not get to make those. }
 
-    If BarType = 0 Then Begin
-        { Tick data series, BarInterval = 1 — one call per trade print,
-          confirmed on a live install. Anything coarser was refused above.
-          TsStr has minute resolution, so the prints inside one minute are
-          indistinguishable here; the DLL's receive-side ts is what separates
-          them, which is why contract/semantics.md §1 makes it the tick's
-          authoritative time rather than ts_str. }
-        PubRC = EL_PublishTick(
-            Sym,
-            TsStr,
-            Close,
-            Volume,
-            Ticks,
-            UpTicks,
-            DownTicks,
-            OpenInt,
-            Insidebid,
-            Insideask);
+    { ONE call, whatever the chart is.
 
-        If LogPublish Then
-            Print("[TS2Python] tick ", TsStr,
-                  " bar_type=", BarType, " bar_interval=", BarInterval,
-                  " px=", Close,
-                  " volume=", Volume, " ticks=", Ticks,
-                  " upticks=", UpTicks, " downticks=", DownTicks,
-                  " openint=", OpenInt,
-                  " bid=", InsideBid, " ask=", InsideAsk,
-                  " rc=", PubRC);
-    End Else Begin
-        { Any bar series. BarType and BarInterval go out as-is; the DLL owns
-          the mapping to a wire timeframe and returns -5 for intervals it
-          cannot name. }
-        PubRC = EL_PublishBar(
-            Sym,
-            TsStr,
-            BarType,
-            BarInterval,
-            Open,
-            High,
-            Low,
-            Close,
-            Volume,
-            Ticks,
-            UpTicks,
-            DownTicks,
-            OpenInt);
+      There used to be two: BarType = 0 took a tick path that sent Close
+      alone and dropped BarType/BarInterval, and everything else took a bar
+      path that sent OHLC and dropped the quote. Both dropped fields the
+      chart had already provided, on this script's own judgement about which
+      numbers were meaningful where — and that judgement happened off the
+      wire, so nothing downstream could see it had been made.
 
-        If LogPublish Then
-            Print("[TS2Python] bar  ", TsStr,
-                  " bar_type=", BarType, " bar_interval=", BarInterval,
-                  " o=", Open, " h=", High, " l=", Low, " c=", Close,
-                  " volume=", Volume, " ticks=", Ticks,
-                  " upticks=", UpTicks, " downticks=", DownTicks,
-                  " openint=", OpenInt,
-                  " rc=", PubRC);
+      TradeStation supplies all of these words on every chart type. A 1-tick
+      series has Open = High = Low = Close; that is a fact worth landing, not
+      a redundancy worth removing. Sending everything is also what survives
+      TradeStation changing what a word means: this file has no opinion to
+      become wrong. }
+    PubRC = EL_Publish(
+        Sym,
+        TsStr,
+        BarType,
+        BarInterval,
+        Cat,
+        Open,
+        High,
+        Low,
+        Close,
+        Volume,
+        Ticks,
+        UpTicks,
+        DownTicks,
+        OpenInt,
+        Insidebid,
+        Insideask);
 
-        If PubRC = -5 and UnsupportedLogged = False Then Begin
-            If LogErrors Then
-                Print("[TS2Python] no wire timeframe for bar_type=", BarType,
-                      " bar_interval=", BarInterval,
-                      " on symbol=", Sym,
-                      " — supported: 1/5/15/30/60 minute and daily.",
-                      " Indicator is idle on this chart");
-            UnsupportedLogged = True;
-        End;
-    End;
+    If LogPublish Then
+        Print("[TS2Python] ", TsStr,
+              " bar_type=", BarType, " bar_interval=", BarInterval,
+              " category=", Cat,
+              " o=", Open, " h=", High, " l=", Low, " c=", Close,
+              " volume=", Volume, " ticks=", Ticks,
+              " upticks=", UpTicks, " downticks=", DownTicks,
+              " openint=", OpenInt,
+              " bid=", InsideBid, " ask=", InsideAsk,
+              " rc=", PubRC);
 
-    { -5 is excluded: the block above already printed it once, with the
-      actionable message. Repeating this generic line would put a second entry
-      in the Print Log for every bar — for every tick in "update every tick"
-      mode — on a chart the DLL has already refused, drowning the errors an
-      operator actually needs to see. That also restores what the header
-      promises: unsupported intervals are "logged once". }
-    If PubRC < 0 and PubRC <> -5 and LogErrors Then
+    If PubRC < 0 and LogErrors Then
         Print("[TS2Python] publish rc=", PubRC,
               " symbol=", Sym,
               " bar_type=", BarType,
               " bar_interval=", BarInterval,
+              " category=", Cat,
               " ts=", TsStr,
               " close=", Close);
 End;

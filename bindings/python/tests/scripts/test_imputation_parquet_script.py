@@ -13,12 +13,12 @@ import verify_parquet as vp
 _ET = ZoneInfo("America/New_York")
 
 # The shape BarWriter puts on disk. The script reads real partitions, so the
-# fixture has to be one — including bucket_start_et, which the output schema
+# fixture has to be one — including bar_time_et, which the output schema
 # carries through untouched.
 BAR_SCHEMA = pa.schema(
     [
-        pa.field("bucket_start", pa.timestamp("us", tz="UTC"), nullable=False),
-        pa.field("bucket_start_et", pa.timestamp("us", tz="America/New_York"), nullable=False),
+        pa.field("bar_time", pa.timestamp("us", tz="UTC"), nullable=False),
+        pa.field("bar_time_et", pa.timestamp("us", tz="America/New_York"), nullable=False),
         pa.field("open", pa.float64(), nullable=False),
         pa.field("high", pa.float64(), nullable=False),
         pa.field("low", pa.float64(), nullable=False),
@@ -28,14 +28,18 @@ BAR_SCHEMA = pa.schema(
         pa.field("el_upticks", pa.int64(), nullable=False),
         pa.field("el_downticks", pa.int64(), nullable=False),
         pa.field("el_open_interest", pa.int64(), nullable=False),
+        pa.field("category", pa.int64(), nullable=False),
+        pa.field("bid", pa.float64(), nullable=True),
+        pa.field("ask", pa.float64(), nullable=True),
+        pa.field("ts", pa.float64(), nullable=True),
     ]
 )
 
 
 def _row(ts, close, open_=None, el_volume=1000):
     return {
-        "bucket_start": ts,
-        "bucket_start_et": ts.astimezone(_ET),
+        "bar_time": ts,
+        "bar_time_et": ts.astimezone(_ET),
         "open": open_ if open_ is not None else close,
         "high": close,
         "low": close,
@@ -46,13 +50,21 @@ def _row(ts, close, open_=None, el_volume=1000):
         "el_upticks": el_volume + 3,
         "el_downticks": el_volume + 5,
         "el_open_interest": 0,
+        "category": 2,
+        "bid": None,
+        "ask": None,
+        "ts": None,
     }
 
 
 def test_build_imputed_row_structure():
     ts = datetime(2026, 4, 18, 13, 31, tzinfo=UTC)
-    row = ip._build_imputed_row(ts, 123.45)
+    row = ip._build_imputed_row(ts, 123.45, {"category": 2})
     assert row["open"] == row["high"] == row["low"] == row["close"] == 123.45
+    # category is the symbol's, copied from the reference row; nothing was
+    # received, so bid/ask/ts are null.
+    assert row["category"] == 2
+    assert row["bid"] is None and row["ask"] is None and row["ts"] is None
     # No trading was observed, so none is recorded. Carrying a neighbour's
     # volume forward would invent activity on top of inventing a price.
     for q in ("el_volume", "el_ticks", "el_upticks", "el_downticks", "el_open_interest"):
@@ -198,7 +210,7 @@ def test_write_atomic_replaces_file(tmp_path):
 
 def _write_partitioned(root: Path, rows) -> Path:
     """A file at the real hive path, so reads can pick up path-derived columns."""
-    path = root / "timeframe=1m" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
+    path = root / "bartype=1" / "interval=1" / "symbol=SPY" / "date=2026-04-18" / "bars.parquet"
     _write_bars(path, rows)
     return path
 

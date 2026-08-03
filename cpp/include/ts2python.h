@@ -72,38 +72,58 @@ TS2P_API int TS2P_CALL EL_Init2(const char* zmq_endpoint, int publisher_version)
 // volume" is the caller's business, not this ABI's — an earlier version made
 // that choice here and had to stamp a publisher-convention version on every
 // payload to say which rule it had applied.
-TS2P_API int TS2P_CALL EL_PublishTick(
+// The one publisher. Everything TradeStation hands the indicator for a data
+// point goes out, whatever kind of chart produced it.
+//
+// There is no tick/bar split any more, and no field is dropped for being
+// "meaningless on this chart type". A tick chart supplies Open/High/Low/Close
+// (equal to each other on a 1-tick series) and a bar chart supplies
+// InsideBid/InsideAsk; both used to be discarded by the indicator, on its own
+// judgement, off the wire. That judgement is the consumer's, and a publisher
+// that bakes in what a number means today breaks the day TradeStation changes
+// what it means.
+//
+// bar_type / bar_interval / category are EasyLanguage's own words for what
+// this chart and symbol are. They travel verbatim; nothing here maps them to
+// a timeframe name or refuses an interval it does not recognise.
+TS2P_API int TS2P_CALL EL_Publish(
     const char* symbol,
-    const char* el_timestamp,   // EL bar time "yyyy-MM/dd-HH:mm:ss" 24-hour in
-                                // America/New_York wall-clock. Passed through
-                                // verbatim as ts_str and NOT parsed here.
-                                // May be NULL / "".
-    double      price,
+    const char* el_timestamp,   // EL Date+Time "yyyy-MM/dd-HH:mm:ss" 24-hour,
+                                // America/New_York wall clock. Verbatim; not
+                                // parsed here. May be NULL / "".
+    int         bar_type,       // EL `BarType`
+    int         bar_interval,   // EL `BarInterval`
+    int         category,       // EL `Category`
+    double      bar_open,       // EL `Open`
+    double      bar_high,       // EL `High`
+    double      bar_low,        // EL `Low`
+    double      bar_close,      // EL `Close`
     double      volume,         // EL `Volume`
     double      ticks,          // EL `Ticks`
     double      upticks,        // EL `UpTicks`
     double      downticks,      // EL `DownTicks`
     double      open_interest,  // EL `OpenInt`
+    double      bid,            // EL `InsideBid`
+    double      ask);           // EL `InsideAsk`
+
+// TOMBSTONES. Both return -6 and publish nothing.
+//
+// They kept their names across a signature change once already, which on
+// __stdcall corrupts the caller's stack rather than returning an error. The
+// names must stay exported so an indicator built against the superseded
+// protocol gets a readable -6 in the Print Log instead of a crash.
+TS2P_API int TS2P_CALL EL_PublishTick(
+    const char* symbol,
+    const char* el_timestamp,
+    double      price,
+    double      volume,
+    double      ticks,
+    double      upticks,
+    double      downticks,
+    double      open_interest,
     double      bid,
     double      ask);
 
-// Publish a complete OHLC bar at any supported interval.
-//
-// bar_type / bar_interval come straight from EasyLanguage's reserved words
-// of the same name. The mapping to a wire timeframe lives here rather than
-// in EL so that every caller of this ABI agrees on it:
-//
-//   bar_type 1 (intraday), bar_interval 1/5/15/30/60  ->  1m/5m/15m/30m/1h
-//   bar_type 2 (daily),    bar_interval 0 or 1        ->  1d
-//
-// TradeStation 10 reports BarInterval = 0 on a daily chart; 1 is what this
-// ABI documented before that was measured. Both mean the same chart.
-//
-// Anything else returns -5 without publishing. Guessing an interval would
-// file bars under the wrong partition, which nothing downstream can detect.
-//
-// No bid / ask: a live-quote function describes the moment of the call,
-// which on a bar is its last print, not the bar.
 TS2P_API int TS2P_CALL EL_PublishBar(
     const char* symbol,
     const char* el_timestamp,
@@ -121,7 +141,7 @@ TS2P_API int TS2P_CALL EL_PublishBar(
 
 TS2P_API int TS2P_CALL EL_Shutdown(void);
 
-// ABI version of this DLL build. Currently 1, paired with wire `proto` 1.
+// ABI version of this DLL build. Currently 2, paired with wire `proto` 2.
 //
 // Takes no arguments, so its signature can never drift — it is the one
 // export an indicator can call unconditionally against any build to ask

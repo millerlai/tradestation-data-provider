@@ -70,6 +70,18 @@ constexpr Quantities kBarQty   = {12000.0, 22500.0, 12000.0, 9000.0, 0.0};
 constexpr Quantities kDailyQty = {88400000.0, 612345.0, 88400000.0, 0.0, 0.0};
 constexpr Quantities kNoQty    = {0.0, 0.0, 0.0, 0.0, 0.0};   // breadth indices
 
+// One publisher, one shape. `category` is EL's `Category` (2 = Stock,
+// 4 = Index). bar_type / bar_interval travel verbatim -- nothing maps them
+// to a timeframe name and nothing refuses an interval.
+static int pub(const char* sym, const char* ts, int bar_type, int bar_interval,
+               int category, double o, double h, double l, double c,
+               const Quantities& q, double bid, double ask) {
+    return EL_Publish(sym, ts, bar_type, bar_interval, category,
+                      o, h, l, c,
+                      q.volume, q.ticks, q.upticks, q.downticks,
+                      q.open_interest, bid, ask);
+}
+
 Options parse_args(int argc, char** argv) {
     Options o;
     for (int i = 1; i < argc; ++i) {
@@ -115,12 +127,9 @@ int run_smoke(const Options& o) {
     const char* ts_el = "2026-04/18-13:30:45";
     for (int i = 0; i < 5; ++i) {
         const char* sym = symbols[i % 3];
-        const int rc = EL_PublishTick(sym, ts_el,
-                                      450.0 + i * 0.1,
-                                      kTickQty.volume, kTickQty.ticks,
-                                      kTickQty.upticks, kTickQty.downticks,
-                                      kTickQty.open_interest,
-                                      449.99, 450.01);
+        const int rc = pub(sym, ts_el, /*bar_type*/ 0, /*bar_interval*/ 1,
+                        /*category*/ 2, 450.0 + i * 0.1, 450.0 + i * 0.1, 450.0 + i * 0.1, 450.0 + i * 0.1,
+                        kTickQty, 449.99, 450.01);
         if (rc != 0) {
             std::fprintf(stderr, "[harness] publish rc=%d on %s\n", rc, sym);
             return 3;
@@ -131,18 +140,11 @@ int run_smoke(const Options& o) {
     // {"kind":"bar"} message on SPY. Reuses the tick's :45 timestamp on
     // purpose — that is what gives the smoke fixture coverage of the
     // floor-to-the-minute rule in semantics.md §2.1.
-    const int rc_bar = EL_PublishBar(
-        "SPY", ts_el,
-        /*bar_type*/     1,
-        /*bar_interval*/ 1,
-        /*open*/  450.10,
-        /*high*/  450.75,
-        /*low*/   449.80,
-        /*close*/ 450.40,
-        kBarQty.volume, kBarQty.ticks,
-        kBarQty.upticks, kBarQty.downticks, kBarQty.open_interest);
+    const int rc_bar = pub("SPY", ts_el, 1, 1,
+                        /*category*/ 2, 450.10, 450.75, 449.80, 450.40,
+                        kBarQty, /*bid*/ 0.0, /*ask*/ 0.0);
     if (rc_bar != 0) {
-        std::fprintf(stderr, "[harness] EL_PublishBar rc=%d\n", rc_bar);
+        std::fprintf(stderr, "[harness] EL_Publish rc=%d\n", rc_bar);
         return 3;
     }
     return 0;
@@ -158,14 +160,11 @@ int run_noquote(const Options& o) {
     std::printf("[harness] noquote: publishing with bid=ask=0 (history-replay shape)\n");
     const char* ts_el = "2026-04/18-13:31:00";
 
-    const int rc_tick = EL_PublishTick("$TICK", ts_el,
-                                       /*price*/ 812.0,
-                                       kNoQty.volume, kNoQty.ticks,
-                                       kNoQty.upticks, kNoQty.downticks,
-                                       kNoQty.open_interest,
-                                       /*bid*/ 0.0, /*ask*/ 0.0);
+    const int rc_tick = pub("$TICK", ts_el, /*bar_type*/ 0, /*bar_interval*/ 1,
+                        /*category*/ 2, 812.0, 812.0, 812.0, 812.0,
+                        kNoQty, 0.0, 0.0);
     if (rc_tick != 0) {
-        std::fprintf(stderr, "[harness] EL_PublishTick rc=%d\n", rc_tick);
+        std::fprintf(stderr, "[harness] EL_Publish rc=%d\n", rc_tick);
         return 3;
     }
 
@@ -173,28 +172,22 @@ int run_noquote(const Options& o) {
     // §3.1 down: a binding that ignores wire nulls entirely still passes,
     // because §3.2 makes it blank $TICK's quotes anyway. SPY has no such
     // fallback — reading 0.0 here is the failure the rule exists to catch.
-    const int rc_spy_tick = EL_PublishTick("SPY", ts_el,
-                                           /*price*/ 450.40,
-                                           kTickQty.volume, kTickQty.ticks,
-                                           kTickQty.upticks, kTickQty.downticks,
-                                           kTickQty.open_interest,
-                                           /*bid*/ 0.0, /*ask*/ 0.0);
+    const int rc_spy_tick = pub("SPY", ts_el, /*bar_type*/ 0, /*bar_interval*/ 1,
+                        /*category*/ 2, 450.40, 450.40, 450.40, 450.40,
+                        kTickQty, 0.0, 0.0);
     if (rc_spy_tick != 0) {
-        std::fprintf(stderr, "[harness] EL_PublishTick rc=%d\n", rc_spy_tick);
+        std::fprintf(stderr, "[harness] EL_Publish rc=%d\n", rc_spy_tick);
         return 3;
     }
 
     // A bar in the same recording. Bars carry no quote at all now, so this
     // frame is here to prove the absence is structural rather than a
     // history-replay artefact a binding might try to fill in.
-    const int rc_bar = EL_PublishBar("SPY", ts_el,
-                                     /*bar_type*/ 1, /*bar_interval*/ 1,
-                                     450.10, 450.75, 449.80, 450.40,
-                                     kBarQty.volume, kBarQty.ticks,
-                                     kBarQty.upticks, kBarQty.downticks,
-                                     kBarQty.open_interest);
+    const int rc_bar = pub("SPY", ts_el, 1, 1,
+                        /*category*/ 2, 450.10, 450.75, 449.80, 450.40,
+                        kBarQty, /*bid*/ 0.0, /*ask*/ 0.0);
     if (rc_bar != 0) {
-        std::fprintf(stderr, "[harness] EL_PublishBar rc=%d\n", rc_bar);
+        std::fprintf(stderr, "[harness] EL_Publish rc=%d\n", rc_bar);
         return 3;
     }
     return 0;
@@ -206,51 +199,36 @@ int run_noquote(const Options& o) {
 // mapped to "60m") reaches a binding before anything notices.
 int run_bars(const Options& o) {
     (void)o;
-    std::printf("[harness] bars: EL_PublishBar across every mappable interval\n");
+    std::printf("[harness] bars: EL_Publish across every BarType/BarInterval\n");
     const char* ts_el = "2026-04/20-13:30:00";
 
     struct Case { int bar_type; int bar_interval; const char* label; };
-    const Case mappable[] = {
+    const Case charts[] = {
         {1,  5,  "5m"},
         {1, 15,  "15m"},
         {1, 30,  "30m"},
         {1, 60,  "1h"},
         {2,  0,  "1d (BarInterval 0 — what TradeStation 10 reports)"},
         {2,  1,  "1d (BarInterval 1 — what the ABI documented first)"},
+        {1,  2,  "2 minute — no longer refused; the wire carries the raw pair"},
+        {3,  1,  "weekly — same"},
+        {2,  2,  "2 day — same"},
     };
-    for (const auto& c : mappable) {
+    for (const auto& c : charts) {
         // BarType 2 is the daily chart, where the reserved words carry the
         // other meaning entirely — see the note on kDailyQty.
         const Quantities& q = (c.bar_type == 2) ? kDailyQty : kBarQty;
-        const int rc = EL_PublishBar("SPY", ts_el, c.bar_type, c.bar_interval,
-                                     450.10, 450.75, 449.80, 450.40,
-                                     q.volume, q.ticks,
-                                     q.upticks, q.downticks,
-                                     q.open_interest);
+        const int rc = pub("SPY", ts_el, c.bar_type, c.bar_interval,
+                        /*category*/ 2, 450.10, 450.75, 449.80, 450.40,
+                        q, /*bid*/ 0.0, /*ask*/ 0.0);
         if (rc != 0) {
-            std::fprintf(stderr, "[harness] EL_PublishBar(%s) rc=%d\n", c.label, rc);
+            std::fprintf(stderr, "[harness] EL_Publish(%s) rc=%d\n", c.label, rc);
             return 3;
         }
     }
 
-    // Unmappable intervals must be refused with -5 and publish nothing. A
-    // 2-minute chart is the realistic case; weekly is the other shape.
-    const Case refused[] = {
-        {1,  2, "2 minute"},
-        {3,  1, "weekly"},
-        {2,  2, "2 day"},   // BarType 2 accepts 0/1 only; 2 is a day multiplier
-    };
-    for (const auto& c : refused) {
-        const int rc = EL_PublishBar("SPY", ts_el, c.bar_type, c.bar_interval,
-                                     1.0, 1.0, 1.0, 1.0,
-                                     1.0, 1.0, 1.0, 1.0, 1.0);
-        if (rc != -5) {
-            std::fprintf(stderr,
-                         "[harness] expected rc=-5 for %s, got %d\n", c.label, rc);
-            return 3;
-        }
-    }
-    std::printf("[harness] bars: 6 published, 3 refused with rc=-5\n");
+    std::printf("[harness] bars: %d published, none refused\n",
+                (int)(sizeof(charts) / sizeof(charts[0])));
     return 0;
 }
 
@@ -274,13 +252,11 @@ int run_session_edges(const Options& o) {
         {"2026-04/20-16:00:00", 452.80, 453.05},   // last  bar, covers [15:59, 16:00)
     };
     for (const auto& e : edges) {
-        const int rc = EL_PublishBar("SPY", e.ts_el, /*bar_type*/ 1, /*bar_interval*/ 1,
-                                     e.open, e.close + 0.20, e.open - 0.15, e.close,
-                                     kBarQty.volume, kBarQty.ticks,
-                                     kBarQty.upticks, kBarQty.downticks,
-                                     kBarQty.open_interest);
+        const int rc = pub("SPY", e.ts_el, 1, 1,
+                        /*category*/ 2, e.open, e.close + 0.20, e.open - 0.15, e.close,
+                        kBarQty, /*bid*/ 0.0, /*ask*/ 0.0);
         if (rc != 0) {
-            std::fprintf(stderr, "[harness] EL_PublishBar(%s) rc=%d\n", e.ts_el, rc);
+            std::fprintf(stderr, "[harness] EL_Publish(%s) rc=%d\n", e.ts_el, rc);
             return 3;
         }
     }
@@ -297,11 +273,9 @@ int run_stress(const Options& o) {
     auto next_tick = clock::now();
 
     while (clock::now() < deadline) {
-        const int rc = EL_PublishTick("SPY", "", 450.0,
-                                      kTickQty.volume, kTickQty.ticks,
-                                      kTickQty.upticks, kTickQty.downticks,
-                                      kTickQty.open_interest,
-                                      449.99, 450.01);
+        const int rc = pub("SPY", "", /*bar_type*/ 0, /*bar_interval*/ 1,
+                        /*category*/ 2, 450.0, 450.0, 450.0, 450.0,
+                        kTickQty, 449.99, 450.01);
         if (rc != 0) ++failed;
         else ++sent;
         next_tick += period;
@@ -322,11 +296,9 @@ int run_multithread(const Options& o) {
         workers.emplace_back([t, &o, &sent, &failed]() {
             std::string sym = "T" + std::to_string(t);
             for (int i = 0; i < o.per_thread; ++i) {
-                const int rc = EL_PublishTick(
-                    sym.c_str(), "",
-                    100.0 + t * 0.01,
-                    10.0, 18.0, 10.0, 8.0, 0.0,
-                    99.99, 100.01);
+                const int rc = pub(sym.c_str(), "", /*bar_type*/ 0, /*bar_interval*/ 1,
+                        /*category*/ 2, 100.0 + t * 0.01, 100.0 + t * 0.01, 100.0 + t * 0.01, 100.0 + t * 0.01,
+                        kTickQty, 99.99, 100.01);
                 if (rc != 0) failed.fetch_add(1, std::memory_order_relaxed);
                 else sent.fetch_add(1, std::memory_order_relaxed);
             }
@@ -346,8 +318,8 @@ int main(int argc, char** argv) {
     const Options o = parse_args(argc, argv);
 
     std::printf("[harness] dll version = %d\n", EL_DllVersion());
-    if (EL_DllVersion() != 1) {
-        std::fprintf(stderr, "[harness] expected ABI 1, got %d\n", EL_DllVersion());
+    if (EL_DllVersion() != 2) {
+        std::fprintf(stderr, "[harness] expected ABI 2, got %d\n", EL_DllVersion());
         return 1;
     }
 

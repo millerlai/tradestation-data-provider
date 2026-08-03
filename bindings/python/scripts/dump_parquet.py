@@ -4,10 +4,10 @@
 Usage:
   python scripts/dump_parquet.py path/to/file.parquet
   python scripts/dump_parquet.py file.parquet --limit 20
-  python scripts/dump_parquet.py file.parquet --columns bucket_start,close,volume
+  python scripts/dump_parquet.py file.parquet --columns bar_time,close,volume
   python scripts/dump_parquet.py file.parquet --head 5 --tail 5
   python scripts/dump_parquet.py file.parquet --schema-only
-  python scripts/dump_parquet.py file.parquet --where "bucket_start >= '2026-04-17T14:00'"
+  python scripts/dump_parquet.py file.parquet --where "bar_time >= '2026-04-17T14:00'"
 """
 
 from __future__ import annotations

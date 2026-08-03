@@ -1,4 +1,4 @@
-"""Callback sink — dispatch ticks/bars to user-registered Python functions.
+"""Callback sink — dispatch points to user-registered Python functions.
 
 The runtime declares the sink in ``sinks.yaml``; user code then looks
 it up by name and registers callbacks dynamically::
@@ -11,7 +11,7 @@ it up by name and registers callbacks dynamically::
         print(bar.symbol, bar.close)
 
     handle = sink.on("SPY", "bar", my_bar_handler)
-    sink.on_any("tick", lambda t: log_tick(t))
+    sink.on_any("bar", lambda b: log_point(b))
 
     # Later:
     sink.off(handle)               # remove specific handler
@@ -35,15 +35,13 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from tradestation_data.domain.bar import Bar
-from tradestation_data.domain.tick import Tick
 from tradestation_data.sinks.base import BaseSink
 
 log = logging.getLogger(__name__)
 
-EventKind = Literal["tick", "bar"]
-TickCallback = Callable[[Tick], None]
+EventKind = Literal["bar"]
 BarCallback = Callable[[Bar], None]
-AnyCallback = TickCallback | BarCallback
+AnyCallback = BarCallback
 
 
 # Module-level registry of CallbackSink instances keyed by their
@@ -102,7 +100,7 @@ class CallbackSink(BaseSink):
     """Dispatch ticks/bars to dynamically registered Python callbacks.
 
     Thread-safety: ``on`` / ``on_any`` / ``off`` use an internal lock
-    so user code can register from any thread. Dispatch (``on_tick`` /
+    so user code can register from any thread. Dispatch (``on_bar``)
     ``on_bar``) takes the same lock briefly to snapshot the callback
     list, then releases it — callbacks themselves run unlocked so a
     slow callback does not block registration.
@@ -111,7 +109,6 @@ class CallbackSink(BaseSink):
     def __init__(self, *, name: str) -> None:
         self.name = name
         self._lock = threading.Lock()
-        self._tick_handlers: list[_Entry] = []
         self._bar_handlers: list[_Entry] = []
         self._id_counter = itertools.count(1)
         with _REGISTRY_LOCK:
@@ -127,7 +124,9 @@ class CallbackSink(BaseSink):
     ) -> Handle:
         """Register ``fn`` to fire when events of ``kind`` arrive for ``symbol``.
 
-        ``kind`` is ``"tick"`` or ``"bar"``. Returns a :class:`Handle`
+        ``kind`` is ``"bar"`` — the only kind there is, kept as an
+        argument so existing registrations keep working. Returns a
+        :class:`Handle`
         that can be passed to :meth:`off` to deregister.
         """
         return self._register(symbol=symbol, kind=kind, fn=fn)
@@ -153,8 +152,8 @@ class CallbackSink(BaseSink):
         kind: EventKind,
         fn: AnyCallback,
     ) -> Handle:
-        if kind not in ("tick", "bar"):
-            raise ValueError(f"kind must be 'tick' or 'bar', got {kind!r}")
+        if kind != "bar":
+            raise ValueError(f"kind must be 'bar' — the only kind there is — got {kind!r}")
         if not callable(fn):
             raise TypeError(f"callback must be callable, got {type(fn).__name__}")
         handle = Handle(id=next(self._id_counter), kind=kind, symbol=symbol)
@@ -164,28 +163,9 @@ class CallbackSink(BaseSink):
         return handle
 
     def _handlers_for(self, kind: EventKind) -> list[_Entry]:
-        return self._tick_handlers if kind == "tick" else self._bar_handlers
+        return self._bar_handlers
 
     # ---- Sink protocol ---------------------------------------------------
-
-    def on_tick(self, tick: Tick) -> None:
-        with self._lock:
-            entries = list(self._tick_handlers)
-        for entry in entries:
-            if entry.symbol is not None and entry.symbol != tick.symbol:
-                continue
-            try:
-                entry.fn(tick)  # type: ignore[arg-type]
-            except Exception:
-                log.exception(
-                    "callback_failed",
-                    extra={
-                        "sink": self.name,
-                        "kind": "tick",
-                        "symbol": tick.symbol,
-                        "handle_id": entry.handle.id,
-                    },
-                )
 
     def on_bar(self, bar: Bar) -> None:
         with self._lock:
@@ -194,7 +174,7 @@ class CallbackSink(BaseSink):
             if entry.symbol is not None and entry.symbol != bar.symbol:
                 continue
             try:
-                entry.fn(bar)  # type: ignore[arg-type]
+                entry.fn(bar)
             except Exception:
                 log.exception(
                     "callback_failed",
@@ -208,7 +188,6 @@ class CallbackSink(BaseSink):
 
     def close(self) -> None:
         with self._lock:
-            self._tick_handlers.clear()
             self._bar_handlers.clear()
         with _REGISTRY_LOCK:
             # If our entry in the registry still points to us, drop it.

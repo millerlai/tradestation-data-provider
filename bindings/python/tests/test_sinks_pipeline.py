@@ -3,33 +3,15 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-import pytest
-
 from tradestation_data.domain.bar import Bar
-from tradestation_data.domain.tick import Tick
 from tradestation_data.sinks.base import BaseSink, Sink
 from tradestation_data.sinks.pipeline import SinkPipeline
-
-
-def _tick(symbol: str = "SPY") -> Tick:
-    return Tick(
-        symbol=symbol,
-        timestamp=datetime(2026, 4, 20, 13, 30, tzinfo=UTC),
-        price=450.0,
-        el_volume=100,
-        el_ticks=200,
-        el_upticks=100,
-        el_downticks=100,
-        el_open_interest=0,
-        bid=None,
-        ask=None,
-    )
 
 
 def _bar(symbol: str = "SPY") -> Bar:
     return Bar(
         symbol=symbol,
-        bucket_start=datetime(2026, 4, 20, 13, 30, tzinfo=UTC),
+        bar_time=datetime(2026, 4, 20, 13, 30, tzinfo=UTC),
         open=450.0,
         high=451.0,
         low=449.5,
@@ -39,6 +21,9 @@ def _bar(symbol: str = "SPY") -> Bar:
         el_upticks=1000,
         el_downticks=1000,
         el_open_interest=0,
+        bar_type=1,
+        bar_interval=1,
+        category=2,
     )
 
 
@@ -47,14 +32,10 @@ class _RecordingSink(BaseSink):
 
     def __init__(self, name: str = "rec") -> None:
         self.name = name
-        self.ticks: list[Tick] = []
         self.bars: list[Bar] = []
         self.flush_calls = 0
         self.close_calls = 0
         self._wants_flush = False
-
-    def on_tick(self, tick: Tick) -> None:
-        self.ticks.append(tick)
 
     def on_bar(self, bar: Bar) -> None:
         self.bars.append(bar)
@@ -79,13 +60,10 @@ def test_pipeline_broadcasts_to_every_sink_in_declaration_order() -> None:
     b = _RecordingSink("b")
     pipe = SinkPipeline([a, b])
 
-    t = _tick()
     bar = _bar()
-    pipe.on_tick(t)
     pipe.on_bar(bar)
 
-    assert a.ticks == [t] and a.bars == [bar]
-    assert b.ticks == [t] and b.bars == [bar]
+    assert a.bars == [bar]
     assert list(pipe) == [a, b]
     assert len(pipe) == 2
 
@@ -96,9 +74,6 @@ def test_pipeline_isolates_per_sink_exception(caplog) -> None:
     class _Boom(BaseSink):
         name = "boom"
 
-        def on_tick(self, tick: Tick) -> None:
-            raise RuntimeError("nope")
-
         def on_bar(self, bar: Bar) -> None:
             raise RuntimeError("nope")
 
@@ -107,13 +82,10 @@ def test_pipeline_isolates_per_sink_exception(caplog) -> None:
     pipe = SinkPipeline([boom, after])
 
     with caplog.at_level(logging.ERROR):
-        pipe.on_tick(_tick())
         pipe.on_bar(_bar())
 
-    assert len(after.ticks) == 1
     assert len(after.bars) == 1
     msgs = [r.message for r in caplog.records]
-    assert any("sink_on_tick_failed" in m for m in msgs)
     assert any("sink_on_bar_failed" in m for m in msgs)
 
 
@@ -191,30 +163,22 @@ def test_should_flush_exception_is_isolated(caplog) -> None:
 
 def test_empty_pipeline_is_safe_no_op() -> None:
     pipe = SinkPipeline()
-    pipe.on_tick(_tick())
     pipe.on_bar(_bar())
     assert pipe.has_pending_flush() is False
     pipe.flush_pending()
     pipe.close()
 
 
-@pytest.mark.parametrize("kind", ["tick", "bar"])
-def test_pipeline_logs_include_sink_name_and_symbol(kind: str, caplog) -> None:
+def test_pipeline_logs_include_sink_name_and_symbol(caplog) -> None:
     class _Boom(BaseSink):
         name = "named_boom"
-
-        def on_tick(self, tick: Tick) -> None:
-            raise RuntimeError("nope")
 
         def on_bar(self, bar: Bar) -> None:
             raise RuntimeError("nope")
 
     pipe = SinkPipeline([_Boom()])
     with caplog.at_level(logging.ERROR):
-        if kind == "tick":
-            pipe.on_tick(_tick("AAPL"))
-        else:
-            pipe.on_bar(_bar("AAPL"))
+        pipe.on_bar(_bar("AAPL"))
 
     rec = next(r for r in caplog.records if "sink_on" in r.message)
     assert getattr(rec, "sink", None) == "named_boom"
