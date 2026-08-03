@@ -81,11 +81,11 @@ def _read_file(path: Path) -> pa.Table:
     """The file's own columns, without the ones the path implies.
 
     `pq.read_table()` on a single file under `bartype=/interval=/symbol=/date=` runs
-    hive discovery and hands back those three as real columns — 14, not the 11
+    hive discovery and hands back those four as real columns — 19, not the 15
     BAR_SCHEMA declares. Building an output schema from that produced a
-    15-column table while `_build_imputed_row` supplies 12 keys, so every
-    invented bar was written with NULL `timeframe`, `symbol` and `date` next
-    to real values on the rows that came off the wire.
+    20-column table while `_build_imputed_row` supplies 16 keys, so every
+    invented bar was written with NULL `bartype`, `interval`, `symbol` and
+    `date` next to real values on the rows that came off the wire.
 
     `ParquetFile.read()` reads the file and nothing else. `bar_writer._rewrite`
     already does this for the same reason.
@@ -103,8 +103,8 @@ def _passthrough_table(path: Path) -> pa.Table:
     answer (semantics.md §2.4).
 
     The column is appended rather than the file copied byte-for-byte so every
-    file under --output carries one schema. A tree mixing 11-column and
-    12-column files puts the reader back on the schema-drift trap this
+    file under --output carries one schema. A tree mixing 15-column and
+    16-column files puts the reader back on the schema-drift trap this
     protocol exists to remove.
     """
     table = _read_file(path)
