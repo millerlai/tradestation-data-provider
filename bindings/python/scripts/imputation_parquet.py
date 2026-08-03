@@ -60,6 +60,7 @@ from verify_parquet import (
     _parse_date,
     _parse_hhmm,
     _resolve_tz,
+    _validate_intraday_bar_args,
 )
 
 METHODS = ("ffill", "bfill", "interpolate")
@@ -295,21 +296,7 @@ def main() -> int:
     args = ap.parse_args()
 
     try:
-        if args.bar_interval < 1:
-            print(f"error: --bar-interval must be >= 1, got {args.bar_interval}", file=sys.stderr)
-            return 2
-        if args.bar_type != 1:
-            print(
-                f"error: --bar-type {args.bar_type} is not supported here. This tool "
-                f"derives an expected per-day bar grid, which only exists for intraday "
-                f"minute charts (BarType 1). A daily store (BarType 2) is FLAT -- one "
-                f"file per symbol, no date= level -- so this tool's date-partitioned "
-                f"paths would read every day as FILE_MISSING and its minute grid would "
-                f"invent hundreds of 'missing' bars. A day with no daily bar is visible "
-                f"as a missing row in bars.parquet itself.",
-                file=sys.stderr,
-            )
-            return 2
+        _validate_intraday_bar_args(args.bar_interval, args.bar_type)
         tf_label = f"bartype={args.bar_type}/interval={args.bar_interval}"
         tf_sec = args.bar_interval * 60
         start_time = _parse_hhmm(args.start_time)

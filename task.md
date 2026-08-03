@@ -28,7 +28,7 @@ decision first. The two that do are tracked in `TODO_ISSUES.md` instead.
 | T8 | `bindings/python/tests/test_ingestion_runtime.py:118` | Comment still describes removed left-edge shift | ✅ | `test(runtime): fix stale left-edge comments in test_ingestion_runtime.py` |
 | T9 | `bindings/python/src/tradestation_data/sinks/callback.py:100` | Docstring has garbled duplicated `on_bar` fragment | ✅ | `docs(sinks): fix garbled CallbackSink docstring left by the on_tick removal` |
 | T10 | `bindings/python/scripts/imputation_parquet.py:83` | Docstring column counts stale after schema grew (4th partition level + 4 new columns) | ✅ | `docs(scripts): fix stale column counts in imputation_parquet.py docstrings` |
-| T11 | `bindings/python/scripts/imputation_parquet.py:298` | `--bar-interval`/`--bar-type` validation block duplicated instead of imported from `verify_parquet.py` | ⬜ | |
+| T11 | `bindings/python/scripts/imputation_parquet.py:298` | `--bar-interval`/`--bar-type` validation block duplicated instead of imported from `verify_parquet.py` | ✅ | `refactor(scripts): share the intraday bar-arg validation instead of duplicating it` |
 
 Legend: ⬜ not started · 🔄 in progress · ✅ done
 

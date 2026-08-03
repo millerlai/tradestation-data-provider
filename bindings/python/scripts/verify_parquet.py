@@ -84,6 +84,27 @@ def _resolve_tz(name: str) -> ZoneInfo:
         raise ValueError(f"unknown timezone: {name!r}") from e
 
 
+def _validate_intraday_bar_args(bar_interval: int, bar_type: int) -> None:
+    """Raise ValueError unless these args support an expected per-day grid.
+
+    Shared by verify_parquet.py and imputation_parquet.py: both derive an
+    expected intraday minute grid via `_expected_bars`, and neither supports
+    anything else.
+    """
+    if bar_interval < 1:
+        raise ValueError(f"--bar-interval must be >= 1, got {bar_interval}")
+    if bar_type != 1:
+        raise ValueError(
+            f"--bar-type {bar_type} is not supported here. This tool "
+            f"derives an expected per-day bar grid, which only exists for intraday "
+            f"minute charts (BarType 1). A daily store (BarType 2) is FLAT -- one "
+            f"file per symbol, no date= level -- so this tool's date-partitioned "
+            f"paths would read every day as FILE_MISSING and its minute grid would "
+            f"invent hundreds of 'missing' bars. A day with no daily bar is visible "
+            f"as a missing row in bars.parquet itself."
+        )
+
+
 def _expected_bars(
     day: date,
     start: time,
@@ -326,21 +347,7 @@ def main() -> int:
     args = ap.parse_args()
 
     try:
-        if args.bar_interval < 1:
-            print(f"error: --bar-interval must be >= 1, got {args.bar_interval}", file=sys.stderr)
-            return 2
-        if args.bar_type != 1:
-            print(
-                f"error: --bar-type {args.bar_type} is not supported here. This tool "
-                f"derives an expected per-day bar grid, which only exists for intraday "
-                f"minute charts (BarType 1). A daily store (BarType 2) is FLAT -- one "
-                f"file per symbol, no date= level -- so this tool's date-partitioned "
-                f"paths would read every day as FILE_MISSING and its minute grid would "
-                f"invent hundreds of 'missing' bars. A day with no daily bar is visible "
-                f"as a missing row in bars.parquet itself.",
-                file=sys.stderr,
-            )
-            return 2
+        _validate_intraday_bar_args(args.bar_interval, args.bar_type)
         tf_label = f"bartype={args.bar_type}/interval={args.bar_interval}"
         tf_sec = args.bar_interval * 60
         start_time = _parse_hhmm(args.start_time)
