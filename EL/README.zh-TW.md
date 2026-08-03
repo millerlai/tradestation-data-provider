@@ -135,40 +135,47 @@ subscriber 升級時沒有任何東西會更新它。
 （[`../contract/semantics.md`](../contract/semantics.md) §3.4），而不是本檔案代為
 決定。想要總成交股數的 consumer：intraday 取 `el_ticks`，日線取 `el_volume`。
 
-`OpenInt` 是為了完整性而納入。它在股票與 ETF 上恆為 0，只在期貨與選擇權上有意義。
+`OpenInt` 在盤中圖上**不是**未平倉量。實測 SPY、`@ES`、`VXX` 與一檔 SPY 選擇權
+（2026-08-02），以及之後收集的每一個分區：**`el_open_interest` 在每一列盤中資料上
+都等於 `el_downticks`**，不分 category —— 期貨也一樣，而真正的未平倉量會大上好幾個
+數量級。未平倉量只出現在日線以上，而且在那裡是 `DownTicks` 帶著它。兩個反轉、不是
+一個，兩者都列在 [`../contract/semantics.md`](../contract/semantics.md) §3.4。
 
-### N-tick 圖為何被拒收
+### N-tick 圖實際送出什麼
 
 tick series 只有在 `BarInterval = 1` 時才是「一次呼叫一筆成交」。100-tick 圖的每次
 呼叫帶的是一整根 bar：`Close` 是那一百筆的最後一筆，而兩個量能欄位依上表的 intraday
 規則涵蓋全部一百筆 —— `Ticks` 是它們的總成交股數、`Volume` 是其中的上漲部分。兩者
-都不是「100」；intraday 根本沒有任何保留字提供筆數。`bar_interval` 現在會上 wire，說明這次呼叫；舊 wire 沒有欄位能
-說明這次呼叫是一根 bar，於是 Tier 1 會把它記成**單一筆成交，價格是其中一筆、成交量
-卻是一百筆的和** —— 成交量欄位錯約兩個數量級，而且無人能察覺。
+都不是「100」；intraday 根本沒有任何保留字提供筆數。
 
-與秒級圖不同的是，判斷所需的資訊還在：`BarInterval` 直接說明一次呼叫涵蓋幾筆。
+**沒有任何東西被拒收。** `bar_interval` 會上 wire，明確說出這次呼叫涵蓋幾筆，消費端
+看得到自己拿到的是什麼。這支 indicator 以前會在這種圖上停止送出 —— 那是舊 tick frame
+沒有欄位能表達「這次呼叫是一根聚合 bar」的年代，消費端會把它存成「單一筆成交，價格
+是其中一筆、成交量卻是一百筆的和」，成交量錯約兩個數量級而且無人能察覺。現在欄位存在
+了，判斷就該留給下游。它仍然會在 Print Log announce 一次。
+
 實機量測：100-tick 圖在 init 時回報 `bar_interval=100.00`、`Ticks = 760951`
 （那一百筆的成交股數，不是 `100`），1-tick 圖回報 `1.00` 並且每筆成交呼叫一次
 `EL_Publish`。
 
-另外這也表示 `TsStr` 無法區分同一分鐘內的多筆成交：1-tick 圖會連送八次、全部標記
-`19:48:00`，因為 `Time` 只有分鐘解析度。真正區分它們的是 DLL 的收訊端 `ts`，這正是
-[`../contract/semantics.md`](../contract/semantics.md) §1 規定 tick 時間取自 `ts`
-而非 `ts_str` 的原因。
+另外這也表示 `TsStr` 無法區分同一**秒**內的多筆成交：1-tick 圖會連送多次、全部標記
+同一秒。真正區分它們的是 DLL 的收訊端 `ts`，這正是
+[`../contract/semantics.md`](../contract/semantics.md) §1 規定 tick 的排序依據取自
+`ts` 而非 `ts_str` 的原因。
 
-### 秒級圖表為何要另外擋
+### 秒級圖表：那個 latch 是什麼、不是什麼
 
-`BarType` 與 `BarInterval` **分不出** 1 秒圖與 1 分鐘圖 —— 兩者都可能回報 `1` / `1`。
-若照 1 分鐘送出，那些 bar 會填進 `bartype=1/interval=1/` 分區，而且下游查不出來：
-`TsStr` 由 `Time` 組出，而 `Time` 只有分鐘解析度，**秒在離開 indicator 之前就沒了**。
+`BarType` **分得出**秒級圖與分鐘圖：TradeStation 對 Second chart 回報
+`BarType = 14`，`BarInterval` 的單位是秒。本檔案早先的版本宣稱兩者都回報 `1` / `1`
+因此無法分辨 —— 那是沒有實測就寫下的，是錯的。
 
-擋法不依賴任何版本相關常數：分鐘圖的 `Date` / `Time` 每根 bar 都前進，秒級圖表則會在
-同一分鐘內重複。Indicator 偵測到連續兩根 bar 的 `Date` 與 `Time` 相同（且 `BarType = 1`，
-排除本來就一分鐘多筆的 tick series）就閂住並停止送出。
+Indicator 裡的 sub-minute latch 現在**只是提示**。它在連續兩根 bar 重複同一個分鐘
+解析度的 `Date` / `Time` 時觸發，告訴你這張圖比一分鐘細 —— 但那已經不代表有東西會
+遺失，因為 `TsStr` 由 `BarDateTime` 組出、帶真正的秒數。它不會停止送出，本來也不
+應該停。
 
-> TradeStation 另有 `BarType_ext` 可區分秒級與分鐘級 intraday，但各版本取值不同、
-> 未對實機確認，因此**不用**它當判斷依據。若要釘出那些數值：在已知的 1 分鐘圖與
-> 1 秒圖上各 `Print(BarType_ext)` 一次。
+> TradeStation 另有 `BarType_ext`，但各版本取值不同、未對實機確認，因此這裡完全不用
+> 它。若要釘出那些數值：在已知的 1 分鐘圖與 1 秒圖上各 `Print(BarType_ext)` 一次。
 
 ## 設計約束
 
@@ -179,8 +186,9 @@ tick series 只有在 `BarInterval = 1` 時才是「一次呼叫一筆成交」�
   非 live mode、breadth symbol）它們回傳 0，由 DLL 統一正規化為 JSON `null` ——
   集中在 C ABI 一處，所有 EL 呼叫端才會一致。見
   [`../contract/semantics.md`](../contract/semantics.md) §3.1。
-  **只在 tick 上送。** Bar 不帶報價：即時報價函式描述的是呼叫當下那一刻，在 bar 上
-  就是它的最後一筆成交，不是整根 bar。
+  **每一種資料點都送，bar 也不例外。** Bar 以前不帶報價，理由是即時報價函式描述的
+  是呼叫當下那一刻、而非整根 bar。那句話是對的，但那不是這條傳輸鏈該做的判斷 ——
+  跟移除硬編碼 index symbol 清單是同一個道理。
 - 五個量值保留字不做轉換也不做挑選，一律原樣轉發。任何詮釋都屬於 consumer。
 
 ## 盤前資料
