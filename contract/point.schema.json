@@ -47,15 +47,15 @@
     },
     "ts_str": {
       "type": "string",
-      "description": "EasyLanguage Date+Time, yyyy-MM/dd-HH:mm:ss (24-hour), America/New_York wall clock. AUTHORITATIVE for bar_time: parse as ET, convert to UTC, floor to the minute, store it. It is the point's CLOSE time and lands that way -- no shift onto a left edge, no grid alignment. See semantics.md 2."
+      "description": "EasyLanguage BarDateTime, yyyy-MM/dd-HH:mm:ss (24-hour), America/New_York wall clock. AUTHORITATIVE for bar_time: parse as ET, convert to UTC, store it -- SECONDS INCLUDED. Do NOT floor to the minute: BarDateTime carries real seconds (Date/Time do not), and flooring collapses a sub-minute chart's bars onto one bar_time, where the consumer's intra-bar buffer reads the second as an update of the first and drops it. It is the point's CLOSE time and lands that way -- no shift onto a left edge, no grid alignment. See semantics.md 1.3 and 2.1."
     },
     "bar_type": {
       "type": "integer",
-      "description": "EasyLanguage BarType, verbatim. 0 = tick series, 1 = intraday minutes, 2 = daily. Nothing maps it to a timeframe name."
+      "description": "EasyLanguage BarType, verbatim. TradeStation's own values: 0 tick, 1 minute, 2 daily, 3 weekly, 4 monthly, 5 point&figure, 8 kagi, 9 kase, 10 line break, 11 momentum, 12 range, 13 renko, 14 second, 15 renko custom, 16 renko mean. Nothing maps it to a timeframe name and no value is refused."
     },
     "bar_interval": {
       "type": "integer",
-      "description": "EasyLanguage BarInterval, verbatim. For BarType 1 this is the minutes. No combination is refused."
+      "description": "EasyLanguage BarInterval, verbatim. Its unit follows bar_type: minutes for BarType 1, seconds for BarType 14, prints for BarType 0. No combination is refused."
     },
     "category": {
       "type": "integer",

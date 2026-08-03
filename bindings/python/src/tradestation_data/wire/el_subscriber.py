@@ -442,7 +442,7 @@ class TradeStationELProvider:
                 "ts_str_absent_using_recv_clock",
                 extra={"symbol": symbol},
             )
-            bar_time = _floor_to_minute_utc(float(data["ts"]))
+            bar_time = _recv_clock_utc(float(data["ts"]))
 
         # The timestamp is EasyLanguage's, verbatim. Nothing here shifts it or
         # snaps it to a grid — see the Bar docstring and semantics.md §2 for
@@ -495,9 +495,18 @@ def _quote_or_none(value: object) -> float | None:
     return q
 
 
-def _floor_to_minute_utc(epoch_seconds: float) -> datetime:
-    ts = datetime.fromtimestamp(epoch_seconds, tz=UTC)
-    return ts.replace(second=0, microsecond=0)
+def _recv_clock_utc(epoch_seconds: float) -> datetime:
+    """The `ts_str`-absent fallback: the receive clock, seconds and all.
+
+    This used to floor to the minute, matching the old §2.1. Keeping that
+    after §2.1 reversed would make the two paths answer the same question
+    differently — and in the worse direction: on a sub-minute chart,
+    flooring is what collapses a minute's bars onto one `bar_time`, which
+    is exactly what `_handle_provider_bar`'s buffer then reads as an
+    intra-bar update and drops. The fallback is degraded already; there is
+    no reason to degrade it further.
+    """
+    return datetime.fromtimestamp(epoch_seconds, tz=UTC)
 
 
 def _parse_el_str_as_et(s: str) -> datetime | None:
