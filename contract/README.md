@@ -22,7 +22,8 @@
 
 ## 只有一個版本
 
-payload 的版本欄位是 `proto`，目前恆為 `1`，**沒有需要相容的舊版本**。
+payload 的版本欄位是 `proto`，目前恆為 `2`，**沒有需要相容的舊版本**。
+DLL ABI（`EL_DllVersion()`）同樣是 `2`，兩者成對升級。
 
 前一代的 wire 用 `v` 並演進到 `4`，同時維護四份 envelope 與一份相容矩陣。那套機制存在的
 理由是 publisher 會在 wire 之外對數值做語意加工（依圖表型態在 EasyLanguage 的 `Volume`

@@ -1,0 +1,315 @@
+# Plan — resolving spec-vs-code drift in `contract/`
+
+> **Status** (2026-08-03): **all four resolved.**
+>
+> | | Item | Outcome |
+> |---|---|---|
+> | D1 | `breadth` session reset | **Code was wrong** — fixed in `MarketSnapshot.on_bar` with 3 new tests. Contract §4.1 was right and is unchanged. |
+> | D2 | index/breadth quote list | **Contract was wrong** — §3.2's mandate deleted, kept as non-normative history in §3.3. No fixture change needed. |
+> | D3 | ABI matrix missing export | **Fixed** in `contract/wire.md` + both architecture docs |
+> | D4 | `proto`/ABI still labelled 1 | **Fixed** in `README.md`, `README.zh-TW.md`, `contract/README.md` |
+>
+> Two of the four went the opposite way from this plan's first guess. D1's original
+> recommendation was to change the contract to match the code; the code turned out
+> to be the wrong side. D2 was expected to require hand-re-deriving fixture
+> expectations; they were already correct.
+> **Scope**: changes to `contract/` (the SSoT) and, for D1, possibly to
+> `bindings/python/` code. **Nothing in this plan is a documentation-only edit**
+> — that is exactly why it was split out of the `docs/architecture.md` fixes
+> landed alongside it.
+> **Origin**: an xhigh code review of PR #35 (`docs/architecture.md` +
+> `docs/architecture.zh-TW.md`) found 15 confirmed defects. Twelve were errors in
+> the new documents and were fixed directly. The four below are not: the document
+> faithfully reproduced `contract/`, and `contract/` is what disagrees with the
+> code.
+
+## Why these are not doc fixes
+
+`contract/` is the language-neutral SSoT. `contract/README.md` states the change
+order explicitly: **spec first, then `cpp/`, then each binding.** A descriptive
+document may not quietly "correct" the spec by describing the code instead — that
+produces two disagreeing normative sources, which is the failure mode
+`contract/fixtures/` exists to prevent.
+
+Each item below therefore needs a **decision on which side is wrong** before any
+edit. `contract/fixtures/README.md` is blunt about this: "當 conformance 失敗，
+先決定哪一邊錯了再動手 —— 至今兩次都是規格錯的." Twice so far the spec was the
+wrong side; that is not a reason to assume it is again.
+
+---
+
+## D1 — `breadth` session reset — ✅ RESOLVED (code fixed)
+
+**Outcome: the contract was right and the code was wrong.** This plan originally
+recommended Option A (rewrite §4.1 to describe the 04:00 behaviour). That was the
+wrong call, for three reasons found while explaining the item in detail:
+
+1. **No test pinned the distinction.** `test_session_reset_clears_deque_across_session_boundary`
+   uses bars a whole day apart, which passes under both 04:00 and 09:30 semantics.
+   The 04:00 behaviour was an untested side effect, not a deliberate contract.
+2. **`session.py`'s own module docstring says "reset at the session open"** —
+   the stated intent pointed at 09:30 all along.
+3. **The resulting behaviour inverted the policy's purpose.** Because the eviction
+   path was skipped for `session_reset` symbols, a breadth index retained *all*
+   pre-market bars (bounded only by the 100-bar deque) while SPY kept 60 minutes.
+   The symbols whose pre-market data is meaningless kept more of it.
+
+**What changed** (`bindings/python/`):
+
+- `MarketSnapshot.on_bar` now performs a second, separate clear when the first
+  regular-session bar arrives, gated on `policy.session_reset` and latched by
+  `session_open_bar is None` so it fires once per session. `bar_time` is a CLOSE,
+  so the comparison is strictly greater than the open — a bar closing exactly at
+  09:30 is the last pre-market bar and goes with the rest.
+- `SessionPolicy` and the `session.py` module docstring now spell out that 04:00
+  and 09:30 are two different boundaries and that a `session_reset` symbol gets
+  both clears. `for_category` is unchanged.
+- Three new tests: the pre-market-drop repro, the exactly-09:30 edge case, and one
+  asserting the rule reaches every breadth symbol via `category` rather than a
+  symbol list. Two existing tests had their first bar moved from 09:30 to 09:31 —
+  their intent (within-session retention, cross-day reset) is unrelated to the
+  open boundary, and their old expectations encoded the bug.
+
+**`contract/semantics.md` §4.1 was not changed** — its normative claim ("09:30 ET
+清空 / 盤前保留：無") is now simply true. One optional clarification remains: §4.1
+does not mention the 04:00 rollover clear, so a second binding could implement only
+the 09:30 clear and carry yesterday's bars through pre-market. Worth a sentence,
+but it is an addition rather than a correction.
+
+<details>
+<summary>Original analysis (kept for the record)</summary>
+
+### The contradiction as originally found
+
+### The contradiction
+
+| Source | Claim |
+| --- | --- |
+| `contract/semantics.md` §4.1 | `breadth` → "**每日重置**（09:30 ET 清空）", 盤前保留 = 無 |
+| `aggregation/snapshot.py::MarketSnapshot.on_bar` | Clears `recent_bars` only when `session_date_of(bar.bar_time) != st.session_date` |
+| `aggregation/session.py` | `session_date_of` rolls at `PRE_SESSION_CUTOFF_LOCAL = time(4, 0)`, not 09:30 |
+| `aggregation/session.py::SessionPolicy.for_category` | `breadth` → `pre_market_window_minutes=None`, documented in-file as "None = unlimited pre-market" |
+| `snapshot.py` eviction branch | `_evict_before_premarket_window` sits under `if not policy.session_reset:` — so it never runs for `breadth` at all |
+
+**Observable divergence**: at 09:31 ET, `MarketSnapshot.view_of("$TICK").recent_bars`
+contains every bar since 04:00 ET. A second binding built to §4.1 returns only
+post-09:30 bars. Same wire input, different session state.
+
+### Options
+
+**Option A — fix the contract to match the code (04:00 rollover, no intra-session eviction).**
+Cheapest, no behavior change, nothing to re-measure. But it means asserting that
+"reset at the session-date boundary" was always the intent and 09:30 was
+shorthand — which is plausible (`session_date_of`'s whole purpose is to define
+what session a bar belongs to) but is a claim about intent nobody has verified.
+
+**Option B — fix the code to match the contract (clear at 09:30 ET, drop pre-market).**
+Honours the stated market rationale: a breadth index like `$TICK` genuinely
+resets at the open, so carrying pre-market prints into the RTH window is
+arguably meaningless data. But it is a **behavior change to a live ingest path**,
+it needs a new test, and it changes what existing consumers of `MarketSnapshot`
+see mid-session.
+
+**Original recommendation: A** — superseded. The reasoning was that
+`MarketSnapshot` is an in-memory view, nothing on disk changes either way, and
+changing runtime behaviour to satisfy a sentence inverts the usual burden. What
+that missed: the code's behaviour was untested, contradicted its own module
+docstring, and produced an outcome opposite to the policy's purpose. **B was
+chosen and implemented** — see the resolution note at the top of this section.
+
+</details>
+
+---
+
+## D2 — index/breadth quote list — ✅ RESOLVED (contract fixed, A+B as recommended)
+
+**Outcome: the contract was the wrong side.** §3's preamble, §3.2 and §3.3 were
+rewritten:
+
+- The preamble no longer claims quotes apply to ticks only — proto 2 carries
+  `bid`/`ask` on every point, bars included, and the old "a live-quote function
+  describes the moment of the call" reasoning is recorded as *true but the
+  consumer's judgement to make*.
+- §3.2 is now the combined test, with exactly two conditions (`null`, `<= 0`) and
+  an explicit prohibition: a binding **must not** discard a quote by symbol name.
+- §3.3 is a new non-normative section holding the deleted list, the two reasons it
+  was wrong, the `VXX` measurement, and the pointer to `category` as the fact that
+  replaces it. Written because an implementer who finds no such rule tends to
+  assume one is missing.
+
+**The fixture risk this plan flagged did not materialise.** `expected/smoke.json`
+already keeps `VXX`'s real quote (`bid` 449.99 / `ask` 450.01) — the expectations
+had been re-derived under the code's semantics when proto 2 landed, so only the
+prose in `fixtures/README.md` was stale. Better still, the conformance suite
+already asserts the *opposite* of the deleted rule
+(`test_the_binding_blanks_nobodys_quote`: "a real quote must survive"), so a
+binding that reintroduces the list fails CI. No `expected/*.json` was touched.
+
+Also corrected in passing: `cpp/src/test_harness.cpp`'s comment justified the
+non-index no-quote frame by citing §3.2's blanking as a live rule; it now names it
+as the superseded rule and points at the current §3.3.
+
+<details>
+<summary>Original analysis (kept for the record)</summary>
+
+### The contradiction as originally found
+
+### The contradiction
+
+`contract/semantics.md` §3.2 still **requires** a binding to treat
+`$TICK $ADD $VOLD $TRIN $PCVA VXX` quotes as invalid, and §3.3 folds that into
+its three-way test. It also names `TradeStationELProvider(index_symbols=...)` as
+the override parameter — **a parameter that no longer exists**. The code removed
+the list deliberately (`el_subscriber.py`: "The binding no longer blanks anyone's
+quote"), on the grounds that the list was a guess in both directions and that
+`VXX` — a tradeable ETN measured at 567,776 shares in one bar — was having a real
+quote thrown away.
+
+There is a second, related staleness in the same section: §3's preamble still
+says "兩者都只適用於 tick —— bar 不帶報價", which proto 2 contradicts outright
+(every point carries `bid`/`ask`, §5.2).
+
+### Options
+
+**Option A — delete §3.2, renumber §3.3's test to two conditions, fix the §3 preamble.**
+Matches the code and the stated reasoning. `category` (§3.5) is already on the
+wire as the fact a consumer keys off instead. Risk: a consumer that *wanted* the
+old blanking now has to implement it, and the contract no longer tells them the
+symbol set — mitigated by §3.5 already documenting `category` 4 = Index, plus the
+measured note that `VXX` is category 2.
+
+**Option B — keep the rule but move it from "binding must" to "consumer may".**
+Preserves the knowledge (the symbol list is real institutional knowledge) without
+mandating behavior no binding implements.
+
+**Recommendation: A for the mandate, B for the knowledge** — delete the
+requirement, and keep the symbol list as a non-normative note explaining what it
+was, why it was removed, and the `VXX` measurement that killed it. That preserves
+the audit trail without making a second binding implement a rule the reference
+binding doesn't.
+
+### Steps
+
+1. `contract/semantics.md` §3 preamble: drop "兩者都只適用於 tick —— bar 不帶報價";
+   state that every point carries a quote and that absence is spelled `null`.
+2. Replace §3.2 with a non-normative note (history + `VXX` measurement + pointer
+   to §3.5 `category`).
+3. §3.3: reduce to two conditions (`null`, `<= 0`). Delete the
+   `index_symbols=...` reference.
+4. Check `contract/fixtures/README.md` — the `smoke.jsonl` row claims coverage of
+   "index symbol 的 bid/ask 無效化（§3.2）", which will no longer be a rule. The
+   fixture's `expected/` values must be re-derived by hand, **not** regenerated.
+5. Remove the ⚠️ block from `docs/architecture.md` §6.3 and its zh-TW counterpart.
+
+> ⚠️ **This one touches `expected/` fixtures.** Per `contract/fixtures/README.md`
+> rule 2, expectations must be derived independently from `semantics.md` and never
+> produced by the code under test. Do this by hand and review it as a separate
+> commit.
+>
+> **It did not.** Step 4's premise was wrong: `expected/smoke.json` already keeps
+> `VXX`'s quote, so no expectation needed re-deriving — only the README prose was
+> stale. See the resolution note at the top of this section.
+
+</details>
+
+---
+
+## D3 — ABI compatibility matrix names the wrong missing export — ✅ RESOLVED
+
+**Fixed.** `contract/wire.md`'s matrix row now names `EL_Publish` as the missing
+export and notes that `EL_Init3` resolves fine on an ABI-1 DLL; the surrounding
+prose no longer generalises the guard to the init name, and instead splits the two
+directions explicitly (init tombstones catch old-`.ELD`-on-new-DLL; the missing
+`EL_Publish` plus the `EL_DllVersion` latch catch the reverse). The verification
+commands are inlined in the doc so the claim can be re-checked. Both architecture
+docs were corrected in the same change.
+
+### The contradiction
+
+`contract/wire.md` (〈新舊部署不相容時會發生什麼〉, ~line 148) says the
+"new `.ELD` + old DLL" case is caught because the old DLL "沒有 `EL_Init3` 匯出".
+That is false, and verifiable from this repo's own history:
+
+```
+git show 7faeabf:cpp/src/TS2Python.def   # ABI-1: exports EL_Init3, NOT EL_Publish
+git show HEAD:cpp/src/TS2Python.def      # ABI-2: adds EL_Publish
+```
+
+`EL/TS2Python_Exporter.el` already states the correct version in its
+`DefineDLLFunc` comment block: "An ABI-1 DLL does not export EL_Publish at all,
+so DefineDLLFunc fails to resolve at verify time and nothing runs. It DOES export
+EL_Init3 with this same signature, so init alone would not catch it — the
+EL_DllVersion latch below is what does."
+
+**Impact**: an operator hitting this failure is sent to look at the wrong export.
+Worse, a maintainer who believes "the init export name is the guard" could
+reasonably re-add or rename a publish export thinking init alone protects them —
+which is precisely the `__stdcall` stack-corruption hazard the tombstones exist
+to prevent.
+
+### Options
+
+There is no real fork here — the claim is simply wrong and the correct version is
+already written down in the EL indicator. **Fix `contract/wire.md`.**
+
+### Steps
+
+1. `contract/wire.md`: change the "新 `.ELD` + 舊 DLL" row's interception point to
+   the missing **`EL_Publish`** export, and adjust the surrounding prose that
+   generalises the guard to the init name.
+2. Keep the init-tombstone reasoning intact — it is correct for the *reverse*
+   direction (old `.ELD` + new DLL), which is what `-6` covers.
+3. `docs/architecture.md` §4.3 and its zh-TW counterpart are **already fixed** in
+   the same change that produced this plan; verify they still agree afterwards.
+4. Consider a test or a `.def`-diff check, since this class of claim went stale
+   silently once already.
+
+---
+
+## D4 — three files still advertise `proto` / ABI = 1 — ✅ RESOLVED
+
+**Fixed.** All three now read `2`; `contract/README.md` additionally states that
+the DLL ABI is `2` and that the two version numbers move as a pair. A repo-wide
+grep confirms the only remaining "proto 1" strings are in `CHANGELOG.md`, where
+they are historical entries describing a past release and are correctly left
+alone.
+
+### The contradiction
+
+| File | Says |
+| --- | --- |
+| `README.md` — Versioning table | Wire `proto` = 1, DLL ABI = 1 |
+| `README.zh-TW.md` — same table, lines 153-154 | Wire `proto` = 1, DLL ABI = 1 |
+| `contract/README.md` — 〈只有一個版本〉 | "`proto`，目前恆為 `1`" |
+
+The code refuses anything but `2` (`el_subscriber.py::PROTO_VERSION`,
+`ts2python.cpp::kDllVersion`), and `contract/wire.md` / `contract/semantics.md`
+are already at 2.
+
+This is the *lowest-risk* item — a pure find-and-replace with no behavioral
+question — but it is listed here rather than fixed inline because
+`contract/README.md` is part of the SSoT and the two READMEs are the first thing
+a new binding author reads. Fixing it deserves its own reviewable commit rather
+than being buried in a docs refactor.
+
+### Steps
+
+1. `README.md`: Versioning table → 2 / 2.
+2. `README.zh-TW.md`: same table → 2 / 2. **Do not skip this one** — the original
+   drift note named only the English README, which is how it survived.
+3. `contract/README.md`: 〈只有一個版本〉 → `proto` 恆為 `2`.
+4. Grep the repo for any remaining `proto.*1` / `ABI 1` claims before closing.
+
+---
+
+## Suggested execution order
+
+1. **D4** — mechanical, no decision needed, unblocks reading everything else.
+2. **D3** — factually settled, single-file edit, no fixture impact.
+3. **D2** — needs the A/B decision confirmed, and touches `expected/` fixtures;
+   do it as two commits (spec, then fixtures).
+4. **D1** — needs the A/B decision confirmed; if Option B is chosen it becomes a
+   code change with a new test and should be planned separately.
+
+Each of D1-D4 should land as its own commit or PR. They are independent; nothing
+here needs to be batched.

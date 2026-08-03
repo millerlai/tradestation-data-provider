@@ -161,8 +161,8 @@ python contract/tools/record.py
 
 | Version | Current | Who cares |
 | --- | ---: | --- |
-| Wire (`"proto"` in the payload) | 1 | Every binding |
-| DLL ABI (`EL_DllVersion()`) | 1 | Every binding |
+| Wire (`"proto"` in the payload) | 2 | Every binding |
+| DLL ABI (`EL_DllVersion()`) | 2 | Every binding |
 | Python package | 0.3.0 | Python consumers only |
 
 **There is one wire version and one ABI, and nothing older is supported.** A

@@ -66,8 +66,11 @@ class MarketSnapshot:
     their own independent buffers.
 
     Session handling: per-symbol `SessionPolicy` controls how
-    `recent_bars` behaves across the 09:30 ET boundary. Breadth indices
-    reset each session; continuous symbols keep up to
+    `recent_bars` behaves across a session boundary. Breadth indices are
+    cleared twice — once when the session date rolls over at 04:00 ET
+    (yesterday's bars) and again when the first regular-session bar
+    arrives (this session's pre-market bars), so they start RTH empty.
+    Continuous symbols are never cleared but keep only
     `pre_market_window_minutes` of history ahead of 09:30.
 
     Threading model: runtime is asyncio single-threaded, so plain
@@ -95,6 +98,7 @@ class MarketSnapshot:
         policy = self._policy_for(bar.symbol)
 
         bar_session = session_date_of(bar.bar_time)
+        session_open = session_start_utc(bar_session)
 
         if policy is not None:
             if (
@@ -104,6 +108,27 @@ class MarketSnapshot:
             ):
                 st.recent_bars.clear()
                 st.session_open_bar = None
+
+            # A `session_reset` symbol keeps NO pre-market history once the
+            # regular session starts — contract/semantics.md §4.1.
+            #
+            # This clear is separate from the one above and both are needed.
+            # The rollover clear fires at the 04:00 ET session-date boundary
+            # (`session_date_of`), which is what drops YESTERDAY's bars; it
+            # cannot drop this session's own pre-market bars, because those
+            # already carry today's session date. Keyed on the rollover alone,
+            # a breadth symbol arrived at 09:31 still holding everything back
+            # to 04:00 — and since the eviction path below is skipped for
+            # these symbols, it retained MORE pre-market history than SPY,
+            # inverting the reason the policy exists.
+            #
+            # `session_open_bar is None` is the "we have not crossed the open
+            # yet this session" latch, so this fires exactly once per session,
+            # on the first RTH bar. STRICTLY greater, matching the assignment
+            # below: bar_time is a CLOSE, so a bar closing exactly at 09:30 is
+            # the last PRE-market bar and goes with the rest.
+            if policy.session_reset and st.session_open_bar is None and bar.bar_time > session_open:
+                st.recent_bars.clear()
 
             if not policy.session_reset and policy.pre_market_window_minutes is not None:
                 self._evict_before_premarket_window(
@@ -115,12 +140,12 @@ class MarketSnapshot:
         # STRICTLY greater: bar_time is the bar's CLOSE, so the pre-market
         # bar ending exactly at 09:30 carries bar_time == session start and
         # must not win — the first RTH bar is the one closing after it.
-        if st.session_open_bar is None and bar.bar_time > session_start_utc(bar_session):
+        if st.session_open_bar is None and bar.bar_time > session_open:
             st.session_open_bar = bar
         elif (
             st.session_open_bar is not None
             and st.session_open_bar.bar_time > bar.bar_time
-            and bar.bar_time > session_start_utc(bar_session)
+            and bar.bar_time > session_open
         ):
             # Out-of-order ingest that precedes the currently recorded
             # open — keep the earliest.

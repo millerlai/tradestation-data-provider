@@ -184,8 +184,12 @@ EL 正常情況下送出的就是分鐘對齊的時間，所以取整通常是 n
 
 ## 3. bid / ask 何時無效
 
-報價有**兩種**無效情形，來源不同，處理方式也不同。**兩者都只適用於 tick** ——
-bar 不帶報價（見 [`wire.md`](wire.md)）。
+**每一個 point 都帶 `bid` / `ask`,不分圖表型態。** proto 2 只有一種 frame 形狀,
+bar 也帶報價（[`wire.md`](wire.md)）。前一代的 bar 不帶報價,理由是「即時報價函式
+描述的是呼叫當下,不是這根 bar」—— 那句話是對的,但它是**對數字意義的判斷**,
+而那屬於消費端;不同意的消費端忽略該欄位即可,publisher 不該替它決定。
+
+無效只有**一種**情形,而且由 publisher 在 wire 上說清楚（§3.1）。
 
 ### 3.1 沒有報價可報 → wire 上是 `null`（publisher 負責）
 
@@ -203,28 +207,41 @@ NaN）。wire 自己說出「沒有報價」，binding 不需要記得「`0` 代
 正規化刻意放在 C++ 而非 EL：C ABI 只有一個實作，所有 EL 呼叫端自動一致；
 放在 EL 則每支 script 都要各自記得。
 
-### 3.2 有報價但不該採信 → binding 負責
-
-即使 live mode 下報價非零，以下 symbol 的 `bid` / `ask` 仍**不具意義**，
-binding 必須視為無效：
-
-```
-$TICK   $ADD   $VOLD   $TRIN   $PCVA   VXX
-```
-
-此清單為**預設值**，binding 應允許呼叫端覆寫（reference binding 的
-`TradeStationELProvider(index_symbols=...)`）。
-
-DLL 不做這一層，是因為它不持有 symbol 分類知識（那是 binding 的設定，
-例如 `bindings/python/config/symbols.yaml`）。代價就是**這條規則必須寫在契約裡**。
-
-### 3.3 綜合判定
+### 3.2 綜合判定
 
 binding 應把 `bid` / `ask` 視為無效，若**任一**成立：
 
 1. 值為 `null`（publisher 已判定沒有報價）
 2. 值 `<= 0`（任何未來的異常值）
-3. symbol 在 index / breadth 清單中（§3.2）
+
+**沒有第三條。** binding **不得**依 symbol 名稱丟棄報價 —— 理由見 §3.3。
+
+### 3.3 為什麼沒有 index / breadth 清單（非規範）
+
+本節不是規則，是一段**必須留著的來龍去脈**，否則下一個實作者會覺得少了什麼而把它加回去。
+
+本文件曾經強制要求 binding 把下列 symbol 的 `bid` / `ask` 一律視為無效：
+
+```
+$TICK   $ADD   $VOLD   $TRIN   $PCVA   VXX
+```
+
+**這條規則已刪除，不可以再加回來。** 兩個問題：
+
+1. **清單是猜的，而且兩個方向都會錯。** 沒被列到的指數 symbol 保留了無意義的報價；
+   被誤列的則丟掉了真實的報價。**`VXX` 就是被誤列的那一個** —— 實測 `Category` 是
+   `2 (Stock)`、單根 bar 有 567,776 股成交量，它是可交易的 ETN，有真實的兩邊報價，
+   卻被整批丟棄。
+2. **它是「這個數字有沒有意義」的意見，那屬於消費端。** 契約的工作是把事實原樣送到，
+   不是替消費端決定哪些事實不值得看。
+
+**取代它的是事實而非清單：`category` 現在逐 frame 都在 wire 上（§3.5）。**
+想要舊行為的消費端自己依 `category == 4`（Index）判斷即可 —— 那是 TradeStation 自己
+說的，不是誰猜的。真的沒有報價時，publisher 已經在 §3.1 送 `null` 了。
+
+> reference binding 以 `test_the_binding_blanks_nobodys_quote` 釘住這件事
+> （`bindings/python/tests/conformance/`）：`smoke` fixture 裡 `VXX` 的真實報價
+> **必須存活**。任何重新引入清單的 binding 都會在 conformance 失敗。
 
 ### 3.4 五個 `el_*` 量值欄位
 
@@ -335,7 +352,8 @@ binding 會以為「fixture 全過」等於「五個欄位都對」：
 
 ### 3.5 `category` —— 查 §3.4 那張表的鑰匙
 
-§3.4 的每一列都分「股票／外匯」與「期貨」,§3.2 的報價無效化只對指數成立,而 **wire
+§3.4 的每一列都分「股票／外匯」與「期貨」,想依商品類別判讀報價的消費端也只能靠它
+（§3.3）,而 **wire
 上必須說得出一根 frame 來自哪一類商品**,否則消費端無從查表,binding 只能靠硬編碼的
 代碼清單猜——而猜錯不會有任何錯誤浮現。
 
