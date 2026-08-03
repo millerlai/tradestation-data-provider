@@ -329,21 +329,22 @@ belt-and-braces 檢查（`_quote_or_none`）。**程式碼裡沒有硬編碼的 
 | --- | --- |
 | US equity RTH | 09:30–16:00 **ET** |
 | Session 歸屬 | 04:00 ET 之前的 bar 屬於**前一個** session |
-| `breadth` symbol 保留政策（**實作現況**） | `recent_bars` 在 **04:00 ET** session 日期換日時清空；session 之內不驅逐任何資料，因此盤前 bar 全部保留 |
-| 其他 symbol（`etf`/`volatility`/`mega_cap`）保留政策 | 不重置，預設保留 60 分鐘盤前資料 |
+| `breadth` symbol 保留政策 | 清空**兩次**：04:00 ET session 日期換日時（昨天的 bar），以及第一根正規時段 bar 到達時（本 session 的盤前 bar）。因此 breadth symbol 進入 RTH 時是空的，不保留任何盤前資料 |
+| 其他 symbol（`etf`/`volatility`/`mega_cap`）保留政策 | 永不清空；滾動保留預設 60 分鐘的盤前資料 |
 
 由 `bindings/python/config/symbols.yaml` 的 `category` 決定預設，可逐 symbol 覆寫
 （`aggregation/session.py::SessionPolicy.for_category`）。這是**市場規則**，不是某個
 binding 的實作細節——任何 binding 自行詮釋，session 邊界就會與其他 binding 不一致。
 
-> ⚠️ **未解決的 spec-vs-code drift。** `contract/semantics.md` §4.1 寫 `breadth` 在
-> **09:30 ET** 重置且無盤前保留。程式碼兩件都不是這樣：`MarketSnapshot.on_bar` 只在
-> `session_date_of()` 改變時清空，而那個邊界是 `PRE_SESSION_CUTOFF_LOCAL = 04:00` ET；
-> 盤前驅逐那條路徑在 `session_reset=True` 時根本不會執行，而 `session.py` 對
-> `pre_market_window_minutes=None` 的註解是「unlimited pre-market」。所以 09:31 ET 時
-> Python binding 手上仍握有 `$TICK` 從 04:00 起的所有 bar。上表描述的是**程式碼**，
-> contract 尚未同步。解決計畫：
-> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md)（D1）。
+**`session.py` 裡有兩個邊界，兩者不可互換。** 04:00 ET
+（`PRE_SESSION_CUTOFF_LOCAL`）是**標記**規則——決定一根 bar 屬於哪一個交易日；
+09:30 ET（`SESSION_OPEN_LOCAL`）是正規時段開盤，是 `session_open_bar` 與盤前窗口
+的量測基準。把兩者混為一談曾經產生真實的 bug：只以 session 日期為鍵的 breadth 重置
+會在 04:00 觸發，那會丟掉昨天的 bar，卻把**今天**所有盤前 bar 原封不動留著——於是
+「盤前資料無意義」的那些 symbol 反而比 SPY 保留更多盤前資料。現在兩次清空都明確寫在
+`MarketSnapshot.on_bar` 裡，並由
+`test_breadth_drops_pre_market_history_when_the_session_opens` 釘住這個
+「跨日測試看不見」的區別。
 
 ### 6.5 序號與缺漏偵測（`seq` / `sid`）
 
@@ -691,17 +692,13 @@ C++ 側只建置 Win32（x86）——TradeStation 是 32-bit process。MSBuild �
 | EasyLanguage indicator 安裝 | [`EL/README.md`](../EL/README.md) |
 | Python binding 使用方式 | [`bindings/python/README.md`](../bindings/python/README.md) |
 
-> **已知的文件漂移。** 有**三個**檔案仍把 wire `proto` 與 DLL ABI 標示為 `1`：repo 根
-> `README.md` 的〈Versioning〉表、**`README.zh-TW.md` 裡的同一張表**（153-154 行），
-> 以及 `contract/README.md` 開頭。程式碼明確是 `2` ——
-> `cpp/src/ts2python.cpp`（`kDllVersion = 2`）與
-> `bindings/python/.../wire/el_subscriber.py`（`PROTO_VERSION = 2`，其餘一律拒收）
-> ——`contract/wire.md` 與 `contract/semantics.md` 也是。與其他漂移項一併追蹤於
-> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md)（D4）。
-
-> **另有三處已在前文就地標註的未解決漂移**：index/breadth 報價清單（§6.3）、
-> `breadth` session 重置邊界（§6.4），以及 ABI 相容矩陣「缺哪個匯出」的說法——
-> `contract/wire.md` 也帶著同樣的錯誤（§4.3）。四項全部收錄在
-> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md)；
-> **本文一項都沒有修掉**，因為它們都需要改 `contract/`，而那是所有 binding 賴以
-> 建構的 SSoT。
+> **只剩一項未解決的 spec-vs-code drift**，已在 §6.3 就地標註：index/breadth 報價
+> 清單——`contract/semantics.md` §3.2/§3.3 仍然強制要求，而沒有任何 binding 實作它。
+> 它列為 [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md)
+> 的 **D2**，也是四項中唯一會改變「binding 必須做什麼」的一項，因此不在此單方面決定。
+>
+> 其餘三項已修正：`breadth` session 邊界是程式碼的 bug，已修程式（D1，§6.4）；
+> ABI 矩陣「缺哪個匯出」的說法在 `contract/wire.md` 同樣是錯的，兩處都已更正
+> （D3，§4.3）；`README.md`、`README.zh-TW.md` 與 `contract/README.md` 的
+> `proto`/ABI `1` 已全部改為 `2`（D4）。`CHANGELOG.md` 仍有「proto 1」字樣，
+> **刻意不動**——那是歷史紀錄，不是現況宣告。

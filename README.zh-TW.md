@@ -150,8 +150,8 @@ python contract/tools/record.py
 
 | 版本 | 現值 | 誰在乎 |
 | --- | ---: | --- |
-| Wire（payload 的 `"proto"`） | 1 | 所有 binding |
-| DLL ABI（`EL_DllVersion()`） | 1 | 所有 binding |
+| Wire（payload 的 `"proto"`） | 2 | 所有 binding |
+| DLL ABI（`EL_DllVersion()`） | 2 | 所有 binding |
 | Python 套件 | 0.3.0 | 僅 Python 消費端 |
 
 **wire 與 ABI 各只有一個版本，更舊的一律不支援。** 沒有 `proto` 欄位的 frame 就不是

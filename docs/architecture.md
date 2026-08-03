@@ -381,8 +381,8 @@ list.
 | --- | --- |
 | US equity RTH | 09:30–16:00 **ET** |
 | Session assignment | A bar before 04:00 ET belongs to the **previous** session |
-| `breadth`-symbol retention (**as implemented**) | `recent_bars` clears when the **04:00 ET** session date rolls over; within a session nothing is evicted, so all pre-market bars are retained |
-| Other symbols (`etf`/`volatility`/`mega_cap`) retention | Not reset; 60 minutes of pre-market data retained by default |
+| `breadth`-symbol retention | Cleared **twice**: at the 04:00 ET session-date rollover (yesterday's bars) and again on the first regular-session bar (this session's pre-market bars). A breadth symbol therefore starts RTH empty and retains no pre-market history |
+| Other symbols (`etf`/`volatility`/`mega_cap`) retention | Never cleared; a rolling 60 minutes of pre-market data retained by default |
 
 Defaults are determined by `category` in
 `bindings/python/config/symbols.yaml`, and can be overridden per symbol
@@ -391,16 +391,17 @@ rule**, not an implementation detail of any one binding — if a binding interpr
 it independently, its session boundaries will disagree with every other
 binding's.
 
-> ⚠️ **Unresolved spec-vs-code drift.** `contract/semantics.md` §4.1 says
-> `breadth` resets at **09:30 ET** with no pre-market retention. The code does
-> neither: `MarketSnapshot.on_bar` clears only when `session_date_of()` changes,
-> and that boundary is `PRE_SESSION_CUTOFF_LOCAL = 04:00` ET; the pre-market
-> eviction path is skipped entirely when `session_reset=True`, and
-> `pre_market_window_minutes=None` is documented in `session.py` as "unlimited
-> pre-market". So at 09:31 ET the Python binding still holds `$TICK`'s bars from
-> 04:00 onward. The row above describes the **code**; the contract has not been
-> reconciled. Resolution plan:
-> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md) (D1).
+**Two different boundaries live in `session.py` and they are not
+interchangeable.** 04:00 ET (`PRE_SESSION_CUTOFF_LOCAL`) is a *labelling* rule —
+it decides which trading date a bar belongs to. 09:30 ET (`SESSION_OPEN_LOCAL`)
+is the regular-session open, which is what `session_open_bar` and the pre-market
+window measure against. Conflating them shipped a real bug: a breadth reset keyed
+on the session date alone fires at 04:00, which drops yesterday's bars but leaves
+every one of *today's* pre-market bars in place — so the symbols whose pre-market
+data is meaningless retained more of it than SPY did. Both clears are now
+explicit in `MarketSnapshot.on_bar`, and
+`test_breadth_drops_pre_market_history_when_the_session_opens` pins the
+distinction the day-boundary test could not see.
 
 ### 6.5 Sequence Numbers and Gap Detection (`seq` / `sid`)
 
@@ -800,19 +801,16 @@ pins this down as a test.
 | EasyLanguage indicator installation | [`EL/README.md`](../EL/README.md) |
 | How to use the Python binding | [`bindings/python/README.md`](../bindings/python/README.md) |
 
-> **Known documentation drift.** Three files still label the wire `proto` and the
-> DLL ABI as `1`: the repo-root `README.md` Versioning table, the **same table in
-> `README.zh-TW.md`** (lines 153-154), and the top of `contract/README.md`. The
-> code is unambiguously at `2` — `cpp/src/ts2python.cpp` (`kDllVersion = 2`) and
-> `bindings/python/.../wire/el_subscriber.py` (`PROTO_VERSION = 2`), which refuses
-> anything else — as are `contract/wire.md` and `contract/semantics.md`. Tracked
-> with the other drift items in
-> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md) (D4).
-
-> **Further unresolved drift, flagged inline above**: the index/breadth quote list
-> (§6.3), the `breadth` session-reset boundary (§6.4), and the ABI compatibility
-> matrix's missing-export claim, which `contract/wire.md` also carries (§4.3). All
-> four are scoped in
-> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md); none
-> is fixed by this document, because they require changing `contract/`, which is
-> the SSoT every binding is built against.
+> **One unresolved spec-vs-code drift remains**, flagged inline at §6.3: the
+> index/breadth quote list, which `contract/semantics.md` §3.2/§3.3 still mandates
+> and no binding implements. It is scoped as **D2** in
+> [`plans/contract-drift-2026-08-03.md`](plans/contract-drift-2026-08-03.md) and
+> is the only one of the four that changes what a binding must *do*, so it is not
+> resolved unilaterally here.
+>
+> The other three are fixed: the `breadth` session boundary was a code bug and the
+> code was corrected (D1, §6.4); the ABI matrix's missing-export claim was wrong in
+> `contract/wire.md` too and both are now accurate (D3, §4.3); and the `proto`/ABI
+> `1` labels in `README.md`, `README.zh-TW.md` and `contract/README.md` now read
+> `2` (D4). `CHANGELOG.md` still mentions "proto 1" and is left alone — those are
+> historical entries, not current claims.

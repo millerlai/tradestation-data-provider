@@ -137,15 +137,28 @@ DLL 曾經把這一對映射成 `"5m"`、`"1d"` 之類的字串,並對**映射�
 無法預期的行為。這一次它們沒有再沿用:新的 publish 叫 `EL_Publish`,舊的兩個名字
 留在 `.def` 裡當墓碑,舊 `.ELD` 打進來會拿到一個可讀的 `-6`,而不是崩潰。
 
-安全性由 init 保證,而不是由名字保證:**EasyLanguage 端的每一個 publish 呼叫都在
-「init 成功」的閘門後面**（`EL/TS2Python_Exporter.el`）,init 失敗時 indicator 永遠不會
-執行 publish。所以只要 init 攔得住,其他簽章的 publish 函式就一次都碰不到。
+**舊 `.ELD` 打進新 DLL** 這個方向由 init 擋住,而不是由名字擋住:EasyLanguage 端的每一個
+publish 呼叫都在「init 成功」的閘門後面（`EL/TS2Python_Exporter.el`）,init 失敗時
+indicator 永遠不會執行 publish。所以只要 init 的墓碑回負值,改過簽章的 publish 函式就
+一次都碰不到。
+
+**反方向（新 `.ELD` 打進舊 DLL）不是 init 擋的。** 前一代的 ABI-1 DLL **確實匯出了
+`EL_Init3`**,而且簽章相同 —— 可自行驗證:
+
+```bash
+git show 7faeabf:cpp/src/TS2Python.def   # ABI-1:有 EL_Init3,沒有 EL_Publish
+git show HEAD:cpp/src/TS2Python.def      # ABI-2:多了 EL_Publish
+```
+
+所以光靠 init 完全攔不到這個方向。ABI-1 缺的是 **`EL_Publish`**（`572b436` 才加入）,
+`DefineDLLFunc` 會在解析 `EL_Publish` 時失敗;`EL_DllVersion()` latch 則負責涵蓋
+「兩邊匯出都齊全但版本不符」的情況。
 
 ### 新舊部署不相容時會發生什麼
 
 | 情境 | 攔截點 | 使用者看到什麼 |
 | --- | --- | --- |
-| 新 `.ELD` + 舊 DLL | 舊 DLL 沒有 `EL_Init3` 匯出 | `DefineDLLFunc` 解析失敗，TradeStation 在 verify 階段就報錯 |
+| 新 `.ELD` + 舊（ABI-1）DLL | 舊 DLL 沒有 **`EL_Publish`** 匯出（`EL_Init3` 反而解析得到） | `DefineDLLFunc` 解析 `EL_Publish` 失敗，TradeStation 在 verify 階段就報錯 |
 | 新 `.ELD` + 版本不符的新 DLL | indicator 的 `EL_DllVersion()` latch | Print Log 出現版本不符訊息，indicator 停止發布。`EL_DllVersion` 是 0 參數，簽章永不變，呼叫它絕對安全 |
 | 舊 `.ELD`（呼叫 `EL_Init`）+ 新 DLL | 墓碑回 `-6` | Print Log 出現 `EL_Init FAILED rc=-6`，indicator 因 init 未成功而不發布 |
 | 舊 `.ELD`（呼叫 `EL_Init2`）+ 新 DLL | 墓碑回 `-6` | 同上 |

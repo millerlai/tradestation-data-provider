@@ -1,6 +1,17 @@
 # Plan — resolving spec-vs-code drift in `contract/`
 
-> **Status**: proposed, not started. Written 2026-08-03.
+> **Status** (2026-08-03): **D1, D3, D4 resolved. D2 open.**
+>
+> | | Item | Outcome |
+> |---|---|---|
+> | D1 | `breadth` session reset | **Code was wrong** — fixed in `MarketSnapshot.on_bar` with 3 new tests. Contract §4.1 was right and is unchanged. |
+> | D2 | index/breadth quote list | **Open** — needs a decision, see below |
+> | D3 | ABI matrix missing export | **Fixed** in `contract/wire.md` + both architecture docs |
+> | D4 | `proto`/ABI still labelled 1 | **Fixed** in `README.md`, `README.zh-TW.md`, `contract/README.md` |
+>
+> D1's resolution inverted this plan's original recommendation (it proposed
+> changing the contract to match the code); see the D1 section for why that was
+> wrong.
 > **Scope**: changes to `contract/` (the SSoT) and, for D1, possibly to
 > `bindings/python/` code. **Nothing in this plan is a documentation-only edit**
 > — that is exactly why it was split out of the `docs/architecture.md` fixes
@@ -26,7 +37,48 @@ wrong side; that is not a reason to assume it is again.
 
 ---
 
-## D1 — `breadth` session reset: contract says 09:30 ET, code rolls at 04:00
+## D1 — `breadth` session reset — ✅ RESOLVED (code fixed)
+
+**Outcome: the contract was right and the code was wrong.** This plan originally
+recommended Option A (rewrite §4.1 to describe the 04:00 behaviour). That was the
+wrong call, for three reasons found while explaining the item in detail:
+
+1. **No test pinned the distinction.** `test_session_reset_clears_deque_across_session_boundary`
+   uses bars a whole day apart, which passes under both 04:00 and 09:30 semantics.
+   The 04:00 behaviour was an untested side effect, not a deliberate contract.
+2. **`session.py`'s own module docstring says "reset at the session open"** —
+   the stated intent pointed at 09:30 all along.
+3. **The resulting behaviour inverted the policy's purpose.** Because the eviction
+   path was skipped for `session_reset` symbols, a breadth index retained *all*
+   pre-market bars (bounded only by the 100-bar deque) while SPY kept 60 minutes.
+   The symbols whose pre-market data is meaningless kept more of it.
+
+**What changed** (`bindings/python/`):
+
+- `MarketSnapshot.on_bar` now performs a second, separate clear when the first
+  regular-session bar arrives, gated on `policy.session_reset` and latched by
+  `session_open_bar is None` so it fires once per session. `bar_time` is a CLOSE,
+  so the comparison is strictly greater than the open — a bar closing exactly at
+  09:30 is the last pre-market bar and goes with the rest.
+- `SessionPolicy` and the `session.py` module docstring now spell out that 04:00
+  and 09:30 are two different boundaries and that a `session_reset` symbol gets
+  both clears. `for_category` is unchanged.
+- Three new tests: the pre-market-drop repro, the exactly-09:30 edge case, and one
+  asserting the rule reaches every breadth symbol via `category` rather than a
+  symbol list. Two existing tests had their first bar moved from 09:30 to 09:31 —
+  their intent (within-session retention, cross-day reset) is unrelated to the
+  open boundary, and their old expectations encoded the bug.
+
+**`contract/semantics.md` §4.1 was not changed** — its normative claim ("09:30 ET
+清空 / 盤前保留：無") is now simply true. One optional clarification remains: §4.1
+does not mention the 04:00 rollover clear, so a second binding could implement only
+the 09:30 clear and carry yesterday's bars through pre-market. Worth a sentence,
+but it is an addition rather than a correction.
+
+<details>
+<summary>Original analysis (kept for the record)</summary>
+
+### The contradiction as originally found
 
 ### The contradiction
 
@@ -57,24 +109,14 @@ arguably meaningless data. But it is a **behavior change to a live ingest path**
 it needs a new test, and it changes what existing consumers of `MarketSnapshot`
 see mid-session.
 
-**Recommendation: A**, with the §4.1 wording changed to name the 04:00 boundary
-and state that `breadth` retains its pre-market bars within a session. Rationale:
-`MarketSnapshot` is an in-memory convenience view, not the persisted record —
-nothing on disk is affected either way — and Option B changes runtime behavior to
-satisfy a sentence, which inverts the usual burden. Revisit if a consumer
-actually depends on the 09:30 semantics.
+**Original recommendation: A** — superseded. The reasoning was that
+`MarketSnapshot` is an in-memory view, nothing on disk changes either way, and
+changing runtime behaviour to satisfy a sentence inverts the usual burden. What
+that missed: the code's behaviour was untested, contradicted its own module
+docstring, and produced an outcome opposite to the policy's purpose. **B was
+chosen and implemented** — see the resolution note at the top of this section.
 
-### Steps (Option A)
-
-1. Rewrite `contract/semantics.md` §4.1's `breadth` row: reset at the **04:00 ET
-   session-date rollover**; pre-market bars within a session are retained.
-2. Add the distinction to §4's table: `session_open_utc` (09:30, used for
-   `session_open_bar`) and the **session-assignment cutoff** (04:00, used for
-   retention) are two different boundaries. Both already exist in `session.py`;
-   the contract currently names only the first.
-3. Add a conformance fixture: a `breadth` symbol with bars at 03:59 / 04:01 /
-   09:29 / 09:31 ET, expectation derived by hand from the revised §4.1.
-4. Remove the ⚠️ block from `docs/architecture.md` §6.4 and its zh-TW counterpart.
+</details>
 
 ---
 
@@ -134,7 +176,15 @@ binding doesn't.
 
 ---
 
-## D3 — ABI compatibility matrix names the wrong missing export
+## D3 — ABI compatibility matrix names the wrong missing export — ✅ RESOLVED
+
+**Fixed.** `contract/wire.md`'s matrix row now names `EL_Publish` as the missing
+export and notes that `EL_Init3` resolves fine on an ABI-1 DLL; the surrounding
+prose no longer generalises the guard to the init name, and instead splits the two
+directions explicitly (init tombstones catch old-`.ELD`-on-new-DLL; the missing
+`EL_Publish` plus the `EL_DllVersion` latch catch the reverse). The verification
+commands are inlined in the doc so the claim can be re-checked. Both architecture
+docs were corrected in the same change.
 
 ### The contradiction
 
@@ -178,7 +228,13 @@ already written down in the EL indicator. **Fix `contract/wire.md`.**
 
 ---
 
-## D4 — three files still advertise `proto` / ABI = 1
+## D4 — three files still advertise `proto` / ABI = 1 — ✅ RESOLVED
+
+**Fixed.** All three now read `2`; `contract/README.md` additionally states that
+the DLL ABI is `2` and that the two version numbers move as a pair. A repo-wide
+grep confirms the only remaining "proto 1" strings are in `CHANGELOG.md`, where
+they are historical entries describing a past release and are correctly left
+alone.
 
 ### The contradiction
 
