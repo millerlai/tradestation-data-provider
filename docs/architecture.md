@@ -1,43 +1,53 @@
-# tradestation-data-provider — 架構設計
+# tradestation-data-provider — System Architecture
 
-> 本文是 dp 的架構 SSoT。消費端如何整合見 [`migration/tradingagent-submodule.md`](migration/tradingagent-submodule.md)。
+> 📖 [繁體中文版](architecture.zh-TW.md)
+
+> This is a human-readable architecture overview. The AI agent's line-by-line behavioral
+> rules live in [`CLAUDE.md`](../CLAUDE.md) at the repo root; the two should stay
+> consistent, and where they conflict, the code and [`contract/`](../contract/) win (see
+> §11). This document was written against, and every version number and behavior verified
+> against, the following authoritative sources: `cpp/src/ts2python.cpp`,
+> `cpp/include/ts2python.h`, `contract/wire.md`, `contract/semantics.md`,
+> `contract/error_codes.md`, `bindings/python/src/tradestation_data/**`.
 
 ---
 
-## 1. 定位
+## 1. System Positioning
 
-### 1.1 這是什麼
+### 1.1 What this is
 
-**TradeStation 這一家的市場資料 provider。** 從 TradeStation Desktop 取得即時 tick 與
-1-minute bar，經 EasyLanguage indicator → C++ bridge DLL → ZeroMQ PUB，供任意語言的
-subscriber 消費。
+A **market data provider for a single vendor (TradeStation)**. It takes every data
+point a user has opened on a chart in TradeStation Desktop (Windows, a 32-bit
+process) — tick series, intraday minute bars, daily bars — and broadcasts it
+through an EasyLanguage indicator → a C++ bridge DLL → ZeroMQ PUB, for subscribers
+in any language to consume.
 
-### 1.2 產品是 wire contract，不是 Python package
+### 1.2 The product is the wire contract, not the Python package
 
-dp 對外承諾的東西不是 `import tradestation_data`，而是**線上跑的那個協定**。
-Python package 是目前唯一的 reference binding，將來會有 Go / Rust / C# 等其他
-subscriber binding，全部對同一份 contract。
+What this repo promises externally is **the protocol running on the wire**, not
+`import tradestation_data`. [`contract/`](../contract/) is the sole source of
+truth; `bindings/python/` is currently the only reference binding, and the
+template to copy when writing the next language binding (Go, Rust, C#, …).
 
-因此：
+Any parsing rule that lives only inside one binding is a bug — the next
+implementation will miss it. That has actually happened in this repo: an earlier
+spec document described fields the DLL had already stopped emitting, and nobody
+noticed for a long time, because nothing checked whether the two agreed. That is
+exactly why the `contract/fixtures/` conformance suite exists (§9).
 
-- `contract/` 是本 repo 最高優先級的資產，任何 binding 的行為以它為準。
-- 任何「只有 Python 知道」的解析規則都是 bug，必須上移到 contract。
+### 1.3 Non-Goals (deliberately out of scope)
 
-### 1.3 Non-Goals
-
-| 不做 | 理由 |
+| Out of scope | Why |
 | --- | --- |
-| **泛用 vendor 抽象層** | dp 只服務 TradeStation。「換 vendor」是消費端整包替換 dp，不是在 dp 內部切換 provider。 |
-| **定義消費端契約** | 消費端自己宣告需要什麼介面，dp 靠 structural typing 滿足它。dp 不 import 消費端任何東西，也不知道消費端存在。 |
-| **策略 / 下單 / 風控** | 屬消費端。dp 是 data-collection-only。 |
-| **更換 producer 語言** | EL + C++ DLL 固定。可增生的是 subscriber 側。 |
-| **非 Windows producer** | 受 TradeStation Desktop 限制。subscriber 側不受此限。 |
+| **Strategy / order routing / risk** | This is the data-collection-only fork. `domain/` has exactly one type, `Bar`, because the wire has exactly one shape. |
+| **Aggregation, resampling, backfill, caching** | `HistoryStore` only reads; it never derives. See §7.6 and §10. |
+| **Timeframe vocabulary / name mapping** | `bar_type`/`bar_interval` are EasyLanguage's own words, carried verbatim onto the wire and into storage — there is no translation layer that turns them into names like `"5m"`/`"1d"`. |
+| **A non-Windows producer** | Constrained by TradeStation Desktop, a 32-bit Windows process. The subscriber side has no such constraint — the Python binding runs on Windows/macOS/Linux. |
+| **Compatibility with the old protocol** | Wire `proto` / DLL ABI are always **2**; there is no older version to stay compatible with. An old payload cannot pass the version gate — it fails structurally (§5.4). |
 
 ---
 
-## 2. 三層架構
-
-三層的可變性完全不同，這是整個設計的基礎：
+## 2. Three-Layer Overview
 
 ```mermaid
 ---
@@ -46,413 +56,351 @@ config:
     defaultRenderer: elk
 ---
 flowchart TB
-    subgraph PROD["① Producer — 固定"]
+    subgraph PROD["① Producer — Windows only, fixed"]
         direction TB
-        TS["TradeStation Desktop"]
+        TS["TradeStation Desktop<br/>32-bit process"]
         EL["EL Exporter Indicator<br/>TS2Python_Exporter.el"]
-        DLL["TS2Python.dll<br/>C++ / Win32 x86 / ABI 2"]
-        TS --> EL
-        EL -->|"DefineDLLFunc __stdcall"| DLL
+        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 2"]
+        TS -->|"one indicator per chart"| EL
+        EL -->|"DefineDLLFunc __stdcall<br/>EL_Init3 → EL_Publish"| DLL
     end
 
-    subgraph CON["② Contract — dp 真正的產品"]
+    subgraph WIRE["② Wire Contract — this repo's actual product"]
         direction TB
-        WIRE["wire proto 2<br/>2-frame: topic + payload"]
-        SCHEMA["JSON Schema<br/>tick / bar"]
-        SEM["semantics.md<br/>時間權威 · session 規則"]
-        FIX["conformance fixtures<br/>錄自 test_harness"]
+        ZMQ["ZeroMQ PUB/SUB<br/>tcp://127.0.0.1:5555 (default)"]
+        FRAME["2-frame message<br/>topic = symbol · payload = JSON<br/>proto 2 · 19 required fields"]
+        SEM["contract/semantics.md<br/>rules a schema can't check, that bindings must still agree on"]
+        ZMQ --> FRAME
     end
 
-    subgraph BIND["③ Subscriber Bindings — 可增生"]
-        direction LR
-        PY["Python<br/>(reference)"]
-        GO["Go<br/>(future)"]
-        RS["Rust / C#<br/>(future)"]
+    subgraph BIND["③ Subscriber Bindings — extensible"]
+        direction TB
+        SUB["TradeStationELProvider<br/>ZMQ SUB · asyncio"]
+        RUNTIME["IngestionRuntime<br/>buffer / dedupe / tick bypass"]
+        SNAP["MarketSnapshot<br/>in-memory latest state"]
+        PIPE["SinkPipeline"]
+        DISK["ParquetBarSink → BarWriter<br/>Hive-partitioned Parquet"]
+        SUB --> RUNTIME
+        RUNTIME --> SNAP
+        RUNTIME --> PIPE
+        PIPE --> DISK
     end
 
-    DLL -->|"ZMQ PUB<br/>tcp://127.0.0.1:5555"| WIRE
-    WIRE -.->|規範| PY
-    WIRE -.->|規範| GO
-    WIRE -.->|規範| RS
-    FIX ==>|必須通過| PY
-    FIX ==>|必須通過| GO
-    FIX ==>|必須通過| RS
+    DLL -->|"ZMQ PUB"| ZMQ
+    FRAME -.->|"parsed per the contract"| SUB
+    SEM -.->|"constrains parsing and storage rules"| SUB
 
     classDef existing fill:#e9ecef,stroke:#adb5bd,color:#495057
-    classDef added fill:#d4edda,stroke:#28a745,color:#155724
-    classDef modified fill:#fff3cd,stroke:#ffc107,color:#856404
-    class TS,EL,PY existing
-    class DLL modified
-    class WIRE,SCHEMA,SEM,FIX,GO,RS added
+    class TS,EL,DLL,ZMQ,FRAME,SEM,SUB,RUNTIME,SNAP,PIPE,DISK existing
 ```
 
-| 層 | 可變性 | 誰負責 |
+The three layers have completely different volatility, and that is the whole basis
+of the design:
+
+| Layer | Volatility | Why |
 | --- | --- | --- |
-| ① Producer | 固定 | 本 repo（EL + cpp） |
-| ② Contract | **單一版本**（`proto` 2 / ABI 2；更舊的一律拒收） | 本 repo（contract/） |
-| ③ Bindings | 增生 | 本 repo（Python）+ 未來各語言 |
+| ① Producer | Fixed | Locked to TradeStation Desktop as the one vendor; EL + the C++ DLL are the only way to talk to it |
+| ② Contract | Changes rarely, under a strict process | The shared foundation of every language binding — one change affects all of them |
+| ③ Bindings | Free to multiply | Python is the reference; future languages (Go/Rust/C#/…) each implement the same contract independently |
 
 ---
 
 ## 3. Repo Layout
 
-> 以下為**實際落地**的結構（非規劃稿）。建置產物與 `.venv` 由 `.gitignore` 排除。
-
-```
-tradestation-data-provider/
-│
-├─ contract/                             ② 語言中立 SSoT — 本 repo 最高優先資產
-│  ├─ README.md                          　 入口：讀者是「要寫新 binding 的人」
-│  ├─ semantics.md                       　 schema 表達不了的規則（§1 時間權威、
-│  │                                     　 §2 時間戳原樣+分鐘取整、§3 報價有效性、
-│  │                                     　 §4 session、§5 前綴、§6 序號）
-│  ├─ error_codes.md                     　 C ABI 回傳碼（含墓碑的 -6）
-│  ├─ wire.md                            　 frame 結構與 payload，自成一體
-│  │                                     　 （為何叫 proto、刪 ts_utc 的取捨、
-│  │                                     　 　新舊部署不相容的四種情境）
-│  ├─ point.schema.json 　　　　　　　 一個 frame 形狀，單一版本
-│  ├─ fixtures/
-│  │  ├─ README.md                       　 錄製規矩：不得手寫、expected 不得由 binding 產生
-│  │  ├─ smoke.jsonl                     　 3 topic + 1 bar · per-symbol seq
-│  │  ├─ noquote.jsonl                   　 無報價（歷史回放形狀）→ wire 上是 null
-│  │  ├─ bars.jsonl                      　 每個非 1m 的 tf + `-5` 拒收路徑
-│  │  ├─ session.jsonl                   　 RTH 首尾 bar（原樣落地的錨）
-│  │  └─ expected/{smoke,noquote,bars,session}.json
-│  └─ tools/
-│     └─ record.py                        　 wire 檢視器 + fixture 錄製器，不依賴任何 binding
-│
-├─ EL/                                   ① TradeStation 側訊號源頭
-│  ├─ README.md
-│  └─ TS2Python_Exporter.el
-│
-├─ cpp/                                  ① bridge DLL — 語言固定為 C++
-│  ├─ CMakeLists.txt · CMakePresets.json · vcpkg.json
-│  ├─ TS2Python.sln · *.vcxproj (+.filters)
-│  ├─ vcpkg-local.props · .targets       　 從 submodule 匯入 vcpkg，不靠全域整合
-│  ├─ setup-build-env.bat                　 submodule → bootstrap → 裝相依（冪等）
-│  ├─ verify-build-env.bat               　 逐項檢查環境，每項附修正指令
-│  ├─ build.bat                          　 x86 + x64 一次建完
-│  ├─ README.md · README.zh-TW.md
-│  ├─ include/ts2python.h                　 C ABI（EL_Init3 / EL_Publish
-│  │                                     　 　+ EL_Init·EL_Init2 墓碑）
-│  ├─ src/ts2python.cpp                  　 ZMQ PUB publisher · seq/sid · 報價正規化
-│  ├─ src/test_harness.cpp               　 不依賴 TradeStation 的 frame 產生器
-│  ├─ src/TS2Python.def
-│  └─ build-tools/vcpkg/                 　 submodule
-│
-├─ bindings/python/                      ③ reference binding
-│  ├─ pyproject.toml · uv.lock            　 刻意沒有 .python-version：它會蓋掉
-│  │                                     　 　`uv sync --python <v>` 剛裝好的直譯器
-│  ├─ LICENSE                            　 副本 — 打包後端無法引用專案根之上
-│  ├─ README.md · README.zh-TW.md
-│  ├─ config/{sinks,symbols}.yaml
-│  ├─ src/tradestation_data/
-│  │  ├─ domain/      [core] bar.py · tick.py · timeframe.py
-│  │  ├─ wire/        [core] base.py · el_subscriber.py
-│  │  ├─ aggregation/ [app]  session · snapshot
-│  │  ├─ storage/     [app]  bar_writer · tick_writer · history_store
-│  │  ├─ sinks/       [app]  base · pipeline · registry · parquet · memory · callback
-│  │  └─ runtime/     [app]  config · ingestion · main
-│  ├─ scripts/                           　 6 支 Parquet 維運腳本（全部唯讀 store）
-│  └─ tests/
-│     └─ conformance/                     　 對 contract/fixtures 跑驗證
-│
-├─ docs/
-│  ├─ architecture.md                     　 本文
-│  └─ migration/tradingagent-submodule.md 　 消費端遷移筆記
-│
-├─ .ruff.toml                            　 僅為 repo 根的防護，見 §3.4
-├─ .github/{dependabot.yml, workflows/{ci.yml, release.yml}}
-├─ .claude/ · .gitignore · .gitmodules
-├─ CHANGELOG.md · CLAUDE.md · CONTRIBUTING.md · LICENSE · SECURITY.md
-└─ README.md · README.zh-TW.md            　 主角是 contract，非 Python
-```
-
-**與原規劃的差異**（刻意為之，理由記於各處）：
-
-| 規劃過但沒做 | 為何 |
-| --- | --- |
-| 搬入 `wire/webapi.py` | 那是 36 行全 `NotImplementedError` 的 stub，唯一作用是讓 Protocol 看起來有兩個實作。意圖已由 `wire/base.py` 的 docstring 記載 |
-| 建立 `docs/design.md` | 消費端那份 1473 行文件是用它的視角寫的，且 §5 已與實作脫節。屬契約的內容改為萃取進 `contract/` |
-| `config/` 留在 repo 根 | 打包後端無法引用專案根之上，見 §3.3 |
-
-### 3.1 各層歸屬判準
-
-| 放哪 | 判準 | 例子 |
+| Path | What it holds | Related sections |
 | --- | --- | --- |
-| `contract/` | **換 binding 語言後必須一致**的東西 | 時間權威來源、session 規則、error code |
-| `bindings/<lang>/config/` | 該 binding 的執行期設定與範例檔 | `sinks.yaml` `symbols.yaml` |
-| `bindings/<lang>/` | 該語言的實作、測試、腳本 | 其餘全部 |
+| [`contract/`](../contract/) | Wire spec, semantics rules, conformance fixtures — **the sole source of truth** | §5 §6 §9 |
+| [`EL/`](../EL/) | EasyLanguage exporter indicator | §4.1 |
+| [`cpp/`](../cpp/) | C++ bridge DLL (Win32 x86) + standalone test harness | §4.2 §4.3 |
+| [`bindings/python/`](../bindings/python/) | Reference binding: ingestion runtime, pluggable sinks, Parquet store | §7 |
+| [`bindings/python/examples/`](../bindings/python/examples/) | 4 runnable examples, 2 of which need neither the DLL nor TradeStation | §7 |
+| `docs/` | This document | — |
 
-`sinks.yaml` 屬於 binding 的理由最直接 —— 它的值就是 Python import 路徑：
-
-```yaml
-class: tradestation_data.sinks.parquet:ParquetBarSink
-```
-
-Go binding 讀到這行毫無意義。
-
-### 3.2 消費端職責殘留 — 已決議移除
-
-分家時從 TA 一併帶過來、但不屬於 data provider 職責的東西：
-
-| 項目 | 現況 | 決策 |
-| --- | --- | --- |
-| `domain/order.py` | `Order` `Fill` `OrderIntent` `OrderStatus` `OrderType` `Side` **僅 `tests/test_domain.py` 使用**，無 production code 引用 | **移除。** 歸消費端（TA 的 `brokers/` 是真正使用者）。dp 不下單，不需要訂單模型 |
-| `MarketSnapshot` 的部位追蹤 | `aggregation/snapshot.py` 的 `_positions` / `position_of()` / `positions` / `set_position()`，依賴 `domain/position.py` | **移除。** 部位追蹤屬消費端；連帶 `domain/position.py` 一併移除 |
-
-移除後 `domain/` 只剩 `bar.py`、`tick.py` 與 `timeframe.py` —— 前兩者正是 wire 上實際
-存在的兩種事件，與 `MarketEvent = Tick | Bar` 完全對齊；`timeframe.py` 是 `tf` 這個
-wire 欄位的值域。**「dp 的 domain 等於 wire 的值域」** 是一條可檢查的不變式：任何新增
-的 domain 型別若在 wire 上沒有對應，就是職責越界的訊號。
-
-> **決策（已採納）** — Python 移至 `bindings/python/`，讓第二個 binding 進來時是純新增。
-> 代價是 `pyproject.toml` / CI / README 路徑要改，消費端的 submodule 引用路徑也變深；
-> 在 repo 尚未上 PyPI 的此刻執行成本最低。
-
-### 3.3 為何 repo 根沒有 `config/`
-
-原本規劃把 `symbols.yaml` 留在根，理由是 symbology 語言中立。實作時被一個硬限制推翻：
-
-> **hatchling 的 `license-files` 與 sdist `include` 都以 `pyproject.toml` 所在目錄為
-> 根，無法引用上層檔案。** `pyproject.toml` 一旦進 `bindings/python/`，repo 根的
-> `config/symbols.yaml` 與 `LICENSE` 就打包不進 sdist。
-
-重新檢視後，這個限制指向了更正確的切法：
-
-- **symbol 清單是使用者的標的選擇** —— 別人會交易不同的 symbol，它是**範例 config**。
-- **真正語言中立的是 `category` 的語意** —— `etf` / `breadth` / `volatility` /
-  `mega_cap` 各自對應什麼 session 政策 —— 那已經在
-  [`contract/semantics.md`](../contract/semantics.md) §4.1。
-- 何況 Go binding 未必用 YAML。
-
-結論：**規則進 contract，範例檔進 binding。** `LICENSE` 則在 `bindings/python/` 放一份
-副本，這是多語言 monorepo 的常規做法。
-
-### 3.4 repo 根的 `.ruff.toml`
-
-`bindings/python/pyproject.toml` 只在該子樹內生效。從 repo 根執行 `ruff check .`
-會找不到設定、退回預設值，然後走進 vendored 的 vcpkg 檢出目錄改寫第三方原始碼 ——
-**這已經發生過一次**（import 排序、F401、UP015 共動了 10 個檔案）。
-
-根目錄的 `.ruff.toml` 只做一件事：排除 `cpp/` 與 `contract/fixtures/`。
-
-### 3.5 EL 為何必須在本 repo
-
-EL indicator 是 TradeStation 訊號的**源頭**。缺了它，dp 無法端到端自我驗證
-「能不能從 TradeStation 拿到資料」，也無法宣稱自己是完整的 TradeStation provider。
+There is no `config/` at the repo root — `symbols.yaml` / `sinks.yaml` are the
+Python binding's own runtime settings, not part of the contract; the next
+language binding will have its own configuration shape.
 
 ---
 
-## 4. Wire Contract
+## 4. Producer Side: TradeStation → EL Indicator → C++ DLL
 
-> 規範文字在 [`../contract/wire.md`](../contract/wire.md)。本節只講設計理由；
-> 兩者衝突時以 `contract/` 為準。
+### 4.1 EL Exporter Indicator (`EL/TS2Python_Exporter.el`)
 
-### 4.1 現況
+Attached as an Indicator to any chart, it calls `EL_Publish` once per data point,
+forwarding every reserved word TradeStation supplies for that point exactly as
+given: `Date`+`Time`, `BarType`, `BarInterval`, `Category`, OHLC, the five
+quantity reserved words, `InsideBid`/`InsideAsk`. **No interval is refused, and no
+field is dropped** — that judgment belongs to the consumer, not to this
+indicator.
 
-每次 publish 送出兩個 frame：
+Key behaviors:
 
-| Frame | 內容 | 型別 |
+- **Zero state**: every symbol/value comes from TradeStation's own built-in
+  variables, so one compiled indicator covers every chart type.
+- **Version latch**: right after `EL_Init3` succeeds it checks
+  `EL_DllVersion()`; on a mismatch, publishing stops entirely and the mismatch is
+  logged — it never calls any publish export with an incompatible signature.
+- **Sub-minute / aggregated-tick charts**: detected and logged once in the Print
+  Log, but **publishing continues regardless**. Such a chart's `BarType`/`BarInterval`
+  are indistinguishable from a 1-minute chart's, and `ts_str` only has minute
+  resolution — the wire's `ts` (the receive-side clock) is what separates multiple
+  frames sharing the same minute. A subscriber that treats these as an ordinary
+  minute chart will coalesce several bars within one minute into one (see the
+  buffering rule in §7.3).
+
+### 4.2 C++ Bridge DLL (`cpp/src/ts2python.cpp`)
+
+A single global state, serialized by `std::mutex`: one `zmq::context_t` plus one
+PUB `zmq::socket_t`.
+
+| Responsibility | Implementation notes |
+| --- | --- |
+| **Init** (`EL_Init3`) | Idempotent (a repeat call returns `1`, without re-binding or changing `sid`); `SNDHWM=100000`, `linger=0`; on success, stamps a new `g_sid` at microsecond precision and clears `g_seq` |
+| **Publish** (`EL_Publish`) | 16 parameters, `__stdcall`; narrows the five quantities first (`double` → `int64`, range-checked against `±9.0e15`, failing with `-4` rather than clamping); then reserves a sequence number (`reserve_seq`, consumed even if the send that follows fails); assembles the payload with `snprintf` (a 768-byte buffer); sends as a 2-frame ZMQ message |
+| **Quote nulling** | `InsideBid`/`InsideAsk` ≤ 0 (including NaN) are always turned into JSON `null` — "no quote" is said once on the wire, rather than left for every binding to separately remember what 0 means |
+| **DLL pinning** | On the first successful init, `GetModuleHandleExW` pins the DLL into the process's address space, avoiding a deadlock that would occur if TradeStation's `FreeLibrary` triggered `zmq_ctx_term()` under the loader lock |
+| **Tombstone exports** | `EL_Init`, `EL_Init2`, `EL_PublishTick`, `EL_PublishBar` all just `return -6;` — see §4.3 |
+
+### 4.3 DLL ABI Version and the Compatibility Matrix
+
+`EL_DllVersion()` returns `2`, paired with the wire `proto`'s `2` —
+**version identification is guarded by the name of the init export, not by names
+staying the same**: `EL_PublishTick`/`EL_PublishBar` once kept the previous
+generation's names while their signatures changed, and under `__stdcall` the
+callee pops the stack, so a call with a mismatched signature **corrupts the
+stack** rather than returning an error. This publish call was given an
+entirely new name, `EL_Publish`, and the two old names were left in `.def` as
+tombstones.
+
+| Deployment scenario | Where it's caught | What the operator sees in the Print Log |
 | --- | --- | --- |
-| 1 | Topic | UTF-8 symbol（`SPY` / `VXX` / `$TICK`） |
-| 2 | Payload | JSON，兩種 shape 之一 |
+| New `.ELD` + old DLL | The old DLL has no `EL_Init3` export | `DefineDLLFunc` fails right at Verify time |
+| New `.ELD` + a mismatched new DLL | The indicator's `EL_DllVersion()` latch | A version-mismatch message; the indicator stops publishing |
+| Old `.ELD` (calling `EL_Init`) + new DLL | Tombstone returns `-6` | `EL_Init FAILED rc=-6` |
+| Old `.ELD` (calling `EL_Init2`) + new DLL | Tombstone returns `-6` | `EL_Init2 FAILED rc=-6` |
 
-```jsonc
-// 一種形狀，不論來自什麼圖。沒有 kind，沒有 tf。
-{ "proto": 2, "seq": 1, "sid": 1785646054360588,
+All four directions fail **readably** — none of them reaches stack corruption,
+and none of them produces bad data that looks plausible. **The DLL and the
+`.ELD` must be upgraded as a pair**, since they are two separate install steps.
+
+---
+
+## 5. Wire Contract (`contract/`)
+
+### 5.1 Transport and Frame Structure
+
+| Item | Value |
+| --- | --- |
+| Pattern | ZeroMQ **PUB/SUB**, fire-and-forget, no delivery guarantee |
+| Publisher | The DLL `bind`s, defaulting to `tcp://127.0.0.1:5555` |
+| Subscriber | `connect`s to the same endpoint and subscribes to each symbol precisely |
+| Frame count | 2 (`ZMQ_SNDMORE`): frame 1 = UTF-8 symbol topic, frame 2 = UTF-8 JSON payload |
+| High-water marks | Publisher `SNDHWM=100000`; Python binding `RCVHWM=1_000_000` |
+| Prefix-match trap | ZMQ `SUBSCRIBE` is a prefix match — subscribing to `SPY` also delivers `SPYG` messages. A binding **must** re-filter by exact string equality after receipt (`contract/semantics.md` §5) |
+
+### 5.2 Payload — Exactly One Shape
+
+**No `kind`, and no `tf`.** Whether it comes from a tick chart, a minute chart, or
+a daily chart, the same set of fields is sent every time:
+
+```json
+{
+  "proto": 2, "seq": 1, "sid": 1785646054360588,
   "ts": 1785646062.364744, "ts_str": "2026-04/18-13:30:45",
   "bar_type": 0, "bar_interval": 1, "category": 2,
   "o": 450.0, "h": 450.0, "l": 450.0, "c": 450.0,
-  "el_volume": 100, "el_ticks": 195, "el_upticks": 100,
-  "el_downticks": 80, "el_open_interest": 0,
-  "bid": 449.99, "ask": 450.01 }
+  "el_volume": 100, "el_ticks": 195,
+  "el_upticks": 100, "el_downticks": 80, "el_open_interest": 0,
+  "bid": 449.99, "ask": 450.01
+}
 ```
 
-Topic 放在獨立 frame 是為了讓 subscriber 的 filter 在 topic 上做，payload 擴充
-schema 時不影響訂閱行為。
-
-**版本欄位叫 `proto` 而不是 `v`。** 前一代 wire 用 `v` 一路數到 4；這次是重寫，版本
-從 1 重新起算。若沿用同一個 key，`{"v":1}` 會同時是兩個協定的合法開頭，而錯配的失敗
-形態會是**數字看起來合理但其實是別的東西**（舊 v1 的 tick 在形狀上吻合，只在欄位層
-分歧）。換一個 key 讓這整類問題在結構上不存在：舊 payload 沒有 `proto`，「版本相符」
-與「其實是舊資料」永遠不會同時成立。
-
-#### 4.1.1 量值欄位一律原文轉送
-
-五個 `el_*` 欄位是 EasyLanguage reserved word 的原文，publisher 不做選擇也不做換算。
-
-這一點曾經不是這樣。`Volume` 與 `Ticks` 在 intraday 圖與 daily 圖上意義相反，indicator
-因此依 `BarType` 交換欄位，好讓 wire 上的 `vol` 在每個 timeframe 都是「總成交股數」。
-**那次交換發生在 wire 之外，數字看起來一律合理**，於是必須再發明一個 `pv`
-（publisher convention）欄位才分得出來 —— 一個版本號，用來描述另一個版本號沒說到的
-語意。移除交換之後，`pv` 失去存在理由，一併刪除。
-
-`el_` 前綴是規範的一部分：看到 `el_volume` 的人會去查 EasyLanguage 的定義，看到
-`volume` 的人不會 —— 而後者正是這個 repo 已經踩過、且數字全程看起來合理的那個 bug。
-
-### 4.2 時間語意（跨 binding 必須一致）
-
-| 欄位 | 來源 | 用途 |
+| Field | Type | Meaning |
 | --- | --- | --- |
-| `ts` | DLL 收訊端 wall clock（UTC epoch） | 延遲量測。**不可**用於 bar 對齊；歷史回放時每根 bar 共用同一個 `ts` |
-| `ts_str` | EL 原始 `yyyy-MM/dd-HH:mm:ss`，逐字透傳 | **bar `bar_time` 的唯一權威來源** |
+| `proto` | int | Protocol version, **always 2**; a payload missing this key is not this protocol |
+| `seq` | int | Per-symbol, monotonically increasing; every frame must carry one (§6.5) |
+| `sid` | int | Publisher session id (microsecond precision); changes on a DLL restart — that's a reset, not a loss |
+| `ts` | float | DLL receive-side wall clock (UTC epoch seconds); used for latency measurement, for ordering same-minute frames on a tick chart, and as the last resort when `ts_str` is absent |
+| `ts_str` | string | EL's `Date`+`Time`, `yyyy-MM/dd-HH:mm:ss`, 24-hour ET wall clock, verbatim. **The sole authoritative source for `bar_time`** (§6.1) |
+| `bar_type` | int | EL's `BarType`, verbatim. 0 = tick series, 1 = intraday minutes, 2 = daily |
+| `bar_interval` | int | EL's `BarInterval`, verbatim; the minute count when `bar_type` = 1 |
+| `category` | int | EL's `Category`, verbatim: 0 Future / 2 Stock / 3 Stock Option / 4 Index / … (the lookup key for §6.2) |
+| `o` `h` `l` `c` | float | EL's OHLC; on a 1-tick series all four are equal |
+| `el_volume` `el_ticks` `el_upticks` `el_downticks` `el_open_interest` | int | EL's five reserved words, verbatim, **required** — a missing field is refused outright (§6.2) |
+| `bid` `ask` | float \| null | `InsideBid`/`InsideAsk`; `null` when the publisher had no quote |
 
-> 「以 `ts_str` 為權威」是**跨 binding 的強制規範**。這類決策不能只存在於某一個
-> binding 的實作裡。
+Why the wire no longer splits tick from bar shapes, and why `bar_type`/`bar_interval`
+are no longer mapped to names like `"5m"`/`"1d"`: both used to be judgments the
+publisher made off the wire, on the consumer's behalf (which fields mattered on
+which chart, and which interval deserved a name) — and the moment that judgment
+was wrong or stale, the consumer had no way to see it. The full tradeoff is
+recorded in [`contract/wire.md`](../contract/wire.md).
 
-**`ts_utc` 已從 wire 移除，這是取捨不是冗餘清理。** 它是 DLL 用
-`std::chrono::zoned_time` 解析 `ts_str` 的結果，而 binding 是用自己的時區資料庫解析
-同一個字串 —— 那條「>5s drift 就 log」是唯一能發現「兩端時區資料庫不一致」的訊號。
-**且 DLL 從此不再解析 `ts_str`，也就不再驗證它**：無效的時間字串會原樣送出，錯誤
-發現點往後移一層到 binding。兩件事都明寫在 `contract/wire.md`。
+### 5.3 Why the Version Field Is Called `proto` Rather Than `v`
 
-#### bar_time 是 publisher 給的時間，原樣落地
+The previous generation of the wire used `"v"`, counting up to `4`. This rewrite
+restarts numbering from `1`; had it reused `"v"`, `{"v":1}` would have been a
+legal opening for both the old and new protocols at once — an old v1 bar used
+`kind:"bar_1m"`, which the new version gate would let through (`v==1`), only to
+be judged an unknown shape at the `kind` check and have the **entire batch of
+bars silently dropped**. An old v1 tick would have matched shape, and only at
+field-read time would `el_volume` turn out missing — if a binding defaulted
+missing fields, the disk would end up with a batch of quantities that are all
+zero and look entirely plausible.
 
-`bar_time` = `ts_str` 以 `America/New_York` 解析、轉 UTC、秒歸零。**沒有位移，
-也沒有格線對齊。** EasyLanguage 的 `Time` 是 bar 的收盤時間，所以 `bar_time`
-也是收盤時間；要左緣標籤的消費端自己減。
+Renaming one field makes this whole class of problem **structurally
+impossible**: an old payload has no `proto` key at all, so "the version
+matches" and "this is actually old data" can never both be true at once.
 
-> 這裡曾經做過轉換：減一分鐘，再對齊一條錨在 09:30 ET 的格線。**它每天吃掉一根
-> bar。** TradeStation 的盤中格線在 RTH 開盤與收盤各重啟一次，所以 06:00 session
-> 的 60 分鐘圖一天發 15 根、含兩根殘根 —— 收盤 09:00 與 09:30 雙雙落在 08:30，
-> 後者覆蓋前者。段長取決於使用者的 chart session 設定，而 wire 上沒有這個資訊，
-> 所以沒有任何格線修得好。實測與規範見 `contract/semantics.md` §2。
+### 5.4 Error Codes (`contract/error_codes.md`)
 
-### 4.3 資料遺漏偵測
-
-ZeroMQ PUB/SUB 是 fire-and-forget。兩側程式碼都明文承認會靜默丟訊息：
-
-```cpp
-// cpp/src/ts2python.cpp:135
-// PUB silently drops past SNDHWM (PUB never blocks publisher).
-sock->set(zmq::sockopt::sndhwm, 100000);
-```
-```python
-# tradestation_data/wire/el_subscriber.py
-# Default RCVHWM is 1000 — PUB/SUB silently drops past that when the ...
-self._socket.setsockopt(zmq.RCVHWM, 1_000_000)
-```
-
-調高 HWM 只降低丟包機率，對於要拿來做交易決策與模型訓練的資料流，「靜默缺漏」比「明確報錯」危險得多。
-因此每個 frame 都帶以下兩個欄位供 subscriber 偵測缺漏：
-
-| 欄位 | 型別 | 語意 |
+| Code | Meaning | Returned by |
 | --- | --- | --- |
-| `seq` | uint64 | **per-symbol** 單調遞增序號，從 1 起算；tick 與 bar 共用同一個計數器 |
-| `sid` | uint64 | publisher session id（init 當下的 UTC epoch 微秒） |
+| `0` | Success | All |
+| `1` | Already initialized, an idempotent no-op | `EL_Init3` |
+| `-1` | Publish called before a successful init | `EL_Publish` |
+| `-2` | ZMQ send failed (hit the high-water mark, or an exception) | `EL_Publish` |
+| `-3` | Init's bind/socket creation failed (most commonly: the port is already in use) | `EL_Init3` |
+| `-4` | Invalid argument (a null pointer, or a quantity outside `int64`'s representable range) | `EL_Init3` `EL_Publish` |
+| `-6` | ABI mismatch — the caller is a `.ELD` older than this protocol | The four tombstone exports |
 
-- **per-symbol 而非全域**：subscriber 可能只訂閱 `SPY`，全域序號的跳號會被其他
-  symbol 的訊息汙染，無法判斷自己是否漏收。
-- **`sid` 用於區分「publisher 重啟導致 seq 歸零」與「真的漏收」**，否則重啟會被誤判
-  成巨大 gap。
-- subscriber 端據此產出 `messages_lost` 指標。
-
-> **被協定閘門拒收的 frame 仍要計入序號。** 它一樣佔用了 publisher 那個 per-symbol
-> 計數器的一格；若在拒收路徑上跳過 `observe()`，`_expected` 會停在最後一個被接受的
-> seq，下一個被接受的 frame 就會報出一個根本沒發生的 gap —— 使用者會看著一條什麼都
-> 沒掉的連線持續回報遺漏。
-
-### 4.4 版本
-
-| 版本 | 現值 | 誰在乎 |
-| --- | ---: | --- |
-| wire（payload `"proto"`） | **1** | 所有 binding |
-| DLL ABI（`EL_DllVersion()`） | **1** | 所有 binding |
-| Python package version | 0.3.0 | 僅 Python 消費端 |
-
-**兩者各只有一個版本，沒有相容矩陣。** 前一代有一份 `compat.md` 在維護
-「ABI × wire × publisher convention」的三維對應；那份表格存在的前提是舊版本必須繼續
-被讀，而現在不是了 —— 沒有 `proto` 的 payload 直接拒收。
-
-`ts2python.h` 仍然寫著 DLL 版本「bumps independently of wire protocol」，這句話依然
-成立：兩者可以各自往前走。只是目前它們都是 1，而且**升級時必須同時換**——
-indicator 綁的是 `EL_Init3`，舊 DLL 沒有這個匯出。四種不相容部署各由哪一道檢查攔下，
-列在 [`../contract/wire.md`](../contract/wire.md)。
+The real danger isn't these return codes — it's ZMQ PUB's **silent drop** past
+`SNDHWM`, which returns no error code at all and leaves the publisher none the
+wiser. That is exactly why the payload carries `seq` (§6.5).
 
 ---
 
-## 5. Python Binding 內部分層
+## 6. Semantic Rules — What Schema Can't Check, but Every Binding Must Agree On
 
-現有模組混了兩種壽命完全不同的東西，必須切開，否則將來寫 Go binding 時
-「要移植哪些」講不清楚：
+> `contract/semantics.md` matters more than the JSON Schema: schema only
+> validates "the field exists, the type is right." What actually makes different
+> language bindings produce inconsistent data is semantics.
 
-下圖的**箭頭一律表示「依賴」**（`A --> B` 讀作「A import B」），邊取自實際 import 關係。
+### 6.1 Time Authority: `bar_time` = `ts_str`, and It's a Close Time
 
-```mermaid
----
-config:
-  flowchart:
-    defaultRenderer: elk
----
-flowchart TB
-    subgraph CORE["core — 每個語言 binding 都必須有"]
-        WIRE["wire/<br/>ZMQ frame → 型別化物件"]
-        DOM["domain/<br/>Tick · Bar · Timeframe"]
-    end
-    subgraph APP["app — reference app，其他語言可不做"]
-        AGG["aggregation/<br/>session · snapshot"]
-        STO["storage/<br/>Parquet writer · 唯讀 HistoryStore"]
-        SNK["sinks/<br/>pipeline · fan-out"]
-        RT["runtime/<br/>IngestionRuntime · CLI"]
-    end
+| Field | Correct use | Wrong use |
+| --- | --- | --- |
+| `ts_str` | **The sole authoritative source for `bar_time`**: parsed as `America/New_York` (the IANA tz database, not the system's local timezone), converted to UTC, floored to the minute | Treating it as having second-level resolution (it only has minute resolution) |
+| `ts` | The DLL's receive-side wall clock; the ordering key for same-minute frames on a tick chart; the last resort when `ts_str` is **absent** (present but unparseable is a different state — see below) | A source for `bar_time` |
 
-    WIRE --> DOM
-    AGG --> DOM
-    STO --> DOM
-    SNK --> DOM
-    SNK --> STO
-    RT --> WIRE
-    RT --> DOM
-    RT --> AGG
-    RT --> STO
-    RT --> SNK
-```
+**`ts_str` being absent and `ts_str` failing to parse are two states that must be
+handled separately:**
 
-實際依賴關係（用於驗證上圖）：
+| State | Binding behavior | Why |
+| --- | --- | --- |
+| The field doesn't exist, or is `""` | Allowed to fall back to `ts` (the receive clock), but **must log it once** | The publisher is honestly declaring it has no such information |
+| The field has a value that fails to parse | **Must refuse the whole frame**, must not fall back to `ts` | Falling back to `ts` during a historical replay collapses the whole session onto one `bar_time` — the zh-TW host's `FormatTime("tt")` incident actually made this happen |
 
-| 模組 | 依賴 |
+**`bar_time` has no shift and no grid alignment.** EasyLanguage's `Time` is a
+**close** time, and `bar_time` carries it through verbatim — no subtracting a
+minute, no aligning to a grid anchored at 09:30. This repo used to do both, at
+the cost of a 60-minute chart dropping one bar a day: TradeStation restarts its
+intraday grid at the RTH open and close, so two genuinely different close points
+land on the same grid slot after alignment, and the later one overwrites the
+earlier one. **A consumer that wants left-edge labels subtracts for itself** —
+that's the consumer's job, not this transport's.
+
+### 6.2 The Five `el_*` Quantities — Intraday and Daily Swap Meaning, in Two Pairs Running Opposite Directions
+
+The wire carries five quantities, **each one the raw value of the identically
+named EasyLanguage reserved word**; the publisher makes no selection, conversion,
+or correction, and neither does a binding. The `el_` prefix on the field names is
+part of the spec, not decoration — this repo once dropped it down to a plain
+`volume`, at the cost of a volume column that was systematically about half of
+the real number.
+
+Per TradeStation's official definition (for equities — see the
+[EL reserved-words page](https://help.tradestation.com/10_00/eng/tsdevhelp/elword/el_definitions/easylanguage_words_related_to_ticks,_volume_&_open_interest.htm)):
+
+| EL reserved word | **intraday** (minute / tick / volume bar) | **daily and above** |
+| --- | --- | --- |
+| `Volume` | Only the up-tick share volume | Total share volume |
+| `Ticks` | **Total share volume** | Total tick count; equals `Volume` on equities (OI = 0) |
+| `UpTicks` | Up-tick share volume | Total share volume |
+| `DownTicks` | Down-tick share volume | 0 (equities) / Open Interest (futures) |
+| `OpenInt` | 0 (equities) / down-tick volume (futures) | Open Interest (futures) / 0 otherwise |
+
+**There are two swapped pairs, running in opposite directions**: `Volume`/`Ticks`
+is the well-known one; `DownTicks`/`OpenInt` is the second — intraday, `OpenInt`
+borrows `DownTicks`'s meaning; daily, `DownTicks` borrows `OpenInt`'s meaning.
+
+> **Measured live (2026-08-02, SPY / @ES / VXX / a SPY option, all intraday
+> charts)**: `el_open_interest` **always returns the value of `el_downticks` on
+> an intraday chart**, regardless of instrument category — `@ES` futures match
+> the official documentation, but the three equity/option rows (`SPY`/`VXX`/the
+> option) are not documented and were measured this way. **A futures daily bar's
+> `el_downticks` IS open interest** — summing that column sums OI, not volume.
+
+A consumer wanting "total volume" reads the field this table names for the
+`bar_type`: **`el_ticks` intraday, `el_volume` daily**. **Do not "verify" a daily
+bar by summing intraday bars** — `1d` is the exchange's officially consolidated
+figure after settlement (including late-reported block trades), while intraday
+is whatever was assembled from the live stream at the time; the two measurements
+have different scope and are not supposed to match
+(`contract/semantics.md` §3.4 has the full four-point reasoning and the measured
+numbers).
+
+### 6.3 When `bid`/`ask` Are Invalid
+
+The DLL already turns `InsideBid`/`InsideAsk` ≤ 0 (including NaN) into JSON
+`null`; the binding only needs one more belt-and-braces check
+(`_quote_or_none`). **There is no hard-coded list of index/breadth symbols** —
+an earlier version had one, with `VXX` on it, and VXX is a tradeable ETN that
+measured 567,776 shares of volume in a single bar, so its real quote was being
+thrown away for nothing. `category` (§5.2) now travels on every frame, so a
+consumer that wants that behavior has a fact to key off instead of a guessed
+list.
+
+### 6.4 Session Rules
+
+| Rule | Value |
 | --- | --- |
-| `domain` | —（無出邊，整個 package 的根） |
-| `wire` | `domain` |
-| `aggregation` | `domain` |
-| `storage` | `domain` |
-| `sinks` | `domain` `storage` |
-| `runtime` | `domain` `wire` `aggregation` `storage` `sinks`（組裝點） |
+| US equity RTH | 09:30–16:00 **ET** |
+| Session assignment | A bar before 04:00 ET belongs to the **previous** session |
+| `breadth`-symbol retention | Reset daily at 09:30 ET; no pre-market retention |
+| Other symbols (`etf`/`volatility`/`mega_cap`) retention | Not reset; 60 minutes of pre-market data retained by default |
 
-**這一刀已經是乾淨的**：core（`domain` + `wire`）對 app 零依賴。因此本節不是
-重構提案，而是把既有的分層明文化 —— 不需改動任何 import 方向。
+Defaults are determined by `category` in
+`bindings/python/config/symbols.yaml`, and can be overridden per symbol
+(`aggregation/session.py::SessionPolicy.for_category`). This is a **market
+rule**, not an implementation detail of any one binding — if a binding interprets
+it independently, its session boundaries will disagree with every other
+binding's.
 
-| 現有模組 | 分類 | 新語言 binding |
-| --- | --- | --- |
-| `wire/` `domain/` | **core** — 解 frame、轉型別 | 必做 |
-| `aggregation/` | app（見下） | 選做 |
-| `storage/` `sinks/` `runtime/` | **app** — Parquet 落地、CLI、sink pipeline | 不必 |
+### 6.5 Sequence Numbers and Gap Detection (`seq` / `sid`)
 
-### 5.1 `aggregation/` 歸屬：app 側，但規則上移 contract
+| Rule | Explanation |
+| --- | --- |
+| Per-symbol, shared by tick and bar | The counting unit is the symbol, not (symbol, kind) — a subscriber listening to one topic can only detect its own loss with a single shared counter |
+| The first message seen for a symbol | Establishes the baseline; it must **not** be reported as loss — nobody was listening when earlier messages were sent |
+| A change in `sid` | Means the publisher restarted; state must reset. The idempotent init path (returning `1`) does **not** change `sid`, so re-Verifying the indicator is never mistaken for a restart |
+| `seq < expected` | TCP guarantees single-publisher ordering, so a smaller sequence number is a duplicate/replay — **the expectation must not be rolled back** |
+| A sequence number is consumed even on send failure | That data really was lost, and showing it as a gap is the honest answer |
+| `messages_lost == None` | "Cannot tell" and "confirmed zero" are two different states that must be expressible separately (see `gap_detection_available` in §7.2) |
 
-`aggregation/` 現在只剩 `session.py` 與 `snapshot.py`。**`BarAggregator` 已刪除** ——
-它是 tick→1m 的 fallback，而這個 binding 不再從 tick 推算任何 bar：需要某個間隔的
-bar，就在 TradeStation 開那個間隔的圖。
-
-留下的 `snapshot.py` 是記憶體內的最新狀態視圖，屬 app。但 **session policy 是市場
-規則，不是 Python 實作細節** —— 09:30 ET reset、pre-market 保留窗、breadth 類 symbol
-是否清空 deque，這些換語言後必須一致。
-
-因此：**規則進 `contract/semantics.md` §4 + fixtures，實作留各語言 app 層。**
-
-### 5.2 `wire/base.py` 的定位
-
-它不是泛用 vendor 抽象，而是 dp **內部**給兩種 TradeStation 接入方式
-（EL bridge / 未來 WebAPI）共用的介面。舊 docstring 寫「...other vendors」，語意越界
-了 —— 已收窄，避免消費端誤把它當成可依賴的通用契約。想替換掉整包 dp 的消費端，
-應該宣告自己的 Protocol 並讓 dp 以 structural typing 滿足它（§7.1）。
+`messages_lost` (transport-layer loss) and `frames_refused` (received but failed
+to parse — e.g. a `proto` mismatch) must be read **together**: a stream in which
+every single frame is refused still reports `messages_lost == 0` — this is
+exactly what the "binding upgraded first, DLL not yet upgraded" window really
+looks like.
 
 ---
 
-## 6. Conformance Suite
+## 7. Python Reference Binding — Internal Architecture
 
-讓「多語言 subscriber」從口號變成可驗證的機制。
+### 7.1 Module Layers
+
+```
+tradestation_data/
+├── wire/          ZMQ SUB + payload parsing (TradeStationELProvider)
+├── domain/        Bar — the only data type this binding has
+├── runtime/        IngestionRuntime (buffer/dedupe/lifecycle), CLI (main.py), symbols.yaml loading
+├── aggregation/   MarketSnapshot (in-memory latest state), SessionPolicy
+├── sinks/         Sink protocol, SinkPipeline, built-in sinks, dynamic loading from sinks.yaml
+└── storage/       BarWriter (write), HistoryStore (read) — Hive-partitioned Parquet
+```
+
+### 7.2 End-to-End Data Flow: One Data Point's Journey
 
 ```mermaid
 ---
@@ -461,52 +409,40 @@ config:
     defaultRenderer: elk
 ---
 flowchart LR
-    TH["test_harness.exe<br/>--mode smoke/stress/multithread"]
-    REC["contract/tools/record.py<br/>（不依賴 tradestation_data）"]
-    FIX[("contract/fixtures/<br/>*.jsonl + expected/")]
-    PY["Python binding tests"]
-    GO["Go binding tests"]
+    DLL["EL_Publish<br/>(cpp)"] -->|"ZMQ PUB<br/>2-frame"| RECV["socket.recv_multipart()<br/>wire/el_subscriber.py"]
+    RECV --> TOPICCHK{"topic string<br/>exactly equal?"}
+    TOPICCHK -->|"no (prefix mismatch)"| DROP1["dropped<br/>topic_prefix_mismatch_dropped"]
+    TOPICCHK -->|"yes"| PARSE["_parse_payload()<br/>proto gate + seq observed + quantities required"]
+    PARSE -->|"proto≠2 / missing field / bad JSON"| DROP2["frames_refused += 1<br/>logged, stream continues (no raised error)"]
+    PARSE -->|"ok"| BAR["Bar (domain/bar.py)"]
+    BAR --> INGEST["IngestionRuntime<br/>._handle_provider_bar()"]
+    INGEST -->|"see the §7.3 decision diagram"| CLOSED["_on_closed_bar()"]
+    CLOSED --> SNAP["MarketSnapshot.on_bar()"]
+    CLOSED --> PIPE["SinkPipeline.on_bar()"]
+    PIPE --> PQ["ParquetBarSink → BarWriter.write()"]
+    PQ -->|"should_flush() fires"| DISK["bars.parquet<br/>bartype=N/interval=M/symbol=SYM/date=YYYY-MM-DD/"]
 
-    TH -->|"真實 ZMQ frames"| REC --> FIX
-    FIX --> PY
-    FIX --> GO
+    classDef existing fill:#e9ecef,stroke:#adb5bd,color:#495057
+    class DLL,RECV,TOPICCHK,DROP1,PARSE,DROP2,BAR,INGEST,CLOSED,SNAP,PIPE,PQ,DISK existing
 ```
 
-### 6.1 fixtures 必須錄製，不可手寫
+### 7.3 `IngestionRuntime`: Buffering, Deduplication, and the Tick Bypass
 
-手寫的 fixture 只是把假設寫第二遍，抓不到 DLL 真實行為與文件的落差。
-兩個零件已經串起來了：
+EL's "Update every tick" mode calls `EL_Publish` repeatedly for the same bar
+within one bucket, each call carrying a more refined OHLC.
+`IngestionRuntime._handle_provider_bar` buffers the latest one for each
+`(symbol, bar_type, bar_interval)` and only actually emits it when the next
+bucket arrives (or on a wall-clock timeout, or on shutdown) — so a sink only
+ever sees the **final** version of each bucket's bar.
 
-- `cpp/src/test_harness.cpp` — *"exercises TS2Python.dll **without TradeStation**"*
-- `contract/tools/record.py --record <path>` — *"intentionally does **not** depend
-  on the `tradestation_data` package"*，正因如此才有資格當中立錄製器
-
-**現在四份 fixture 全數錄自真 DLL，沒有例外。** 前一代留過一份手寫的 `v1_legacy`，
-理由是當時的 DLL 已不再發 wire v1；proto 2 之後不再有「需要支援的舊版本」，那份
-連同其餘 legacy fixture 一併刪除。
-
-`expected/*.json` 則是另一條規矩：**必須依 `semantics.md` 手工推導，不得由 binding
-產生**。用受測的程式碼產生期望值，只能證明它跟自己一致。
-
-### 6.2 必須涵蓋的情境
-
-| 情境 | 為何重要 | 現況 |
-| --- | --- | --- |
-| breadth symbol（`$TICK` / `$ADD`） | 五個 `el_*` 全為 0、`bid`/`ask` 為 `null`，易被 binding 誤判 | `noquote` |
-| 非 index symbol 的 null 報價 | 只測 index symbol 分不出 §3.1（publisher 送 null）與 §3.2（binding 判無效） | `noquote` |
-| 每一個 BarType/BarInterval | 原值 → `bartype=`/`interval=` 分區，沒有任何組合被拒收 | `bars` |
-| session 首尾 bar | 釘住「publisher 給什麼就存什麼」 | `session` |
-| bar 全程無報價 | bar quote 在本協定結構上不存在，binding 不該有任何判斷 | 四份皆驗 |
-| DST 轉換日 | `ts_str` → UTC 的正確性，跨 binding 最容易不一致 | 尚無（單元測試有，fixture 無） |
-| multithread 模式 | frame 交錯順序 | 尚無 |
-| gap | 缺漏偵測本身 | 尚無（單元測試有，fixture 無） |
-
----
-
-## 7. 消費端整合（submodule）
-
-消費端（例如 TradeStation-TradingAgent）以 git submodule 引入 dp。
-**契約由消費端定義，dp 靠 structural typing 滿足它。**
+**`bar_type == 0` (a tick series) bypasses this buffer entirely**: the buffer's
+precondition is that `bar_time` uniquely identifies one bar, but `ts_str` only
+has minute resolution, so every print within one minute on a tick chart shares
+the same `bar_time`. Routed through the buffer, each new tick would replace the
+previous one and only one print per minute would ever be emitted — an actively
+trading tick chart would lose nearly its entire stream. So every frame on a tick
+chart **is emitted the moment it arrives**; the wire's `ts` is what orders
+prints sharing a minute, and whether to deduplicate is left to the consumer.
 
 ```mermaid
 ---
@@ -514,42 +450,282 @@ config:
   flowchart:
     defaultRenderer: elk
 ---
-flowchart TB
-    subgraph CONSUMER["消費端 repo"]
-        PROTO["MarketDataSource (Protocol)<br/>★ 契約在這裡定義"]
-        ORCH["Orchestrator<br/>strategy · broker · risk"]
-    end
+flowchart TD
+    START(["Bar arrives from the Provider"]) --> ISTICK{"bar_type == 0<br/>(a tick series)?"}
+    ISTICK -->|"yes"| EMITTICK["emitted straight to _on_closed_bar<br/>no buffering, no dedup"]
+    ISTICK -->|"no"| CHECKDUP{"bar_time ≤<br/>last_emitted_direct_bucket?"}
+    CHECKDUP -->|"yes"| DROPDUP["bars_duplicate_dropped += 1<br/>dropped (chart-reload replay)"]
+    CHECKDUP -->|"no"| HASCUR{"does this (symbol, bar_type,<br/>bar_interval) have a buffered bar?"}
+    HASCUR -->|"no"| BUFFER["stored in _current_direct_bars"]
+    HASCUR -->|"yes"| SAMEBUCKET{"bar_time ==<br/>the buffered bar's bar_time?"}
+    SAMEBUCKET -->|"yes"| REPLACE["replaces the buffered bar<br/>(an Update-every-tick refinement)"]
+    SAMEBUCKET -->|"no"| NEWER{"bar_time ><br/>the buffered bar's bar_time?"}
+    NEWER -->|"yes"| EMITOLD["old bar emitted to _on_closed_bar<br/>new bar becomes the buffered one"]
+    NEWER -->|"no"| DROPREORDER["bars_duplicate_dropped += 1<br/>dropped (out-of-order / reload)"]
 
-    subgraph SM["vendor/tradestation-data-provider<br/>(git submodule)"]
-        C["core binding"]
-        A["reference app<br/>sinks · storage · runtime"]
-    end
+    ADVANCE(["wall-clock advance loop, every second"]) --> GRACE{"bar_time + 2 s<br/>≤ now?"}
+    GRACE -->|"yes"| EMITGRACE["emitted to _on_closed_bar<br/>(a quiet symbol's last bar is no longer held indefinitely)"]
 
-    OTHER["其他 provider<br/>（將來可整包替換）"]
-
-    C -.->|"structural typing<br/>不 import 消費端"| PROTO
-    OTHER -.->|"滿足同一契約"| PROTO
-    PROTO --> ORCH
+    classDef existing fill:#e9ecef,stroke:#adb5bd,color:#495057
+    class START,ISTICK,EMITTICK,CHECKDUP,DROPDUP,HASCUR,BUFFER,SAMEBUCKET,REPLACE,NEWER,EMITOLD,DROPREORDER,ADVANCE,GRACE,EMITGRACE existing
 ```
 
-### 7.1 為何契約不能由 dp 定義
+**The buffer key includes the timeframe**, not just the symbol: one DLL, one PUB
+socket, and one topic now carry every interval the user has open at once. Keyed
+on symbol alone, a 1-minute bar's arrival would prematurely evict and emit a
+5-minute bar still accumulating, and the 5-minute chart's real update would then
+be dropped as a "duplicate" — while the 1-minute partition looks perfectly
+healthy the whole time, masking the problem.
 
-若 dp 定義 `MarketDataProvider` 而消費端 `from tradestation_data... import` 它，
-**替換掉 dp 的那天這行 import 就死了** —— 那正是 submodule 化想避免的耦合。
+**"A quiet symbol still gets its last bar" uses `bar_time + 2 seconds`, not
+`bar_time + interval`.** `bar_time` is already a close time (§6.1); the old
+formula added an interval on top of a close time, which delayed every bar by a
+full interval — a full day, for a daily chart. That formula has been removed,
+and no per-chart-type "duration table" is needed either.
 
-Python 的 `Protocol` 是 structural typing：消費端宣告自己需要什麼形狀，dp 只是碰巧
-滿足。dp 完全不需要知道消費端存在。
+### 7.4 `MarketSnapshot` and Session Policy
 
-### 7.2 dp 側需要提供的整合面
+An in-memory view of the latest state, safe under asyncio's single-threaded
+model: `last_closed_bar`, a bounded `recent_bars` deque, `session_date`,
+`session_open_bar`. Coroutines that span an `await` should call
+`view_of()`/`views()` to get an immutable snapshot, avoiding a data race with
+concurrent ingestion updates. `SessionPolicy` (§6.4) decides whether
+`recent_bars` clears when the 09:30 ET boundary is crossed, and how much
+pre-market data is retained.
 
-| 提供什麼 | 說明 |
+### 7.5 Sink Pipeline and Built-In Sinks
+
+`IngestionRuntime` doesn't write to `BarWriter` directly — it writes to a
+`SinkPipeline`, which broadcasts every closed bar to every registered sink,
+**isolating each sink's exceptions** (`sink_on_bar_failed` is logged and
+execution continues, without affecting the other sinks). The pipeline is built
+from `config/sinks.yaml` via `sinks.registry.build_pipeline_from_config()`;
+`class:` is a `module:attr` string pointing at any callable that returns a
+`Sink` protocol implementation — users can point it at their own module to
+register a custom sink without touching this repo.
+
+| Built-in sink | Purpose |
 | --- | --- |
-| 穩定的 core binding 型別 | `Tick` / `Bar` / `Timeframe` / subscriber |
-| 可組裝的 reference app | `SinkPipeline` 讓消費端自訂輸出，不必 fork |
-| 版本 tag | 消費端 pin submodule commit 的依據 |
-| `contract/wire.md` | 消費端判斷 DLL 與 binding 是否相容 —— 現在只有一組合法組合，判斷因此退化成「是不是都升到最新」 |
+| `ParquetBarSink` | The default persistence sink. A thin layer over `BarWriter` (§7.6), exposing only `on_bar`/`should_flush`/`flush`/`close` |
+| `InMemorySink` | A bounded per-symbol deque, for tests / notebook exploration only |
+| `CallbackSink` | Dynamic Python callback dispatch; `get_sink(name)` retrieves the instance declared in `sinks.yaml` from a module-level `WeakValueDictionary`; `close()` removes it from the registry immediately |
 
-> **消費端最需要知道的一件事：dp 不再從 tick 聚出 bar。** 舊的 `BarAggregator` 已刪除。
-> 需要某個間隔的 bar，就在 TradeStation 開那個間隔的圖，或自己從儲存的資料建。
+### 7.6 Storage: `BarWriter` / `HistoryStore`
 
-具體遷移步驟見 [`migration/tradingagent-submodule.md`](migration/tradingagent-submodule.md)。
+**The write side (`storage/bar_writer.py`)** partitions on EasyLanguage's own
+`BarType`/`BarInterval`, mapping to no name at all — so "an interval this
+binding has no name for" no longer means "this data doesn't exist":
+
+```
+{root}/bartype={N}/interval={M}/symbol={SYM}/date={YYYY-MM-DD}/bars.parquet   # bar_type != 2
+{root}/bartype=2/interval={M}/symbol={SYM}/bars.parquet                       # bar_type == 2, no date= level
+```
+
+`BarType 2` (daily) has no `date=` level, because one day's worth of daily bars
+is a single row, and a closed Parquet file costs roughly 2.9 KB of schema/footer
+overhead no matter how many rows it holds — twenty years of one symbol is only
+about 5,000 rows. So the whole file is **rewritten in full on every flush**
+(the existing rows are read back, merged with the new ones, deduplicated on
+`bar_time` keeping the last write, sorted, written to a temp file, then swapped
+in with `os.replace`).
+
+**Buffering and flush triggers**: `max_buffered_bars` (accumulated across every
+partition) or `max_flush_seconds` (measured from the oldest buffered bar).
+Writing one bar at a time used to cost one Parquet row group per bar — measured
+on 78 five-minute bars, writing one at a time produced 145,977 bytes across 78
+row groups, versus 5,936 bytes in 1 row group when buffered.
+
+**Sealing a partition (only `date=` partitions)** requires **both** signals to
+hold at once:
+
+1. A bar for a **later day** of the same (timeframe, symbol) arrives; **and**
+2. That day is over in ET, **and** a full `max_flush_seconds` has passed with no
+   new data.
+
+Signal (1) alone would leave the **newest** day of a finished replay waiting
+forever (no later day is ever coming); signal (2) alone would seal a day partway
+through a replay burst (five days of data can arrive within seconds), and
+`write()` refuses a sealed partition — turning "not readable yet" into "the data
+is really gone." The quiet period is what separates "this day is over" from
+"this day has merely gone quiet for now." **Today's partition is never sealed by
+(2)**, because once a `pq.ParquetWriter` is `close()`d, it can't be reopened and
+resumed.
+
+**The read side (`storage/history_store.py`) only reads, and never derives**: a
+query for an interval that was never published returns zero rows, never
+invents a plausible-looking substitute, and never writes on the read path. A
+consumer wanting a derived interval has to either chart it in TradeStation, or
+build it from what's stored here. Query bounds are always normalized to UTC
+first (a naive input is read as ET — this is a US-equity API, and the `date=`
+partitions themselves are defined in ET), and files are pre-selected by the
+`date=` directory name before opening any of them, so a query never gets dragged
+down by today's still-open, footerless file (it only affects today; already
+sealed past days remain readable).
+
+### 7.7 The Windows Event Loop Special Case
+
+pyzmq's asyncio integration uses `loop.add_reader()`, which Windows' default
+`ProactorEventLoop` **does not support** — the SUB socket connects normally, but
+`recv_multipart()` never wakes up, **with no error to explain it**. Every entry
+point must force a selector loop:
+
+```python
+loop_factory = asyncio.SelectorEventLoop if sys.platform == "win32" else None
+asyncio.run(coro, loop_factory=loop_factory)
+```
+
+`loop_factory` is used rather than `asyncio.set_event_loop_policy(...)`: the
+whole policy API is deprecated as of 3.14 and slated for removal in 3.16, at
+which point the old spelling would stop this CLI from starting at all on the
+only platform TradeStation runs on. `tests/conftest.py` is the one remaining
+caller of the policy API, because pytest-asyncio 1.3.0 doesn't yet expose a
+`loop_factory` hook; `pyproject.toml`'s `filterwarnings` carries three
+**narrowly scoped** ignores for exactly this, and must not be widened back to
+`ignore::DeprecationWarning`.
+
+### 7.8 Shutdown Ordering
+
+```mermaid
+sequenceDiagram
+    participant Main as runtime/main.py
+    participant RT as IngestionRuntime.run()
+    participant Tasks as ingest / advance / flush / heartbeat
+    participant Provider as TradeStationELProvider
+    participant Shutdown as _shutdown()
+    participant Sinks as SinkPipeline
+
+    Main->>RT: await runtime.run()
+    RT->>Tasks: asyncio.create_task × 4
+    Note over RT: await self._stop.wait()
+    Main->>RT: SIGINT / runtime.stop()
+    RT->>Tasks: cancel() every task (stop them first, clean up after)
+    RT->>Provider: await close() (may block on Windows inside ctx.term())
+    RT->>Tasks: await each task, absorbing CancelledError
+    RT->>Shutdown: outer finally → _shutdown()
+    Shutdown->>Shutdown: drain _current_direct_bars (no buffered bar is lost)
+    Shutdown->>Sinks: on_bar() for every drained bar
+    Shutdown->>Sinks: close() (swallows each sink's exceptions)
+    Main->>Sinks: pipeline.close() (belt-and-suspenders, idempotent)
+```
+
+**Background tasks are cancelled first, then the provider is closed, and sinks
+are cleaned up last**: the order used to close the provider first, but on
+Windows `zmq ctx.term()` can block long enough for a second Ctrl+C to interrupt
+the inner `finally`, skipping `_shutdown()` and leaving `bars.parquet` with no
+footer forever. `_shutdown()` now sits in the **outer** `finally`, so it runs
+no matter what throws or gets interrupted above it. `_wake_on_task_death`
+guarantees that any background loop dying unexpectedly wakes `_stop`, instead
+of leaving the process alive and quietly still logging heartbeats while nothing
+is being ingested anymore.
+
+---
+
+## 8. Producer-Side Configuration Summary (Python binding)
+
+| Config file | Contents |
+| --- | --- |
+| `config/symbols.yaml` | The symbol list, `category` (determines the default session policy in §6.4), `role` (`trade`/`context`, advisory only, not enforced) |
+| `config/sinks.yaml` | The sink pipeline declaration (§7.5); defaults to a single `ParquetBarSink` writing to `data/bars/` |
+
+`--data-root` only acts as a fallback when `--sinks-config` is missing; to
+redirect output under normal operation, edit `sinks.yaml`'s `root`, not the CLI
+flag.
+
+---
+
+## 9. The Conformance Suite (`contract/fixtures/`)
+
+The claim of a multi-language binding becomes a verifiable fact here: every
+binding must pass the same set of fixtures.
+
+| Fixture | Harness mode | Frame count | Covers |
+| --- | --- | --- | --- |
+| `smoke.jsonl` | `smoke` | 6 | tick+bar, per-symbol `seq`, bucket floored to the minute, timestamps landing verbatim |
+| `noquote.jsonl` | `noquote` | 3 | No quote → `null` on the wire, including a non-index symbol with no quote |
+| `bars.jsonl` | `bars` | 9 | Every `BarType`/`BarInterval` combination, **none of them refused** (including a 2-minute chart, a weekly chart, a 2-day chart — the old DLL used to return `-5` and send nothing) |
+| `session.jsonl` | `session` | 2 | The first and last bar of a session, pinning "the publisher's own value gets stored, unchanged" |
+
+**Two rules**:
+
+1. **A fixture must be recorded with `contract/tools/record.py` +
+   `TS2Python_TestHarness.exe`, never hand-written.** A hand-written fixture just
+   writes down "what we think the wire looks like" a second time, and can't catch
+   any gap between the implementation and the spec.
+2. **`expected/` must never be generated by any binding.** Expected results are
+   derived independently from the rules in `semantics.md`; generating an expected
+   value from the code under test can only prove it agrees with itself.
+
+Known coverage gaps (`contract/fixtures/README.md`): `ts_str` → UTC on a DST
+transition day, detection behavior after a `seq` gap, a `sid` change within one
+recording session — the harness currently has no way to deliberately produce
+these scenarios.
+
+An `el_volume`/`el_upticks` swap **can never be caught by a fixture**:
+TradeStation's own definition makes these two fields equal in both the intraday
+and daily régimes, so real data itself can't distinguish a swap — this one has
+to be guaranteed by reading the code, and it's written up in §6.2 precisely so
+the next implementer doesn't mistake "every fixture passes" for "all five fields
+are correct."
+
+---
+
+## 10. Testing, CI/CD, and Packaging
+
+| Item | Details |
+| --- | --- |
+| Python version matrix | 3.12 / 3.13 / 3.14, on ubuntu-latest + windows-latest (`.github/workflows/ci.yml`) |
+| Lint / Format | `ruff check` / `ruff format --check`, line length 100; `contract/tools/` is linted separately against the repo-root `.ruff.toml` |
+| Type checking | `mypy` strict on `src/` (`tests/` excluded) |
+| Tests | `pytest -q`, `asyncio_mode=auto`, `filterwarnings=["error", ...]` — **a new warning fails the build outright** |
+| Build | `uv build` → `hatchling`; the wheel packages only `src/tradestation_data`; the sdist additionally includes `tests/`, `config/{sinks,symbols}.yaml`, the READMEs, and the license |
+| Release | A `v*` tag push → build → smoke-tested by installing into an isolated venv and running `tradestation-data-ingest --help` → published to PyPI via Trusted Publishing (OIDC, no API tokens) |
+
+The C++ side only builds Win32 (x86) — TradeStation is a 32-bit process. MSBuild
+imports vcpkg from the submodule via `cpp/vcpkg-local.props`/`.targets`, and
+disables the global `%LOCALAPPDATA%\vcpkg\vcpkg.user.props` integration so
+different clones can't contaminate each other.
+
+---
+
+## 11. What This Binding Does Not Do
+
+**The Python binding only receives, labels, and stores — nothing else.** No
+aggregation, no resampling, no backfill, no cache, no writing a derived value
+into the live store — all of these used to exist in this repo and have since
+been removed entirely: `BarAggregator`, `Resampler`, `bar_coverage`, the
+`source = derived:*` provenance mechanism, `publisher_version`. Likewise,
+`domain/timeframe.py`, `align_bucket_start`, `SESSION_ANCHORED_TIMEFRAMES`, and
+the 04:00 ET daily grid anchor have all been deleted — a chart is named only by
+EasyLanguage's own `BarType`/`BarInterval`, verbatim.
+
+The reason: a bar that was computed becomes **indistinguishable** from one that
+was actually published, the moment it's persisted. `HistoryStore.load_bars`
+therefore answers zero rows for an interval that was never published, and never
+conjures up a plausible-looking bar on the read path —
+`tests/test_history_store.py::test_load_bars_never_derives_bars_it_was_not_given`
+pins this down as a test.
+
+---
+
+## 12. Reference Index
+
+| Want to know… | See |
+| --- | --- |
+| Every field of the wire frame, the export list, the compatibility matrix | [`contract/wire.md`](../contract/wire.md) |
+| Semantic rules the wire schema can't check (time, `el_*`, session, sequencing) | [`contract/semantics.md`](../contract/semantics.md) |
+| The payload's JSON Schema | [`contract/point.schema.json`](../contract/point.schema.json) |
+| DLL C ABI return codes | [`contract/error_codes.md`](../contract/error_codes.md) |
+| How to record / add a conformance fixture | [`contract/fixtures/README.md`](../contract/fixtures/README.md) |
+| How to write the next language's binding | [`contract/README.md`](../contract/README.md) |
+| Python binding commands, conventions, and the AI agent's line-by-line rules | [`CLAUDE.md`](../CLAUDE.md) |
+| C++ build environment | [`cpp/README.md`](../cpp/README.md) |
+| EasyLanguage indicator installation | [`EL/README.md`](../EL/README.md) |
+| How to use the Python binding | [`bindings/python/README.md`](../bindings/python/README.md) |
+
+> **Known documentation drift**: the repo-root `README.md`'s Versioning table and
+> the top of `contract/README.md` still label the wire `proto` and the DLL ABI as
+> `1`; this document, along with `contract/wire.md`, `contract/semantics.md`,
+> `cpp/src/ts2python.cpp` (`kDllVersion = 2`), and
+> `bindings/python/.../wire/el_subscriber.py` (`PROTO_VERSION = 2`), have all been
+> verified against the code as **2**. Those two spots haven't been updated yet
+> and are worth fixing on their own.
