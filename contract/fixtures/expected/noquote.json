@@ -28,7 +28,7 @@
     {
       "symbol": "$TICK",
       "seq": 1,
-      "sid": 1785647495906600,
+      "sid": 1785841121144793,
       "bar_time": "2026-04-18T17:31:00Z",
       "bar_type": 0,
       "bar_interval": 1,
@@ -44,12 +44,12 @@
       "el_open_interest": 0,
       "bid": null,
       "ask": null,
-      "ts": 1785647505.920702
+      "ts": 1785841136.15321
     },
     {
       "symbol": "SPY",
       "seq": 1,
-      "sid": 1785647495906600,
+      "sid": 1785841121144793,
       "bar_time": "2026-04-18T17:31:00Z",
       "bar_type": 0,
       "bar_interval": 1,
@@ -59,18 +59,18 @@
       "low": 450.4,
       "close": 450.4,
       "el_volume": 100,
-      "el_ticks": 195,
+      "el_ticks": 180,
       "el_upticks": 100,
       "el_downticks": 80,
-      "el_open_interest": 0,
+      "el_open_interest": 80,
       "bid": null,
       "ask": null,
-      "ts": 1785647505.920813
+      "ts": 1785841136.15344
     },
     {
       "symbol": "SPY",
       "seq": 2,
-      "sid": 1785647495906600,
+      "sid": 1785841121144793,
       "bar_time": "2026-04-18T17:31:00Z",
       "bar_type": 1,
       "bar_interval": 1,
@@ -80,13 +80,13 @@
       "low": 449.8,
       "close": 450.4,
       "el_volume": 12000,
-      "el_ticks": 22500,
+      "el_ticks": 21000,
       "el_upticks": 12000,
       "el_downticks": 9000,
-      "el_open_interest": 0,
+      "el_open_interest": 9000,
       "bid": null,
       "ask": null,
-      "ts": 1785647505.920822
+      "ts": 1785841136.153469
     }
   ],
   "expected_messages_lost": 0

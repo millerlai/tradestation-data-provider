@@ -331,9 +331,10 @@ intraday/daily 對照是否成立需要用 `LogPublish` 自行實測。
 >
 > 已收資料的 `Ticks`/`Volume` 比值穩定在 **1.85–2.25**（1m 與 5m、五個交易日）。
 
-> **`1d` 的 `el_ticks` 存疑。** 依上表它應是筆數、不該等於 `el_volume`，但本 repo 的
-> SPY 日線 499 筆中兩者逐位元組相同。推測是 TradeStation 的日線來源未提供 tick count
-> 而以總量填充，尚未證實。在證實之前，`1d` 的 `el_ticks` 不應被當成筆數使用。
+> **`1d` 的 `el_ticks` 曾標為存疑，已由本節前面那筆 2026-08-02 的實測解掉。** 官方頁面
+> 把日線 `Ticks` 定義為「總 tick 數 **或**『Volume 與 Open Interest 之和』」，股票的 OI
+> 為 0，所以它恆等於 `el_volume` —— SPY 499 個日線列全部成立。**它從來不是筆數**，不可
+> 當成交筆數使用。
 
 #### fixture 抓得到什麼、抓不到什麼
 
@@ -342,13 +343,43 @@ binding 會以為「fixture 全過」等於「五個欄位都對」：
 
 | 錯誤實作 | fixture 抓得到嗎 |
 | --- | --- |
-| 用 `el_upticks + el_downticks` 算出 `el_ticks` | ✅ 抓得到 —— 價格不變的成交兩邊都不算，所以 `Ticks` 嚴格大於兩者之和；fixture 刻意讓它不相等 |
 | `el_ticks` 與 `el_downticks` 互換 | ✅ 抓得到 |
+| 任一量值與 OHLC 互換 | ✅ 抓得到 |
+| 用 `el_upticks + el_downticks` 算出 `el_ticks` | ❌ **抓不到** —— 恆等式在真實資料上成立 |
+| `el_open_interest` 抄 `el_downticks` | ❌ **抓不到** —— 盤中兩者本來就相等，日線兩者皆 0 |
 | **`el_volume` 與 `el_upticks` 互換** | ❌ **抓不到，而且永遠抓不到** |
 
-最後一列不是 fixture 的疏漏。上表裡 TradeStation 在 **intraday 與 daily 兩種régime**
-都把 `Volume` 和 `UpTicks` 定義成同一個數字，所以真實資料本身就無法區分這兩欄的互換 ——
-沒有任何錄製得出來的 frame 能證明實作讀對了欄位。這一欄只能靠讀 code 保證。
+**五欄裡有三欄守不住，而這張表曾經聲稱守得住。** 前兩個 ❌ 以前寫成 ✅，理由是「價格
+不變的成交兩邊都不算，所以 `Ticks` 嚴格大於兩者之和」，fixture 也刻意讓它不相等。那個
+理由是推論，不是量測，而量測說它錯：
+
+> **實測（2026-08-02，live SPY，盤中圖）**
+>
+> ```
+> 5m 839/839   15m 280/280   30m 140/140   1h 69/69     ticks == upticks + downticks
+> ```
+>
+> 跨類別逐筆也成立，期貨不例外：
+>
+> | 商品 | `Category` | `volume` | `downticks` | `ticks` |
+> | --- | --- | ---: | ---: | ---: |
+> | `SPY` | 2 | 45,852 | 33,109 | 78,961 |
+> | `@ES` | 0 | 1,653 | 1,370 | 3,023 |
+> | `VXX` | 2 | 567,776 | 582,719 | 1,150,495 |
+> | `SPY 選擇權` | 3 | 381 | 158 | 539 |
+>
+> 四列的 `volume + downticks` 都等於 `ticks`。同一次量測也給出 `openint == downticks`
+> 在每一個類別都成立（見 §3.4 前面那張表）。
+
+所以一個「算出 `el_ticks`」的 binding 與一個「讀 `el_ticks`」的 binding，在真實 wire 上
+產生完全相同的數字 —— **沒有任何錄製得出來的 frame 能分開它們**。`el_open_interest`
+同理。fixture 現在發的是忠實形狀（`ticks == up + down`、盤中 `openint == downticks`），
+不再用一個 TradeStation 不會產生的形狀去換一個換不到的鑑別力。
+
+最後一列也不是疏漏，而是更硬的版本：TradeStation 在 **intraday 與 daily 兩種régime**
+都把 `Volume` 和 `UpTicks` 定義成同一個數字，所以真實資料本身就無法區分這兩欄的互換。
+
+這三欄只能靠 `el_` 前綴的命名與讀 code 保證。**假裝守得住比坦承守不住更危險。**
 
 ### 3.5 `category` —— 查 §3.4 那張表的鑰匙
 

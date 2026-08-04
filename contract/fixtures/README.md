@@ -16,9 +16,15 @@
 | `bars.jsonl` | `expected/bars.json` | 每一個 `BarType`/`BarInterval` 組合逐字上 wire · **沒有任何組合被拒收** —— 2 分鐘圖(1/2)、週線(3/1)、2 日(2/2) 以前會被 DLL 回 `-5` 整根不送 · `bar_type=2` 與盤中同一條規則:時間戳原樣落地(§2)
 | `session.jsonl` | `expected/session.json` | session 首尾兩根 bar（§2）。**wire 送 EL 的收盤時間 `09:31` / `16:00`，期望值就是 `09:31` / `16:00`** —— 釘住「publisher 給什麼就存什麼」 |
 
-四份都涵蓋五個 `el_*` 量值原樣落地（§3.4）。harness 用的是內部一致的 intraday 形狀：
-`el_volume == el_upticks`、`el_ticks == el_upticks + el_downticks` —— 那是真實 intraday
-資料的關係，binding 不得「修正」它。
+四份都涵蓋五個 `el_*` 量值原樣落地（§3.4）。harness 用的是實測到的 intraday 形狀：
+`el_volume == el_upticks`、`el_ticks == el_upticks + el_downticks`、
+`el_open_interest == el_downticks` —— 三條都是真實 intraday 資料的關係，binding 不得
+「修正」它們。日線則是另一個形狀：`el_downticks == 0`，而股票日線的
+`el_ticks == el_volume`（§3.4）。
+
+> **這三條恆等式同時代表 fixture 守不住那三欄。** 兩個實作，一個讀 `el_ticks`、一個用
+> `up + down` 算，在忠實的 wire 上產生一模一樣的數字。fixture 曾經刻意打破恆等式來換取
+> 鑑別力，換到的是零 —— 換掉的卻是忠實性。§3.4 的「fixture 抓得到什麼」表有完整說明。
 
 `*.jsonl` 每行一個 frame：
 
