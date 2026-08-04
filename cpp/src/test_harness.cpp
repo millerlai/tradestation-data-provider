@@ -47,8 +47,22 @@ struct Options {
 // §3.4), and daily is the only place the flip happens:
 //
 //   intraday   Volume = up-tick share volume    Ticks = total share volume
-//   daily      Volume = total share volume      Ticks = trade count
+//   daily      Volume = total share volume      Ticks = Volume + OpenInt
 //                                               DownTicks = 0
+//
+// `Ticks = trade count` is what this comment used to say, and semantics.md
+// §3.4 retired it: TradeStation's own page gives a daily `Ticks` as the tick
+// count OR the sum of Volume and Open Interest, and the live SPY run behind
+// §3.4 settled which — all 499 daily rows had Ticks == Volume, a stock's OI
+// being 0. It is never a trade count. Every fixture below publishes
+// `category` 2, so the stock reading is the one that applies here.
+//
+// The kDailyQty numbers below do NOT satisfy that identity, and both intraday
+// constants carry open_interest 0 where §3.4 measured `OpenInt` returning
+// `DownTicks` on every intraday chart whatever the category. Both are
+// known-unfaithful and left standing deliberately: correcting them re-records
+// every fixture and re-derives its expectations by hand, which changes what
+// conformance asserts rather than what this comment claims.
 //
 // Publishing the intraday shape on a `1d` bar is what this fixture used to
 // do, and it teaches the next binding author the wrong thing about precisely
