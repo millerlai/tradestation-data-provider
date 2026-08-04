@@ -32,6 +32,7 @@ class _Counters:
     bars_direct_in: int = 0  # points received on the EL_Publish path
     bars_direct_updated: int = 0  # intra-bar updates to a buffered direct bar
     bars_duplicate_dropped: int = 0  # stale/out-of-order direct bar (bar_time < buffered)
+    bars_subminute_suspected: int = 0  # replaces that cannot be intra-bar refreshes
     last_report_monotonic: float = field(default_factory=time.monotonic)
     last_report_bars: int = 0
 
@@ -104,6 +105,10 @@ class IngestionRuntime:
         # 1m partition looking perfectly healthy the whole time.
         self._current_direct_bars: dict[tuple[str, int, int], Bar] = {}
         self._last_emitted_direct_bucket: dict[tuple[str, int, int], datetime] = {}
+        # Series already warned about as sub-minute. Latched: the condition
+        # recurs on every print, and one line per chart is the signal — a line
+        # per print would bury it.
+        self._subminute_warned: set[tuple[str, int, int]] = set()
 
     # ---- lifecycle --------------------------------------------------
 
@@ -296,6 +301,40 @@ class IngestionRuntime:
         if bar.bar_time == current.bar_time:
             # Intra-bar refresh — replace so the final emit carries the
             # complete OHLC and quantities for the interval.
+            #
+            # Unless it is not a refresh at all. A refresh ACCUMULATES: within
+            # one bar the high only rises and the low only falls. A high that
+            # drops or a low that rises cannot have come from the same bar, so
+            # these are two different bars wearing one bar_time — which is what
+            # a sub-minute chart looks like from here, ``ts_str`` having only
+            # minute resolution. The replace below then throws the earlier bar
+            # away, and on a 1-second chart that is ~59 of every 60 prints.
+            #
+            # Nothing here can fix it: BarType and BarInterval both read 1 on a
+            # 1-second and a 1-minute chart alike, so the buffer cannot be
+            # skipped the way ``bar_type == 0`` skips it. EL does detect the
+            # condition (TS2Python_Exporter.el latches SubMinuteChart on
+            # Date = Date[1] and Time = Time[1]) but that flag never reaches
+            # the wire, so the loss stays invisible to every binding. Saying so
+            # once per series is the part that is ours to do.
+            if bar.high < current.high or bar.low > current.low:
+                self._counters.bars_subminute_suspected += 1
+                if key not in self._subminute_warned:
+                    self._subminute_warned.add(key)
+                    log.warning(
+                        "subminute_chart_suspected",
+                        extra={
+                            "symbol": bar.symbol,
+                            "bar_type": bar.bar_type,
+                            "bar_interval": bar.bar_interval,
+                            "bar_time": current.bar_time.isoformat(),
+                            "detail": (
+                                "two points share one bar_time but their "
+                                "high/low cannot belong to one bar; only the "
+                                "last point of each minute is being stored"
+                            ),
+                        },
+                    )
             self._current_direct_bars[key] = bar
             self._counters.bars_direct_updated += 1
             return
@@ -333,6 +372,7 @@ class IngestionRuntime:
                 "bars_direct_in": self._counters.bars_direct_in,
                 "bars_direct_updated": self._counters.bars_direct_updated,
                 "bars_duplicate_dropped": self._counters.bars_duplicate_dropped,
+                "bars_subminute_suspected": self._counters.bars_subminute_suspected,
                 "bars_per_sec": round(bars_since / dt, 2),
                 "symbols_seen": len(self._snapshot.symbols()),
                 # Read together or not at all. `messages_lost` counts frames

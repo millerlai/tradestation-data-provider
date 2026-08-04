@@ -320,6 +320,60 @@ async def test_bar_sink_failure_logged(caplog) -> None:
 
 
 @pytest.mark.asyncio
+async def test_subminute_chart_is_reported_not_silently_coalesced(caplog) -> None:
+    """Two points sharing a bar_time whose high/low cannot be one bar.
+
+    A 1-second chart reads bar_type 1 / bar_interval 1 on the wire exactly as a
+    1-minute chart does, so the buffer cannot be skipped the way bar_type 0
+    skips it, and ~59 of every 60 prints are replaced away. EL sees the
+    condition and latches SubMinuteChart, but that flag never reaches the wire.
+    Saying so is the part this side can do.
+    """
+    import logging
+
+    from tradestation_data.domain.bar import Bar
+
+    def _b(high: float, low: float) -> Bar:
+        return Bar(
+            symbol="SPY",
+            bar_time=datetime(2026, 4, 20, 13, 30, tzinfo=UTC),
+            open=450.0,
+            high=high,
+            low=low,
+            close=450.0,
+            el_volume=100,
+            el_ticks=180,
+            el_upticks=100,
+            el_downticks=80,
+            el_open_interest=0,
+            bar_type=1,
+            bar_interval=1,
+            category=2,
+        )
+
+    def _warned(records) -> int:
+        return sum(1 for r in records if "subminute_chart_suspected" in r.message)
+
+    runtime = _make_runtime()
+    with caplog.at_level(logging.WARNING):
+        await runtime._handle_provider_bar(_b(450.5, 449.5))
+        # A genuine intra-bar refresh only ever widens the range.
+        await runtime._handle_provider_bar(_b(450.6, 449.4))
+        assert runtime._counters.bars_subminute_suspected == 0
+        assert _warned(caplog.records) == 0
+
+        # A high that drops cannot have come from the same bar.
+        await runtime._handle_provider_bar(_b(450.2, 449.4))
+        assert runtime._counters.bars_subminute_suspected == 1
+        assert _warned(caplog.records) == 1
+
+        # Latched: the counter keeps moving, the warning does not repeat.
+        await runtime._handle_provider_bar(_b(450.1, 449.4))
+        assert runtime._counters.bars_subminute_suspected == 2
+        assert _warned(caplog.records) == 1
+
+
+@pytest.mark.asyncio
 async def test_handle_provider_bar_drops_reordered_stale_bar() -> None:
     """Covers line 300-301: bar.bucket_start < current.bucket_start."""
     runtime = _make_runtime()
