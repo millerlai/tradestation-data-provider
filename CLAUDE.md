@@ -14,7 +14,7 @@ EL/                  EasyLanguage exporter indicator
 cpp/                 bridge DLL (Win32 x86) + standalone test harness
 bindings/python/     reference binding: ingestion runtime, sinks, Parquet store
   └ examples/        four runnable scripts; two need no DLL (see its README)
-docs/                architecture.md, migration/
+docs/                architecture.md, plans/
 ```
 
 **Rules that live only inside a binding are bugs.** They get missed by the next
