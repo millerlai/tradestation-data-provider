@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """Fill missing bars in Hive-partitioned bar Parquet files.
 
-Shares the same date / session / timeframe arguments as verify_parquet.py.
-For each trading day in range, detects which session bars are missing and
+Shares the same date / window / timeframe arguments as verify_parquet.py,
+and the same learned expected set — the bar times a majority of the days on
+disk actually carry, never a uniform grid. That matters most here: against a
+grid, the four hourly positions TradeStation does not publish on a
+session-restarting chart (contract/semantics.md §2) were filled in with
+invented OHLC rows at timestamps that never existed.
+
+For each trading day in range, detects which of those bars are missing and
 writes synthetic replacements using the chosen method:
 
   ffill       — use previous bar's close for o/h/l/c (flat, zero volume).
@@ -54,9 +60,11 @@ import pyarrow.parquet as pq
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from verify_parquet import (
     _cluster,
+    _day_path,
     _discover_symbols,
     _expected_bars,
     _fmt_range,
+    _observed_profile,
     _parse_date,
     _parse_hhmm,
     _resolve_tz,
@@ -293,6 +301,16 @@ def main() -> int:
         help="Report what would change but do not write files.",
     )
     ap.add_argument("--max-gap-runs", type=int, default=3)
+    ap.add_argument(
+        "--min-reference-days",
+        type=int,
+        default=5,
+        help=(
+            "Readable days required before a learned profile is trusted "
+            "(default: 5). Below this the symbol is skipped rather than "
+            "filled against a profile that is one day agreeing with itself."
+        ),
+    )
     args = ap.parse_args()
 
     try:
@@ -327,8 +345,6 @@ def main() -> int:
     if args.output.resolve() == args.root.resolve():
         print("error: --output must differ from --root", file=sys.stderr)
         return 2
-    per_day_expected = len(_expected_bars(args.start_date, start_time, end_time, tf_sec, tz))
-
     if args.symbol is not None:
         symbols = [args.symbol]
     else:
@@ -342,8 +358,8 @@ def main() -> int:
 
     print(
         f"range={args.start_date}..{args.end_date}  tf={tf_label}  "
-        f"session={args.start_time}-{args.end_time} {args.tz}  "
-        f"method={args.method}  expected/day={per_day_expected}"
+        f"window={args.start_time}-{args.end_time} {args.tz}  "
+        f"method={args.method}"
     )
     print(f"root={args.root}  output={args.output}  dry_run={args.dry_run}  symbols={len(symbols)}")
     print()
@@ -355,6 +371,25 @@ def main() -> int:
     for sym in symbols:
         if multi:
             print(f"===== symbol={sym} =====")
+        try:
+            profile, ref_days = _observed_profile(
+                root=args.root,
+                bar_type=args.bar_type,
+                bar_interval=args.bar_interval,
+                symbol=sym,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                start=start_time,
+                end=end_time,
+                tz=tz,
+                holidays=holidays,
+                include_weekends=args.include_weekends,
+                min_days=args.min_reference_days,
+            )
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            continue
+        print(f"profile: {len(profile)} bars/day learned from {ref_days} day(s)")
         stats = _impute_one_symbol(
             symbol=sym,
             start_date=args.start_date,
@@ -362,8 +397,7 @@ def main() -> int:
             bar_type=args.bar_type,
             bar_interval=args.bar_interval,
             tf_sec=tf_sec,
-            start_time=start_time,
-            end_time=end_time,
+            profile=profile,
             tz=tz,
             tz_label=args.tz,
             method=args.method,
@@ -399,8 +433,7 @@ def _impute_one_symbol(
     bar_type: int,
     bar_interval: int,
     tf_sec: int,
-    start_time: time,
-    end_time: time,
+    profile: list[time],
     tz: ZoneInfo,
     tz_label: str,
     method: str,
@@ -430,15 +463,8 @@ def _impute_one_symbol(
             d += timedelta(days=1)
             continue
 
-        path = (
-            root
-            / f"bartype={bar_type}"
-            / f"interval={bar_interval}"
-            / f"symbol={symbol}"
-            / f"date={d.isoformat()}"
-            / "bars.parquet"
-        )
-        expected = _expected_bars(d, start_time, end_time, tf_sec, tz)
+        path = _day_path(root, bar_type, bar_interval, symbol, d)
+        expected = _expected_bars(d, profile, tz)
 
         if not path.exists():
             file_missing += 1
@@ -472,7 +498,7 @@ def _impute_one_symbol(
             continue
 
         imputed_ts = [t for t, note in log if note != "SKIP_no_reference"]
-        runs = _cluster(imputed_ts, tf_sec)
+        runs = _cluster(imputed_ts, expected)
         gaps = _fmt_range(runs, tz, max_gap_runs)
 
         if not dry_run:

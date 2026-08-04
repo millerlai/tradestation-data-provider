@@ -1,28 +1,49 @@
 #!/usr/bin/env python3
 """Verify Hive-partitioned bar Parquet files for completeness.
 
-Given a date range, timeframe, and session window, compute the expected
-set of bar timestamps for each trading day and compare against what's
-actually stored on disk. Reports files that are missing, files that are
-incomplete, and the specific gaps within each day.
+Given a date range and a timeframe, learn which bar times this series
+actually publishes, then compare each trading day against that. Reports
+files that are missing, files that are incomplete, and the specific gaps
+within each day.
 
 `--symbol` is optional: when omitted, every symbol discovered under
 ``<root>/bartype=<N>/interval=<M>/symbol=*/`` is verified and a cross-symbol
 summary table is printed at the end.
 
-TWO CAVEATS, BOTH DELIBERATE.
+THE EXPECTED SET IS LEARNED, NOT COMPUTED.
+
+It used to be a uniform ``start + n * interval`` grid, and that grid is
+wrong: TradeStation restarts its intraday grid at the RTH open and close,
+so a 60-minute chart on a 06:00-20:00 session publishes fifteen bars a day
+including two stubs (09:00-09:30 and 15:30-16:00) — see
+contract/semantics.md §2 for the measurement. Against a uniform grid those
+two real bars read as "extra" and four grid positions that were never
+published read as MISSING. imputation_parquet.py shares this module's
+expected set, so there the same error wrote invented OHLC rows at
+timestamps TradeStation never emitted.
+
+No grid can fix it: the segment boundaries follow the chart's session
+template, which the wire does not carry. So the expected set is derived
+from the data instead — the times-of-day (in ``--tz``) carried by more than
+half of the days actually on disk in range. A stub bar every day is
+expected; a grid position that never appears is not.
+
+TWO CONSEQUENCES.
+
+It needs history. Fewer than ``--min-reference-days`` readable days in
+range and it refuses rather than guessing, because a profile learned from
+one day says only that that day matches itself.
+
+Half days are still reported INCOMPLETE. An early close (the day after
+Thanksgiving, Christmas Eve) is a minority of the range, so its shortened
+afternoon does not enter the profile and the bars it never had are
+reported missing. ``--holidays`` only skips a day entirely; there is no way
+to shorten one. Read those INCOMPLETEs as expected.
 
 This is an operator's completeness check, not a guarantee about the data.
-It answers "did every bar the session should have produced arrive", which
-is a question about the collection run — nothing it reports changes what
-is on disk, and it never writes.
-
-It does NOT know about half days. The session window comes from
-``--start-time`` / ``--end-time`` and applies to every day in range, so an
-early close (the day after Thanksgiving, Christmas Eve) is reported
-INCOMPLETE every time. ``--holidays`` only skips a day entirely; there is
-no way to shorten one. Pass a matching ``--end-time`` for those dates, or
-read the INCOMPLETE as expected.
+It answers "did every bar this series normally produces arrive", which is a
+question about the collection run — nothing it reports changes what is on
+disk, and it never writes.
 
 Usage:
   # Single symbol, verbose per-day output
@@ -42,6 +63,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
@@ -105,31 +127,90 @@ def _validate_intraday_bar_args(bar_interval: int, bar_type: int) -> None:
         )
 
 
-def _expected_bars(
-    day: date,
+def _day_path(root: Path, bar_type: int, bar_interval: int, symbol: str, day: date) -> Path:
+    """The one spelling of a day's bars file.
+
+    ``date=`` always applies here: BarType 2 is stored flat, and
+    ``_validate_intraday_bar_args`` has already refused it.
+    """
+    return (
+        root
+        / f"bartype={bar_type}"
+        / f"interval={bar_interval}"
+        / f"symbol={symbol}"
+        / f"date={day.isoformat()}"
+        / "bars.parquet"
+    )
+
+
+def _observed_profile(
+    *,
+    root: Path,
+    bar_type: int,
+    bar_interval: int,
+    symbol: str,
+    start_date: date,
+    end_date: date,
     start: time,
     end: time,
-    tf_sec: int,
     tz: ZoneInfo,
-) -> list[datetime]:
-    """Close-labelled bar times for a session. 1m 09:30-16:00 → [09:31..16:00].
+    holidays: set[date],
+    include_weekends: bool,
+    min_days: int,
+) -> tuple[list[time], int]:
+    """Learn which times-of-day this series publishes. Returns (profile, days).
 
-    Matches ``BAR_SCHEMA.bar_time`` semantics: ``bar_time`` is EasyLanguage's
-    ``Time``, the bar's CLOSE, landed verbatim (contract/semantics.md §2).
-    A US RTH 09:30-16:00 session therefore stores 09:31 through 16:00 — the
-    left-labelled 09:30..15:59 grid this function used to generate belonged
-    to the deleted conversion, and against a verbatim store it reported one
-    phantom missing bar and one unexpected bar every single day.
+    A time-of-day enters the profile when MORE THAN HALF the readable days in
+    range carry it. Majority rather than union because one bad day — a half
+    session, a collection run that died at noon — must not teach the profile
+    times the series does not really have; majority rather than intersection
+    because that same day must not un-teach the ones it does.
+
+    Times-of-day rather than offsets from a session start: that is the form
+    that survives DST, and ``start`` / ``end`` now only narrow the window
+    afterwards. They no longer generate anything, so a session boundary the
+    caller gets slightly wrong costs a filtered bar instead of a whole
+    invented grid.
     """
-    start_dt = datetime.combine(day, start).replace(tzinfo=tz)
-    end_dt = datetime.combine(day, end).replace(tzinfo=tz)
-    step = timedelta(seconds=tf_sec)
-    out: list[datetime] = []
-    t = start_dt + step
-    while t <= end_dt:
-        out.append(t.astimezone(UTC))
-        t += step
-    return out
+    per_day: list[set[time]] = []
+    d = start_date
+    while d <= end_date:
+        if (include_weekends or d.weekday() < 5) and d not in holidays:
+            path = _day_path(root, bar_type, bar_interval, symbol, d)
+            if path.exists():
+                stored = _load_day(path)
+                if stored:
+                    tod = {t.astimezone(tz).time() for t in stored}
+                    tod = {x for x in tod if start < x <= end}
+                    if tod:
+                        per_day.append(tod)
+        d += timedelta(days=1)
+
+    if len(per_day) < min_days:
+        raise ValueError(
+            f"{symbol}: only {len(per_day)} readable day(s) in range, need "
+            f"{min_days}. Expected bar times are learned from the data, "
+            f"because no uniform grid matches TradeStation's session-"
+            f"restarting one (contract/semantics.md §2) — and a profile this "
+            f"thin is one day agreeing with itself. Widen --start-date / "
+            f"--end-date, or lower --min-reference-days to accept it."
+        )
+
+    counts: Counter[time] = Counter()
+    for day_times in per_day:
+        counts.update(day_times)
+    n = len(per_day)
+    return sorted(t for t, c in counts.items() if c * 2 > n), n
+
+
+def _expected_bars(day: date, profile: list[time], tz: ZoneInfo) -> list[datetime]:
+    """The learned profile placed on one calendar day, as UTC.
+
+    ``bar_time`` is EasyLanguage's ``Time``, the bar's CLOSE, landed verbatim
+    (contract/semantics.md §2), so these are close labels: a 1m RTH day is
+    09:31 through 16:00, never 09:30 through 15:59.
+    """
+    return [datetime.combine(day, t, tzinfo=tz).astimezone(UTC) for t in profile]
 
 
 @dataclass
@@ -139,20 +220,29 @@ class DayReport:
     rows: int = 0
     expected: int = 0
     missing: list[datetime] = None  # UTC
+    expected_ts: list[datetime] = None  # UTC, ordered — what _cluster needs
     note: str = ""
 
 
-def _cluster(missing: list[datetime], tf_sec: int) -> list[tuple[datetime, datetime, int]]:
-    """Collapse contiguous missing timestamps into (start, end, count) runs."""
+def _cluster(
+    missing: list[datetime], expected: list[datetime]
+) -> list[tuple[datetime, datetime, int]]:
+    """Collapse missing timestamps adjacent IN THE EXPECTED SERIES into runs.
+
+    Adjacency is by position, not by "one interval apart". The expected series
+    is not a uniform grid — TradeStation restarts its intraday grid at the RTH
+    open and close, so two consecutive expected bars can be a stub apart
+    (contract/semantics.md §2) and a fixed step would report one gap as two.
+    """
     if not missing:
         return []
-    missing = sorted(missing)
-    step = timedelta(seconds=tf_sec)
+    pos = {t: i for i, t in enumerate(expected)}
+    ordered = sorted(missing)
     runs: list[tuple[datetime, datetime, int]] = []
-    run_start = run_end = missing[0]
+    run_start = run_end = ordered[0]
     run_n = 1
-    for t in missing[1:]:
-        if t - run_end == step:
+    for t in ordered[1:]:
+        if pos[t] == pos[run_end] + 1:
             run_end = t
             run_n += 1
         else:
@@ -209,9 +299,7 @@ def verify(
     end_date: date,
     bar_type: int,
     bar_interval: int,
-    tf_sec: int,
-    start_time: time,
-    end_time: time,
+    profile: list[time],
     tz: ZoneInfo,
     holidays: set[date],
     include_weekends: bool,
@@ -228,15 +316,8 @@ def verify(
             d += timedelta(days=1)
             continue
 
-        path = (
-            root
-            / f"bartype={bar_type}"
-            / f"interval={bar_interval}"
-            / f"symbol={symbol}"
-            / f"date={d.isoformat()}"
-            / "bars.parquet"
-        )
-        expected = _expected_bars(d, start_time, end_time, tf_sec, tz)
+        path = _day_path(root, bar_type, bar_interval, symbol, d)
+        expected = _expected_bars(d, profile, tz)
         exp_set = set(expected)
 
         if not path.exists():
@@ -246,6 +327,7 @@ def verify(
                     status="FILE_MISSING",
                     expected=len(expected),
                     missing=list(expected),
+                    expected_ts=expected,
                 )
             )
             d += timedelta(days=1)
@@ -278,6 +360,7 @@ def verify(
                 rows=len(stored),
                 expected=len(expected),
                 missing=missing,
+                expected_ts=expected,
                 note=note,
             )
         )
@@ -310,10 +393,26 @@ def main() -> int:
         help="EL BarInterval, verbatim. For BarType 1 this is the minutes.",
     )
     ap.add_argument(
-        "--start-time", default="09:30", help="Session start HH:MM in --tz (default: 09:30)."
+        "--start-time",
+        default="09:30",
+        help=(
+            "Window start HH:MM in --tz (default: 09:30). Narrows the learned "
+            "profile; exclusive, because bar_time is a close."
+        ),
     )
     ap.add_argument(
-        "--end-time", default="16:00", help="Session end HH:MM in --tz (default: 16:00)."
+        "--end-time",
+        default="16:00",
+        help="Window end HH:MM in --tz, inclusive (default: 16:00).",
+    )
+    ap.add_argument(
+        "--min-reference-days",
+        type=int,
+        default=5,
+        help=(
+            "Readable days required before a learned profile is trusted "
+            "(default: 5). Below this the run fails rather than guessing."
+        ),
     )
     ap.add_argument("--tz", default="ET", help="Session timezone (default: ET).")
     ap.add_argument(
@@ -349,7 +448,6 @@ def main() -> int:
     try:
         _validate_intraday_bar_args(args.bar_interval, args.bar_type)
         tf_label = f"bartype={args.bar_type}/interval={args.bar_interval}"
-        tf_sec = args.bar_interval * 60
         start_time = _parse_hhmm(args.start_time)
         end_time = _parse_hhmm(args.end_time)
         tz = _resolve_tz(args.tz)
@@ -386,11 +484,9 @@ def main() -> int:
             )
             return 2
 
-    per_day_expected = len(_expected_bars(args.start_date, start_time, end_time, tf_sec, tz))
     print(
         f"range={args.start_date}..{args.end_date}  tf={tf_label}  "
-        f"session={args.start_time}-{args.end_time} {args.tz}  "
-        f"expected/day={per_day_expected}"
+        f"window={args.start_time}-{args.end_time} {args.tz}"
     )
     print(f"root={args.root}  symbols={len(symbols)}")
     print()
@@ -401,6 +497,26 @@ def main() -> int:
     multi = len(symbols) > 1
 
     for sym in symbols:
+        try:
+            profile, ref_days = _observed_profile(
+                root=args.root,
+                bar_type=args.bar_type,
+                bar_interval=args.bar_interval,
+                symbol=sym,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                start=start_time,
+                end=end_time,
+                tz=tz,
+                holidays=holidays,
+                include_weekends=args.include_weekends,
+                min_days=args.min_reference_days,
+            )
+        except ValueError as e:
+            print(f"error: {e}", file=sys.stderr)
+            overall_bad += 1
+            continue
+        print(f"profile: {len(profile)} bars/day learned from {ref_days} day(s)  [{sym}]")
         reports = verify(
             root=args.root,
             symbol=sym,
@@ -408,9 +524,7 @@ def main() -> int:
             end_date=args.end_date,
             bar_type=args.bar_type,
             bar_interval=args.bar_interval,
-            tf_sec=tf_sec,
-            start_time=start_time,
-            end_time=end_time,
+            profile=profile,
             tz=tz,
             holidays=holidays,
             include_weekends=args.include_weekends,
@@ -418,7 +532,6 @@ def main() -> int:
         counts, total_missing = _print_symbol_section(
             symbol=sym,
             reports=reports,
-            tf_sec=tf_sec,
             tz=tz,
             tz_label=args.tz,
             only=args.only,
@@ -458,7 +571,6 @@ def _print_symbol_section(
     *,
     symbol: str,
     reports: list[DayReport],
-    tf_sec: int,
     tz: ZoneInfo,
     tz_label: str,
     only: str,
@@ -492,7 +604,7 @@ def _print_symbol_section(
             continue
         miss_n = len(r.missing or [])
         total_missing += miss_n
-        runs = _cluster(r.missing or [], tf_sec)
+        runs = _cluster(r.missing or [], r.expected_ts or [])
         gaps = _fmt_range(runs, tz, max_gap_runs)
         extra = f"  [{r.note}]" if r.note else ""
         print(f"{r.day.isoformat():<11}  {r.status:<12}  {r.rows:>5}  {miss_n:>7}  {gaps}{extra}")
