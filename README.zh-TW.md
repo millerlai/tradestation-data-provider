@@ -70,7 +70,7 @@ flowchart TB
 | [`EL/`](EL/) | EasyLanguage exporter indicator —— 資料流的源頭 |
 | [`cpp/`](cpp/) | C++ bridge DLL（Win32 x86）與獨立測試 harness |
 | [`bindings/python/`](bindings/python/) | Reference Python binding —— ingestion runtime、可插拔 sink、Parquet 儲存 |
-| [`docs/`](docs/) | 架構與遷移文件 |
+| [`docs/`](docs/) | 架構文件與工作計畫 |
 
 ## 快速開始
 

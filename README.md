@@ -73,7 +73,7 @@ noticed, because nothing checked.
 | [`EL/`](EL/) | EasyLanguage exporter indicator — the upstream origin of the feed |
 | [`cpp/`](cpp/) | C++ bridge DLL (Win32 x86) and its standalone test harness |
 | [`bindings/python/`](bindings/python/) | Reference Python binding — ingestion runtime, pluggable sinks, Parquet store |
-| [`docs/`](docs/) | Architecture and migration notes |
+| [`docs/`](docs/) | Architecture notes and working plans |
 
 ## Quick start
 
