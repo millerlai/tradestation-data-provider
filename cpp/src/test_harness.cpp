@@ -57,31 +57,34 @@ struct Options {
 // being 0. It is never a trade count. Every fixture below publishes
 // `category` 2, so the stock reading is the one that applies here.
 //
-// The kDailyQty numbers below do NOT satisfy that identity, and both intraday
-// constants carry open_interest 0 where §3.4 measured `OpenInt` returning
-// `DownTicks` on every intraday chart whatever the category. Both are
-// known-unfaithful and left standing deliberately: correcting them re-records
-// every fixture and re-derives its expectations by hand, which changes what
-// conformance asserts rather than what this comment claims.
-//
 // Publishing the intraday shape on a `1d` bar is what this fixture used to
 // do, and it teaches the next binding author the wrong thing about precisely
 // the frame where the meaning inverts.
 //
-// Within each shape, Ticks is deliberately GREATER than UpTicks + DownTicks:
-// a trade that leaves the price unchanged is counted in neither, so the sum
-// is a lower bound, not an identity. It used to hold exactly, which made a
-// binding that COMPUTED el_ticks indistinguishable from one that read it —
-// every fixture passed either way.
+// EVERY NUMBER BELOW IS A MEASURED SHAPE, NOT A CHOSEN ONE.
 //
-// `Volume == UpTicks` is not a choice and cannot be broken here: TradeStation
-// defines them as the same number in BOTH regimes. No fixture can catch a
-// binding that transposes those two fields. Stated so the gap is known rather
-// than assumed covered.
+// This comment used to argue the opposite for `Ticks`: that it was set
+// deliberately GREATER than UpTicks + DownTicks, on the theory that a trade
+// leaving the price unchanged is counted in neither, so the sum is a lower
+// bound. The live run behind §3.4 measured it and the theory is wrong — the
+// identity held in every row of every intraday chart sampled (839/839 on 5m,
+// 280/280 on 15m, 140/140 on 30m, 69/69 on 1h). A fixture that breaks it
+// publishes a shape TradeStation does not produce.
+//
+// It bought nothing either. The stated reason was to catch a binding that
+// COMPUTES el_ticks from up+down rather than reading it — but since the two
+// really are equal on the wire, no fixture can tell those bindings apart.
+// The same goes for `el_open_interest`, which on an intraday chart is a copy
+// of `el_downticks` whatever the category, and for `Volume == UpTicks`, which
+// TradeStation defines as the same number in both regimes.
+//
+// So three of the five columns are not fixture-guardable, and pretending
+// otherwise is worse than saying so: semantics.md §3.4 now carries that table
+// and the `el_` prefix plus code review is what actually guards them.
 struct Quantities { double volume, ticks, upticks, downticks, open_interest; };
-constexpr Quantities kTickQty  = {100.0, 195.0, 100.0, 80.0, 0.0};
-constexpr Quantities kBarQty   = {12000.0, 22500.0, 12000.0, 9000.0, 0.0};
-constexpr Quantities kDailyQty = {88400000.0, 612345.0, 88400000.0, 0.0, 0.0};
+constexpr Quantities kTickQty  = {100.0, 180.0, 100.0, 80.0, 80.0};
+constexpr Quantities kBarQty   = {12000.0, 21000.0, 12000.0, 9000.0, 9000.0};
+constexpr Quantities kDailyQty = {88400000.0, 88400000.0, 88400000.0, 0.0, 0.0};
 constexpr Quantities kNoQty    = {0.0, 0.0, 0.0, 0.0, 0.0};   // breadth indices
 
 // One publisher, one shape. `category` is EL's `Category` (2 = Stock,

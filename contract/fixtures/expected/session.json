@@ -28,7 +28,7 @@
     {
       "symbol": "SPY",
       "seq": 1,
-      "sid": 1785647516150282,
+      "sid": 1785841151258770,
       "bar_time": "2026-04-20T13:31:00Z",
       "bar_type": 1,
       "bar_interval": 1,
@@ -38,18 +38,18 @@
       "low": 449.95,
       "close": 450.4,
       "el_volume": 12000,
-      "el_ticks": 22500,
+      "el_ticks": 21000,
       "el_upticks": 12000,
       "el_downticks": 9000,
-      "el_open_interest": 0,
+      "el_open_interest": 9000,
       "bid": null,
       "ask": null,
-      "ts": 1785647526.163237
+      "ts": 1785841166.259673
     },
     {
       "symbol": "SPY",
       "seq": 2,
-      "sid": 1785647516150282,
+      "sid": 1785841151258770,
       "bar_time": "2026-04-20T20:00:00Z",
       "bar_type": 1,
       "bar_interval": 1,
@@ -59,13 +59,13 @@
       "low": 452.65,
       "close": 453.05,
       "el_volume": 12000,
-      "el_ticks": 22500,
+      "el_ticks": 21000,
       "el_upticks": 12000,
       "el_downticks": 9000,
-      "el_open_interest": 0,
+      "el_open_interest": 9000,
       "bid": null,
       "ask": null,
-      "ts": 1785647526.163301
+      "ts": 1785841166.259806
     }
   ],
   "expected_messages_lost": 0

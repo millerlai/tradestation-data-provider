@@ -37,8 +37,8 @@ JSON payload。**逐一精確訂閱，並在收訊後以字串完全相等再過
   "bar_interval": 1,
   "category": 2,
   "o": 450.0, "h": 450.0, "l": 450.0, "c": 450.0,
-  "el_volume": 100, "el_ticks": 195,
-  "el_upticks": 100, "el_downticks": 80, "el_open_interest": 0,
+  "el_volume": 100, "el_ticks": 180,
+  "el_upticks": 100, "el_downticks": 80, "el_open_interest": 80,
   "bid": 449.99, "ask": 450.01
 }
 ```
