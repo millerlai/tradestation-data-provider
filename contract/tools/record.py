@@ -43,6 +43,16 @@ from datetime import datetime
 
 import zmq
 
+# Where the publisher announces charts (contract/wire.md §"hello"). Always
+# subscribed, whatever symbol filter was asked for.
+#
+# This is not a convenience. The publisher's socket is XPUB and EL_Init
+# returns -7 — publishing NOTHING — until it sees a subscriber here. A
+# recorder invoked as `record.py SPY` without this would subscribe to SPY,
+# see the DLL refuse to start, and record an empty fixture with no error
+# anywhere to explain it.
+CONTROL_TOPIC = "__ts2py__"
+
 
 def fixture_entry(symbol: str, payload: bytes) -> dict[str, str]:
     """Turn one received frame into a fixture line, without interpreting it.
@@ -79,8 +89,10 @@ def main() -> int:
     if args.symbols:
         for sym in args.symbols:
             sock.setsockopt_string(zmq.SUBSCRIBE, sym)
+        # Never filtered out: without a subscriber here the DLL never starts.
+        sock.setsockopt_string(zmq.SUBSCRIBE, CONTROL_TOPIC)
     else:
-        sock.setsockopt_string(zmq.SUBSCRIBE, "")  # all topics
+        sock.setsockopt_string(zmq.SUBSCRIBE, "")  # all topics, control included
 
     print(f"[sub] connected {args.endpoint} topics={args.symbols or '(all)'}", file=sys.stderr)
 

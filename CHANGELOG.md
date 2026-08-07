@@ -9,6 +9,73 @@ changes; patch releases (`0.x.Y`) will not.
 
 ## [Unreleased]
 
+### Changed — DLL ABI 3: `EL_Init` announces its chart and waits for a listener
+
+**Breaking, and it breaks in the one way this repo has always designed against:
+by reusing a name.** The DLL and the `.ELD` must be installed together and the
+indicator re-Verified. Wire `proto` stays **2** — the point frame is
+byte-for-byte unchanged and every recorded fixture still passes.
+
+- **`EL_Init3` → `EL_Init`, now with five parameters**
+  `(endpoint, symbol, category, bar_type, bar_interval)`. `EL_Init` and
+  `EL_Init2` are deleted. `EL_DllVersion()` returns `3`.
+
+  The hazard is stated plainly because no code can remove it: the superseded
+  `EL_Init` took one parameter, `DefineDLLFunc` resolves by name alone, and
+  `__stdcall` has the callee pop the arguments — so an `.ELD` still bound to
+  the old `EL_Init` resolves this export, calls it, and **corrupts the stack**.
+  The rule that a name whose meaning changed is never reused (which is why init
+  was renamed twice before) has been given up here deliberately. The install
+  procedure is now the only guard. `contract/wire.md` and
+  `docs/architecture.md` §4.3 tabulate it.
+
+- **The socket is XPUB, and init refuses to succeed into a void.** `EL_Init`
+  returns the new code **`-7`**, publishing nothing, until a subscriber covers
+  the control topic. That is the normal state whenever TradeStation starts
+  before the consumer; the indicator leaves `InitDone` False and retries on the
+  next bar, saying so **once** in the Print Log.
+
+  PUB/SUB discards everything sent with nobody attached and reports nothing, so
+  the previous init returned `0` as soon as `bind()` succeeded — "init ok" in
+  the Print Log while every frame went in the bin. XPUB is what makes the
+  question answerable at all. Per-message delivery is still unguaranteed; `seq`
+  remains the only way to notice loss.
+
+- **A `hello` frame on a fixed control topic, `__ts2py__`.** One per chart,
+  carrying `symbol` / `category` / `bar_type` / `bar_interval`. **The topic is
+  the discriminator** — no `kind` field was added and the point frame is
+  untouched. It cannot ride the symbol's own topic: consumers subscribe per
+  symbol from a configured list, so a chart on an unlisted symbol would be
+  announced to nobody, and that is precisely the case an operator needs told.
+
+  The DLL remembers every chart and re-announces all of them on **every**
+  subscription message covering the control topic, so restarting the consumer
+  relearns the workspace without TradeStation being touched. `ZMQ_XPUB_VERBOSE`
+  is load-bearing here: a restarting consumer can overlap its predecessor by
+  milliseconds, libzmq then never sees the topic reach zero subscribers, and a
+  0→1 edge test delivered nothing at all to the reconnecting consumer —
+  measured, against the same test with a six-second gap that delivered both.
+
+- **The Python binding subscribes to `__ts2py__` unconditionally** and logs
+  `chart_announced_now_receiving` with the four fields, or
+  `chart_announced_but_not_subscribed` at WARNING when the symbol is absent
+  from `symbols.yaml` — those are different facts and must not share a line.
+  Announcements are never yielded as `Bar`s, and a malformed one is counted in
+  `frames_refused` without ending the stream. New `announced_charts` property.
+
+- **Subscription matching is by prefix, as ZMQ filters.** An equality test made
+  `SUBSCRIBE ""` — what `contract/tools/record.py` does by default — look like
+  nobody was listening, and deadlocked the publisher. Caught while recording
+  the new fixture.
+
+- **The test harness now needs a subscriber first**, and takes
+  `--subscriber-timeout-ms` (default 15000). `--warmup-ms` is only a settle
+  sleep now. Every README's two-terminal recipe has the order reversed to match.
+
+- New `contract/hello.schema.json`, `contract/fixtures/hello.jsonl` and its
+  hand-derived `expected/hello.json`; the conformance suite validates each
+  frame against the schema its topic selects.
+
 ### Fixed — post-merge review of the proto-1 refactor
 
 - **An unparseable `ts_str` is refused instead of silently falling back to the

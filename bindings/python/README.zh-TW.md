@@ -42,7 +42,7 @@ flowchart TD
     Callback["CallbackSink"]
     Custom["你自訂的 sink"]
 
-    DLL -- "ZMQ PUB" --> Provider
+    DLL -- "ZMQ XPUB" --> Provider
     Provider -- "point (EL_Publish)" --> Runtime
     Runtime -- "closed point" --> Snapshot
     Runtime -- "closed point" --> Pipeline
@@ -153,14 +153,15 @@ uv run python examples/04_replay_fixtures.py --fixture bars
 C++ harness 可以直接驅動 DLL：
 
 ```powershell
-# 終端機 A —— 在 repo root 執行。--warmup-ms 是留給你接上的時間：
-# PUB socket 在沒有 subscriber 時送出的東西會被靜默丟棄。
-# 這個路徑是 cpp\build.bat（與 Visual Studio）的輸出位置；
-# 若用 CMake preset 建置，則在 cpp\build\x86-release\Release\。
-cpp\Release\TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
-
-# 終端機 B —— 在 bindings\python 執行
+# 終端機 A —— 在 bindings\python 執行。subscriber 要先跑：EL_Init 在沒有
+# 訂閱者時回 -7 且什麼都不發，否則 harness 只會空等到逾時然後以非零碼退出。
+#（順序以前是反過來的，用 --warmup-ms 留時間給你接上 —— PUB socket 在沒有
+# subscriber 時送出的東西會被靜默丟棄；現在改成 publisher 拒絕開始，而不是丟。）
 uv run python examples\01_print_events.py --count 6
+
+# 終端機 B —— 在 repo root 執行。這個路徑是 cpp\build.bat（與 Visual Studio）
+# 的輸出位置；若用 CMake preset 建置，則在 cpp\build\x86-release\Release\。
+cpp\Release\TS2Python_TestHarness.exe --mode smoke
 ```
 
 還沒有 harness？用 `cd cpp && .\setup-build-env.bat && .\build.bat` 建 —— 見 [`cpp/README.zh-TW.md`](../../cpp/README.zh-TW.md)。

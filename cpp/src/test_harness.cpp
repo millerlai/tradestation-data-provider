@@ -9,14 +9,16 @@
 //   TS2Python_TestHarness.exe --mode stress --rate 10000 --seconds 10
 //   TS2Python_TestHarness.exe --mode multithread --threads 8 --per-thread 5000
 //
-// Pair with `contract/tools/record.py` in another window to see the wire
-// output, or to record a conformance fixture. Exits 0 on success,
-// non-zero on any init / publish failure.
+// A SUBSCRIBER MUST BE RUNNING FIRST. EL_Init returns -7 until one attaches
+// to the control topic, so start `contract/tools/record.py` (or any SUB on
+// the endpoint) in another window before this. That is the point of the
+// change: the old harness "succeeded" with nobody listening and every frame
+// went in the bin. Exits 0 on success, non-zero on any init / publish
+// failure.
 //
-// Every run also asserts the ABI version and that the EL_Init / EL_Init2
-// tombstones refuse with -6 before doing anything else. Those two exports
-// are what stop an .ELD built against the superseded protocol from reaching
-// a publish function whose signature changed underneath it.
+// Every run also asserts the ABI version, that the EL_PublishTick /
+// EL_PublishBar tombstones refuse with -6, and that re-announcing the same
+// chart returns 1 while a different chart returns 0.
 
 #pragma warning(disable: 4819)
 
@@ -40,7 +42,16 @@ struct Options {
     int         threads = 4;
     int         per_thread = 5000;
     int         warmup_ms = 250;
+    int         subscriber_timeout_ms = 15000;
 };
+
+// The chart this harness announces itself as. EL_Init now carries a chart
+// identity, so the harness has to have one; these are the values a hello
+// fixture is recorded from.
+constexpr const char* kInitSymbol      = "SPY";
+constexpr int         kInitCategory    = 2;   // Stock
+constexpr int         kInitBarType     = 1;   // intraday minute
+constexpr int         kInitBarInterval = 1;
 
 // Quantities in the shape EasyLanguage hands over — which is not ONE shape.
 // The reserved words swap meaning between intraday and daily (semantics.md
@@ -117,6 +128,8 @@ Options parse_args(int argc, char** argv) {
         else if (a == "--threads")    o.threads    = std::atoi(next("--threads").c_str());
         else if (a == "--per-thread") o.per_thread = std::atoi(next("--per-thread").c_str());
         else if (a == "--warmup-ms")  o.warmup_ms  = std::atoi(next("--warmup-ms").c_str());
+        else if (a == "--subscriber-timeout-ms")
+            o.subscriber_timeout_ms = std::atoi(next("--subscriber-timeout-ms").c_str());
         else if (a == "-h" || a == "--help") {
             std::puts(
                 "TS2Python_TestHarness options:\n"
@@ -126,7 +139,12 @@ Options parse_args(int argc, char** argv) {
                 "  --seconds <N>             stress mode duration\n"
                 "  --threads <N>             multithread mode threads\n"
                 "  --per-thread <N>          multithread messages per thread\n"
-                "  --warmup-ms <N>           sleep after init (default 250ms)\n");
+                "  --warmup-ms <N>           settle sleep after init (default 250ms)\n"
+                "  --subscriber-timeout-ms <N>\n"
+                "                            how long to wait for a SUB to attach\n"
+                "                            before giving up on EL_Init (default\n"
+                "                            15000). EL_Init returns -7 until one is,\n"
+                "                            so a subscriber must be running.\n");
             std::exit(0);
         } else {
             std::fprintf(stderr, "unknown arg: %s\n", a.c_str());
@@ -337,44 +355,80 @@ int main(int argc, char** argv) {
     const Options o = parse_args(argc, argv);
 
     std::printf("[harness] dll version = %d\n", EL_DllVersion());
-    if (EL_DllVersion() != 2) {
-        std::fprintf(stderr, "[harness] expected ABI 2, got %d\n", EL_DllVersion());
+    if (EL_DllVersion() != 3) {
+        std::fprintf(stderr, "[harness] expected ABI 3, got %d\n", EL_DllVersion());
         return 1;
     }
 
-    // Tombstone check, BEFORE any real init — this is the guard the whole
-    // rename rests on. EL_PublishTick and EL_PublishBar kept their names but
-    // changed arity, and __stdcall would corrupt the stack rather than fail,
-    // so an .ELD built against the superseded protocol must be stopped at
-    // init. Verifying it here means the protection is regression-tested on
-    // every harness run instead of resting on a manual check nobody repeats.
-    const int rc_tomb1 = EL_Init(o.endpoint.c_str());
-    const int rc_tomb2 = EL_Init2(o.endpoint.c_str(), 1);
+    // Tombstone check, BEFORE any init. EL_PublishTick and EL_PublishBar
+    // kept their names but changed arity, and __stdcall would corrupt the
+    // stack rather than fail. Verifying the refusal here means the
+    // protection is regression-tested on every harness run instead of
+    // resting on a manual check nobody repeats.
+    const int rc_tomb1 = EL_PublishTick("SPY", "", 0, 0, 0, 0, 0, 0, 0, 0);
+    const int rc_tomb2 = EL_PublishBar("SPY", "", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     if (rc_tomb1 != -6 || rc_tomb2 != -6) {
         std::fprintf(stderr,
-                     "[harness] tombstones must return -6, got EL_Init=%d EL_Init2=%d\n",
+                     "[harness] tombstones must return -6, got "
+                     "EL_PublishTick=%d EL_PublishBar=%d\n",
                      rc_tomb1, rc_tomb2);
         return 2;
     }
-    std::printf("[harness] tombstones EL_Init / EL_Init2 refuse with -6\n");
+    std::printf("[harness] tombstones EL_PublishTick / EL_PublishBar refuse with -6\n");
 
-    std::printf("[harness] EL_Init3(%s)\n", o.endpoint.c_str());
-    const int rc = EL_Init3(o.endpoint.c_str());
+    // EL_Init returns -7 until a subscriber is attached to the control
+    // topic. That is the normal startup state, not an error — so this loop
+    // is what the EasyLanguage indicator does across successive bars,
+    // compressed into a poll.
+    //
+    // IT MEANS THE HARNESS NEEDS A SUBSCRIBER. Start `contract/tools/record.py`
+    // (or any SUB on the endpoint) first, or this exits with -7.
+    std::printf("[harness] EL_Init(%s) — waiting up to %dms for a subscriber\n",
+                o.endpoint.c_str(), o.subscriber_timeout_ms);
+    int rc = -7;
+    {
+        using clock = std::chrono::steady_clock;
+        const auto deadline =
+            clock::now() + std::chrono::milliseconds(o.subscriber_timeout_ms);
+        while (true) {
+            rc = EL_Init(o.endpoint.c_str(), kInitSymbol,
+                         kInitCategory, kInitBarType, kInitBarInterval);
+            if (rc != -7 || clock::now() >= deadline) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+    }
     if (rc < 0) {
-        std::fprintf(stderr, "[harness] init failed rc=%d\n", rc);
+        std::fprintf(stderr,
+                     "[harness] init failed rc=%d%s\n", rc,
+                     rc == -7 ? " (no subscriber attached — start a SUB first)" : "");
         return 1;
     }
-    // Idempotency check — a second call returns 1 without rebinding or
+    std::printf("[harness] EL_Init rc=%d — subscriber attached, hello sent\n", rc);
+
+    // Idempotency: the SAME chart again returns 1 without rebinding or
     // restamping the session id, which is what keeps a re-Verify of the
     // indicator from looking like a publisher restart to subscribers.
-    const int rc2 = EL_Init3(o.endpoint.c_str());
+    const int rc2 = EL_Init(o.endpoint.c_str(), kInitSymbol,
+                            kInitCategory, kInitBarType, kInitBarInterval);
     if (rc2 != 1) {
-        std::fprintf(stderr, "[harness] expected rc=1 on second init, got rc=%d\n", rc2);
+        std::fprintf(stderr, "[harness] expected rc=1 re-announcing the same chart, "
+                             "got rc=%d\n", rc2);
         return 2;
     }
+    // A DIFFERENT chart is a different announcement, not a re-init. This is
+    // the multi-chart case: one DLL, one socket, one hello per chart.
+    const int rc3 = EL_Init(o.endpoint.c_str(), "QQQ", 2, /*bar_type*/ 1,
+                            /*bar_interval*/ 5);
+    if (rc3 != 0) {
+        std::fprintf(stderr, "[harness] expected rc=0 announcing a second chart, "
+                             "got rc=%d\n", rc3);
+        return 2;
+    }
+    std::printf("[harness] second chart announced rc=%d\n", rc3);
 
-    // Give subscribers a moment to connect before publishing — PUB sockets
-    // drop messages silently when nobody is attached.
+    // Settle time. The subscription is already confirmed by this point, so
+    // this only absorbs pipe setup jitter rather than guarding against the
+    // silent no-subscriber drop it used to.
     if (o.warmup_ms > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(o.warmup_ms));
     }

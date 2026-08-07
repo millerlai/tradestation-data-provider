@@ -1,0 +1,2 @@
+{"topic": "__ts2py__", "payload": "{\"proto\":2,\"seq\":1,\"sid\":1786080040461083,\"ts\":1786080041.010493,\"symbol\":\"SPY\",\"category\":2,\"bar_type\":1,\"bar_interval\":1}"}
+{"topic": "__ts2py__", "payload": "{\"proto\":2,\"seq\":2,\"sid\":1786080040461083,\"ts\":1786080041.010622,\"symbol\":\"QQQ\",\"category\":2,\"bar_type\":1,\"bar_interval\":5}"}

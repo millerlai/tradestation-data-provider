@@ -19,16 +19,24 @@ TradeStation Chart → TS2Python_Exporter.el → TS2Python.dll → ZMQ PUB → s
 
 ## Deploying
 
-> **The DLL and the `.ELD` are a matched pair — always install both.**
-> `EL_PublishTick` and `EL_PublishBar` once kept their names across a protocol
-> rewrite but not their signatures, and under `__stdcall` a mismatched call
-> corrupts the stack rather than returning an error. Two guards make every
-> mismatched combination fail readably instead: this indicator binds
-> `EL_Init3`, which an older DLL does not export (Verify fails), and this DLL
-> keeps `EL_Init` / `EL_Init2` as tombstones returning `-6`, which stops an
-> older `.ELD` at init before it can publish. There is also an
-> `EL_DllVersion()` check after init. See
+> **The DLL and the `.ELD` are a matched pair — always install both, and
+> re-Verify this indicator every time you replace the DLL.** This is no longer
+> just good practice. `EL_Init` now takes five parameters where the superseded
+> protocol's took one, and `DefineDLLFunc` resolves by name alone; under
+> `__stdcall` the callee pops the arguments, so an `.ELD` still bound to the
+> old one-argument `EL_Init` **corrupts the stack** — TradeStation crashes
+> rather than returning a code, and no guard on either side can catch it.
+>
+> The reverse direction is safe: this indicator binds a 5-parameter `EL_Init`
+> that an older DLL does not export, so Verify fails with a named error. There
+> is also an `EL_DllVersion()` check after init. `EL_PublishTick` /
+> `EL_PublishBar` remain tombstones returning `-6`, but they catch nothing now
+> — an old `.ELD` dies in `EL_Init` first. See
 > [`../contract/wire.md`](../contract/wire.md) for the full table.
+>
+> **Nothing publishes until a consumer is running.** `EL_Init` returns `-7`
+> while no subscriber is attached; the indicator says so once in the Print Log
+> and retries on every bar, so it starts by itself once the consumer comes up.
 
 Install the DLL first, then the indicator — Verify needs the DLL to be in place
 already:

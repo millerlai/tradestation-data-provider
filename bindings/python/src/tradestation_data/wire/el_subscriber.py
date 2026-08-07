@@ -52,6 +52,21 @@ _EL_TS_FORMAT_HUMAN = "yyyy-MM/dd-HH:mm:ss (24-hour)"
 # matched on shape and only diverged at field level. See contract/wire.md.
 PROTO_VERSION = 2
 
+# Where the publisher announces charts. NOT a symbol topic.
+#
+# EL_Init sends one hello frame per chart carrying symbol / category /
+# bar_type / bar_interval, and it rides a fixed topic rather than the
+# chart's own symbol because a consumer subscribes per symbol from a
+# configured list — a chart on a symbol nobody asked for could not be
+# announced on that symbol's topic, and that is exactly the case worth
+# hearing about.
+#
+# The topic is also the discriminator: no `kind` field was added, and the
+# point frame is byte-for-byte what it always was. The leading underscores
+# keep it out of TradeStation's symbol space, which matters because ZMQ
+# SUBSCRIBE is a prefix match.
+CONTROL_TOPIC = "__ts2py__"
+
 # The five quantity fields, EasyLanguage's reserved words verbatim. Read as
 # REQUIRED, never with a default: a missing quantity must raise, because the
 # alternative is writing a zero that is indistinguishable from a real one.
@@ -183,6 +198,19 @@ class TradeStationELProvider:
       it could not name — three decisions taken off the wire, where nothing
       downstream could see them.
 
+      One other topic exists, and the topic is what tells them apart:
+
+          topic = "__ts2py__"    a chart announcing itself, from EL_Init
+          {
+            "proto": 2, "seq": <int>, "sid": <int>, "ts": <float>,
+            "symbol": "<str>", "category": <int>,
+            "bar_type": <int>, "bar_interval": <int>
+          }
+
+      Subscribing to it is not optional. The publisher's socket is XPUB, and
+      EL_Init returns -7 — publishing nothing — until it sees a subscriber
+      on this topic. A consumer that does not subscribe here leaves every
+      TradeStation chart waiting indefinitely.
     """
 
     source_id = "tradestation_el"
@@ -201,6 +229,21 @@ class TradeStationELProvider:
         self._closed = False
         self._seq = _SequenceTracker()
         self._frames_refused = 0
+        # Charts the publisher has announced: (symbol, bar_type, bar_interval)
+        # -> category. Exposed for tests and for anything that wants to know
+        # what is actually attached rather than what was configured.
+        self._announced_charts: dict[tuple[str, int, int], int] = {}
+
+    @property
+    def announced_charts(self) -> dict[tuple[str, int, int], int]:
+        """What the publisher says is attached, keyed by chart identity.
+
+        This is the workspace as TradeStation has it, which is not the same
+        question as `symbols.yaml`: a chart here that is not subscribed
+        produces no data, and a subscribed symbol with no chart here is not
+        publishing at all.
+        """
+        return dict(self._announced_charts)
 
     @property
     def frames_refused(self) -> int:
@@ -258,6 +301,11 @@ class TradeStationELProvider:
         # subscriber falls behind (open-bell bursts, FOMC). Must be set
         # before connect(); changes after connect have no effect.
         self._socket.setsockopt(zmq.RCVHWM, 1_000_000)
+        # The control topic is subscribed unconditionally, before any symbol.
+        # The publisher's EL_Init blocks on a subscriber being attached HERE —
+        # it returns -7 and publishes nothing until one is, so a consumer that
+        # skipped this would leave every chart waiting forever.
+        self._socket.setsockopt_string(zmq.SUBSCRIBE, CONTROL_TOPIC)
         self._socket.connect(self._endpoint)
         log.info("TradeStationELProvider connected to %s", self._endpoint)
 
@@ -293,7 +341,16 @@ class TradeStationELProvider:
                 log.warning("zmq recv error: %s", exc)
                 continue
 
-            symbol = topic_bytes.decode("utf-8", errors="replace")
+            topic = topic_bytes.decode("utf-8", errors="replace")
+            if topic == CONTROL_TOPIC:
+                # A chart announcing itself. Handled here rather than yielded:
+                # MarketEvent is Bar, and a hello is not a data point — it
+                # carries no OHLC, no quantities and no quote. Nothing
+                # downstream of the provider needs to grow a second case.
+                self._handle_hello(payload_bytes)
+                continue
+
+            symbol = topic
             # semantics.md §5: ZMQ SUBSCRIBE is a prefix match, so a
             # subscription to "SPY" also delivers every SPYG frame from the
             # same publisher. Without an exact-equality pass the binding would
@@ -341,6 +398,80 @@ class TradeStationELProvider:
                 )
                 continue
             yield event
+
+    def _handle_hello(self, payload: bytes) -> None:
+        """Record and report one chart announcing itself.
+
+        Sent by the publisher's ``EL_Init``, once per chart, and again for
+        every chart whenever a subscriber attaches — so restarting this
+        process re-learns the whole workspace without TradeStation being
+        touched.
+
+        Never raises. A malformed hello is worth a line in the log and
+        nothing more: it is not a data point, so dropping it loses no
+        market data, and letting it escape would kill the ingest task.
+        """
+        try:
+            data = json.loads(payload)
+            seq = data.get("seq")
+            if seq is not None:
+                self._seq.observe(CONTROL_TOPIC, int(seq), int(data.get("sid", 0)))
+
+            proto = data.get("proto")
+            if proto != PROTO_VERSION:
+                log.warning(
+                    "chart_announcement_refused",
+                    extra={"proto": proto, "expected": PROTO_VERSION},
+                )
+                return
+
+            symbol = data["symbol"]
+            # Not str(): a JSON null would become the string "None" and
+            # register a chart under that name, which then reads as a real
+            # symbol nobody subscribed to.
+            if not isinstance(symbol, str) or not symbol:
+                raise ValueError(f"hello carries a non-string symbol: {symbol!r}")
+            category = int(data["category"])
+            bar_type = int(data["bar_type"])
+            bar_interval = int(data["bar_interval"])
+        except Exception as exc:
+            self._frames_refused += 1
+            log.error(
+                "Dropping unparseable chart announcement: %s (payload=%r)",
+                exc,
+                payload[:200],
+                exc_info=True,
+            )
+            return
+
+        fields = {
+            "symbol": symbol,
+            "category": category,
+            "bar_type": bar_type,
+            "bar_interval": bar_interval,
+        }
+        self._announced_charts[(symbol, bar_type, bar_interval)] = category
+
+        if symbol in self._subscribed:
+            log.info("chart_announced_now_receiving", extra=fields)
+            return
+
+        # Announced, but this consumer never subscribed to that symbol, so
+        # not one of its points will arrive. Saying "now receiving" here
+        # would be false, and silence would leave an operator watching an
+        # empty partition with no idea why.
+        log.warning(
+            "chart_announced_but_not_subscribed",
+            extra={
+                **fields,
+                # ASCII only: this lands in a Windows console, where the
+                # default codepage turns an em-dash into mojibake.
+                "note": (
+                    "no data will be received for this chart - the symbol is "
+                    "not in symbols.yaml. Add it and restart."
+                ),
+            },
+        )
 
     def _parse_payload(self, symbol: str, payload: bytes) -> MarketEvent:
         data = json.loads(payload)

@@ -34,30 +34,58 @@ extern "C" {
 //  -4  invalid argument (null pointer, non-representable quantity, ...)
 //  -5  unsupported bar type / interval (no wire timeframe for it)
 //  -6  ABI mismatch — the caller is an .ELD older than this protocol
+//  -7  no subscriber yet — RETRYABLE, and the normal state at startup
 
-// Initialise the publisher and bind the PUB socket. Idempotent: a second
-// call returns 1 without rebinding, and without restamping the session id,
-// so re-Verifying an indicator does not look like a restart to subscribers.
+// Bind the publisher (once per process) and announce this chart.
 //
-// THE NAME IS THE COMPATIBILITY GATE. EL_PublishTick and EL_PublishBar below
-// kept their names across the protocol rewrite but not their signatures, and
-// __stdcall makes the callee pop the arguments — so a mismatched call
-// corrupts the stack instead of failing. What makes that unreachable is that
-// every publish call in the EasyLanguage indicator sits behind a successful
-// init, and init is the one export that was renamed:
+// Every chart running the indicator calls this with its own identity. The
+// socket is bound by whichever chart gets here first; the session id and the
+// sequence counters are stamped only on that first bind, so a second chart —
+// or a re-Verify — does not look like a publisher restart to subscribers.
 //
-//   new .ELD + old DLL  ->  no EL_Init3 export, DefineDLLFunc fails at Verify
-//   old .ELD + new DLL  ->  EL_Init / EL_Init2 tombstones return -6
+// WHAT MAKES THIS DIFFERENT FROM A PLAIN INIT: it does not return 0 until a
+// subscriber is actually attached. The socket is XPUB rather than PUB, which
+// means the DLL is told when someone subscribes; until the control topic has
+// a subscriber this returns -7 and publishes nothing. That is not a failure —
+// it is the expected answer every time TradeStation starts before the
+// consumer does, and the indicator is written to retry on the next bar.
 //
-// Both directions stop before a single publish runs. See ../contract/wire.md.
-TS2P_API int TS2P_CALL EL_Init3(const char* zmq_endpoint);
-
-// Tombstones. These were the init exports of the superseded protocol; they
-// remain exported so that an indicator still bound to them gets a readable
-// -6 in TradeStation's Print Log rather than an unexplained resolution
-// failure. They never initialise anything.
-TS2P_API int TS2P_CALL EL_Init(const char* zmq_endpoint);
-TS2P_API int TS2P_CALL EL_Init2(const char* zmq_endpoint, int publisher_version);
+// Why it matters: PUB/SUB drops everything sent with no subscriber attached
+// and reports nothing. Without this gate an operator sees "init ok" in the
+// Print Log while every frame goes in the bin.
+//
+//   rc  0  bound, a subscriber is attached, and this chart's hello was sent
+//   rc  1  this exact chart already announced in this session; nothing to do
+//   rc -3  bind / socket create failed
+//   rc -4  zmq_endpoint or symbol was NULL
+//   rc -7  no subscriber on the control topic yet — call again next bar
+//
+// On success a hello frame goes out on the CONTROL topic (not the symbol's),
+// carrying symbol / category / bar_type / bar_interval. It has to be a
+// separate topic: a consumer subscribes per symbol, so a chart on a symbol
+// it never asked for could not be announced on that symbol's own topic —
+// and a chart nobody is subscribed to is exactly what an operator needs
+// told. See ../contract/wire.md.
+//
+// Charts are remembered. When a subscriber attaches, drops and attaches
+// again — restarting the consumer — every chart is re-announced without
+// TradeStation having to re-Verify a single indicator.
+//
+// THE NAME IS REUSED AND THAT IS A HAZARD. `EL_Init` was the init export of
+// the superseded protocol, with one parameter instead of five. __stdcall
+// makes the callee pop the arguments, so an .ELD still bound to the old
+// one-argument EL_Init will resolve this symbol, call it, and corrupt the
+// stack — TradeStation misbehaves or dies rather than returning a code. No
+// code here can prevent that; nothing on the callee side can see how many
+// arguments the caller pushed. The DLL and the .ELD are one unit and must be
+// installed together. The other direction is safe: an .ELD built against the
+// superseded EL_Init3 finds no such export and fails at Verify.
+TS2P_API int TS2P_CALL EL_Init(
+    const char* zmq_endpoint,
+    const char* symbol,        // EL `GetSymbolName`
+    int         category,      // EL `Category`
+    int         bar_type,      // EL `BarType`
+    int         bar_interval); // EL `BarInterval`
 
 // Publish a single trade print (EasyLanguage BarType 0, BarInterval 1).
 //
@@ -110,8 +138,16 @@ TS2P_API int TS2P_CALL EL_Publish(
 //
 // They kept their names across a signature change once already, which on
 // __stdcall corrupts the caller's stack rather than returning an error. The
-// names must stay exported so an indicator built against the superseded
-// protocol gets a readable -6 in the Print Log instead of a crash.
+// names stay exported so an indicator built against the superseded protocol
+// gets a readable -6 in the Print Log instead of a crash.
+//
+// They no longer protect anything on their own. The guard used to be that
+// every publish sat behind an init whose name had changed, so an old .ELD
+// stopped at init and never reached a signature that had moved underneath
+// it. EL_Init's name is now reused with a different arity, which removes
+// that gate — an old .ELD corrupts the stack inside EL_Init before these
+// are ever called. They are kept because deleting an export can only make
+// the failure less legible, not because they still catch anything.
 TS2P_API int TS2P_CALL EL_PublishTick(
     const char* symbol,
     const char* el_timestamp,
@@ -141,7 +177,14 @@ TS2P_API int TS2P_CALL EL_PublishBar(
 
 TS2P_API int TS2P_CALL EL_Shutdown(void);
 
-// ABI version of this DLL build. Currently 2, paired with wire `proto` 2.
+// ABI version of this DLL build. Currently 3.
+//
+// It is NOT the wire version. Point frames are byte-for-byte what `proto` 2
+// always was, and every recorded fixture still validates — what changed is
+// the C ABI (EL_Init's signature) and an additive control frame on its own
+// topic, which a proto-2 consumer simply never subscribes to. Bumping
+// `proto` would have invalidated every fixture to describe a frame the
+// point schema does not cover.
 //
 // Takes no arguments, so its signature can never drift — it is the one
 // export an indicator can call unconditionally against any build to ask
