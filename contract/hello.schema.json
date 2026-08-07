@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/millerlai/tradestation-data-provider/contract/hello.schema.json",
+  "title": "TS2Python chart announcement (hello, proto 2)",
+  "description": "One chart announcing itself, published by EL_Init on the fixed control topic __ts2py__. NOT a data point: it carries no OHLC, no quantity words and no quote. The topic is the discriminator — no `kind` field was added and the point frame is unchanged. It rides its own topic because a consumer subscribes per symbol from a configured list, so a chart on a symbol nobody asked for could not be announced on that symbol's own topic, and that is exactly the case an operator needs told about.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "proto",
+    "seq",
+    "sid",
+    "ts",
+    "symbol",
+    "category",
+    "bar_type",
+    "bar_interval"
+  ],
+  "properties": {
+    "proto": {
+      "type": "integer",
+      "const": 2,
+      "description": "Wire protocol version. Still 2: the point frame did not change, so the wire did not. What changed is the DLL ABI, which EL_DllVersion reports as 3."
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Monotonic sequence for the control topic, counted separately from every symbol's. A lost announcement is as invisible as a lost point without it."
+    },
+    "sid": {
+      "type": "integer",
+      "description": "Publisher session id, the same value the point frames carry. Ties an announcement to the session that made it, so a consumer can tell a DLL restart from a lost hello."
+    },
+    "ts": {
+      "type": "number",
+      "description": "DLL receive clock (UTC epoch seconds) at the moment EL_Init was called. There is no ts_str: a hello is not a bar and has no bar time."
+    },
+    "symbol": {
+      "type": "string",
+      "minLength": 1,
+      "description": "EasyLanguage GetSymbolName, verbatim. Must be read as a string and refused otherwise — a JSON null coerced with str() becomes \"None\" and registers a chart under a name that reads like a real symbol."
+    },
+    "category": {
+      "type": "integer",
+      "description": "EasyLanguage Category, verbatim. The key to the semantics.md 3.4 table; 2 = Stock, 4 = Index. The publisher never branches on it."
+    },
+    "bar_type": {
+      "type": "integer",
+      "description": "EasyLanguage BarType, verbatim. 0 = tick, 1 = intraday minute, 2 = daily."
+    },
+    "bar_interval": {
+      "type": "integer",
+      "description": "EasyLanguage BarInterval, verbatim. Nothing maps this to a timeframe name and nothing refuses an interval."
+    }
+  }
+}

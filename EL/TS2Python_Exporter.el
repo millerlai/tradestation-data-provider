@@ -22,12 +22,26 @@
   resolving that here is what used to force a publisher-convention version
   number onto every payload, because the choice was invisible on the wire.
 
-  VERSIONED WITH THE DLL: this file binds EL_Init3 and checks EL_DllVersion
-  once, after init. Publishing latches off on a mismatch. The publish
-  signatures changed without the names changing, and __stdcall makes a
-  mismatched call corrupt the stack rather than fail — so the DLL and the
-  .ELD must be installed as a pair. contract/wire.md tabulates what each
-  mismatched combination looks like.
+  NOTHING IS PUBLISHED UNTIL A CONSUMER IS LISTENING. EL_Init returns -7
+  while no subscriber is attached, and this file leaves InitDone False on any
+  negative rc, so it simply tries again on the next bar. That is the normal
+  path every time TradeStation starts before run_ingestion.py: the chart sits
+  quiet, says so once in the Print Log, and starts publishing on the first bar
+  after the consumer attaches.
+
+  It matters because ZeroMQ PUB/SUB discards everything sent with nobody
+  attached and reports nothing. The previous version printed "init ok" and
+  published into that void.
+
+  VERSIONED WITH THE DLL: this file binds EL_Init and checks EL_DllVersion
+  once, after init. Publishing latches off on a mismatch. The DLL and the
+  .ELD must be installed as a pair — and with THIS revision that is not
+  advice, it is a hard requirement: EL_Init's name was reused with five
+  parameters instead of one, and __stdcall has the callee pop the arguments,
+  so an .ELD still bound to the old one-argument EL_Init corrupts the stack
+  rather than getting an error code. Re-Verify this file whenever you replace
+  the DLL. contract/wire.md tabulates what each mismatched combination
+  looks like.
 
   WHY BarInterval IS PASSED: BarType = 1 covers every intraday minute chart —
   1-min, 5-min, 15-min and 60-min are all BarType 1, told apart only by
@@ -95,6 +109,7 @@ Variables:
     VersionMismatch(False),
     SubMinuteChart(False),
     AggregatedTickChart(False),
+    WaitingLogged(False),
     Sym(""),
     TsStr("");
 
@@ -110,18 +125,19 @@ Variables:
   either: a name that changed meaning is the hazard, so it did not change
   meaning.
 
-  Two layers make a mismatch safe. An ABI-1 DLL does not export EL_Publish
-  at all, so DefineDLLFunc fails to resolve at verify time and nothing runs.
-  It DOES export EL_Init3 with this same signature, so init alone would not
-  catch it — the EL_DllVersion latch below is what does, and every publish
-  call sits behind InitDone and VersionMismatch. Conversely this DLL keeps
-  EL_Init, EL_Init2, EL_PublishTick and EL_PublishBar as tombstones
-  returning -6, so an older .ELD stops at its own init. See
+  EL_Init IS NO LONGER A SAFE GATE, because its own name is now reused with
+  a different arity. An .ELD built against the superseded one-argument
+  EL_Init resolves the new five-argument export and corrupts the stack on
+  the call; no return code exists for that. The direction that IS safe is
+  this file against an older DLL: an ABI-2 DLL exports EL_Init3, not a
+  five-argument EL_Init, so DefineDLLFunc fails to resolve at Verify and
+  nothing runs. EL_PublishTick and EL_PublishBar remain tombstones returning
+  -6. The EL_DllVersion latch below covers what is left. See
   contract/wire.md.
 
   The quantity parameters are double because EasyLanguage has no 64-bit
   integer type; the DLL casts them to int64 before they reach the wire. }
-DefineDLLFunc: "TS2Python.dll", int, "EL_Init3", LPSTR;
+DefineDLLFunc: "TS2Python.dll", int, "EL_Init", LPSTR, LPSTR, int, int, int;
 DefineDLLFunc: "TS2Python.dll", int, "EL_Publish",
     LPSTR, LPSTR, int, int, int,
     double, double, double, double,
@@ -130,13 +146,31 @@ DefineDLLFunc: "TS2Python.dll", int, "EL_Publish",
 DefineDLLFunc: "TS2Python.dll", int, "EL_Shutdown";
 DefineDLLFunc: "TS2Python.dll", int, "EL_DllVersion";
 
-{ -- One-shot init: first bar only. EL_Init3 is idempotent; return code 1
-     means "another chart already bound the socket" — still success.
+{ -- Chart identity, assigned every bar and BEFORE the init block ----------
+     EL_Init announces this chart to the consumer, so it needs these; the
+     publish block below reuses them rather than reading the reserved words
+     a second time.
 
-     rc = -6 means this DLL is newer than this file: the tombstoned EL_Init /
-     EL_Init2 return it. That cannot happen here, since this file binds
-     EL_Init3 — it is listed in contract/error_codes.md for the operator who
-     is running an older .ELD against this DLL.
+     `Category` must be assigned to a numeric variable before it can be read
+     — TradeStation's own requirement. Both travel verbatim; this script
+     never branches on either.
+
+     These statements sit after every DefineDLLFunc on purpose: EasyLanguage
+     wants declarations before code. }
+Sym = GetSymbolName;
+Cat = Category;
+
+{ -- Init: retried until it succeeds, then never again on this chart.
+
+     EL_Init both binds the socket (whichever chart gets there first) and
+     announces THIS chart. rc 1 means this chart was already announced in
+     this session — still success. rc -7 means no consumer is subscribed
+     yet, which is the ordinary state at startup and is handled below.
+
+     rc = -6 cannot come from init any more; the tombstones that return it
+     are EL_PublishTick / EL_PublishBar, which this file does not bind. It
+     stays in contract/error_codes.md for the operator running an older
+     .ELD against this DLL.
 
      The ABI check runs here, once, rather than per bar. EL_DllVersion takes
      no arguments, so its signature can never drift and calling it is safe
@@ -144,30 +178,47 @@ DefineDLLFunc: "TS2Python.dll", int, "EL_DllVersion";
      "who are you" unconditionally. A mismatch latches publishing off instead
      of letting the version-specific signatures below be called. }
 If Enabled and InitDone = False Then Begin
-    InitRC = EL_Init3(ZMQEndpoint);
+    InitRC = EL_Init(ZMQEndpoint, Sym, Cat, BarType, BarInterval);
     If InitRC < 0 Then Begin
-        If LogErrors Then
-            Print("[TS2Python] EL_Init3 FAILED rc=", InitRC,
+        { rc -7 is NOT a failure. It means no consumer is subscribed yet,
+          which is the normal state every time TradeStation starts before
+          run_ingestion.py does. Retrying is the whole design — but the
+          retry happens on every bar, so this says so ONCE. Without the
+          latch a chart left open overnight fills the Print Log with the
+          same line. }
+        If InitRC = -7 Then Begin
+            If LogErrors and WaitingLogged = False Then Begin
+                WaitingLogged = True;
+                Print("[TS2Python] waiting for a subscriber on ", ZMQEndpoint,
+                      " — symbol=", Sym, " is not being published yet.",
+                      " Start the consumer (run_ingestion.py); this chart",
+                      " announces itself and starts publishing on the next",
+                      " bar after it attaches. This message appears once.");
+            End;
+        End Else If LogErrors Then
+            Print("[TS2Python] EL_Init FAILED rc=", InitRC,
                   " endpoint=", ZMQEndpoint,
-                  " symbol=", GetSymbolName);
+                  " symbol=", Sym);
         { leave InitDone = False so we retry on the next tick }
     End Else Begin
         InitDone = True;
         DllVer = EL_DllVersion;
-        If DllVer <> 2 Then Begin
+        If DllVer <> 3 Then Begin
             VersionMismatch = True;
             If LogErrors Then
                 Print("[TS2Python] DLL ABI mismatch: EL_DllVersion=", DllVer,
-                      " but this indicator is built for 2.",
-                      " Publishing stopped on symbol=", GetSymbolName, ".",
+                      " but this indicator is built for 3.",
+                      " Publishing stopped on symbol=", Sym, ".",
                       " Reinstall TS2Python.dll and re-import the .ELD that",
                       " shipped with it — they are versioned together.");
         End Else If LogErrors Then
-            Print("[TS2Python] EL_Init3 ok rc=", InitRC,
+            Print("[TS2Python] EL_Init ok rc=", InitRC,
                   " dll_version=", DllVer,
-                  " symbol=", GetSymbolName,
+                  " symbol=", Sym,
+                  " category=", Cat,
                   " bar_type=", BarType,
-                  " bar_interval=", BarInterval);
+                  " bar_interval=", BarInterval,
+                  " — announced to the consumer, publishing starts now.");
     End;
 End;
 
@@ -229,11 +280,8 @@ End;
 
 { -- Publish. One call, every chart, every field. }
 If Enabled and InitDone and VersionMismatch = False Then Begin
-    Sym = GetSymbolName;
-    { Category must be assigned to a numeric variable before it can be
-      read — TradeStation's own requirement. Goes out verbatim; this
-      script never branches on it. }
-    Cat = Category;
+    { Sym and Cat are assigned at the top of the script — EL_Init needs them
+      too, so they are no longer read here. }
     { Bar-time string "yyyy-MM/dd-HH:mm:ss" 24-hour (e.g. "2026-04/18-13:30:45").
       Goes on the wire verbatim as ts_str. The authoritative wall-clock ts is
       stamped by the DLL; this string is what the subscriber derives the bar's

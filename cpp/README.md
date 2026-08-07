@@ -216,13 +216,18 @@ Then, in the EasyLanguage editor, Verify the indicator that imports the DLL.
 
 ## C ABI
 
-DLL version `EL_DllVersion() == 2`. See [`../contract/error_codes.md`](../contract/error_codes.md) for return codes.
+DLL version `EL_DllVersion() == 3`. See [`../contract/error_codes.md`](../contract/error_codes.md) for return codes.
 
 ```c
 int __stdcall EL_DllVersion(void);
-int __stdcall EL_Init3(const char* zmq_endpoint);
 
-// Single trade print. Quantities are EasyLanguage reserved words, verbatim.
+// Bind the publisher (once per process) and announce this chart. Returns -7
+// until a subscriber is attached — see below.
+int __stdcall EL_Init(
+    const char* zmq_endpoint,
+    const char* symbol, int category, int bar_type, int bar_interval);
+
+// Single data point. Quantities are EasyLanguage reserved words, verbatim.
 // They arrive as double because DefineDLLFunc has no 64-bit integer type;
 int __stdcall EL_Publish(
     const char* symbol, const char* el_timestamp,
@@ -233,36 +238,49 @@ int __stdcall EL_Publish(
     double bid, double ask);
 ```
 
-Return codes: `0` success, `1` already initialized (idempotent re-init), `-1` not initialized, `-2` ZMQ send failed, `-3` init failed (bind / socket create), `-4` invalid argument, `-6` ABI mismatch (tombstone).
+Return codes: `0` success, `1` this chart already announced, `-1` not initialized, `-2` ZMQ send failed, `-3` init failed (bind / socket create), `-4` invalid argument, `-6` ABI mismatch (tombstone), `-7` no subscriber yet.
 
-### Why the tombstones exist
+### `-7`, and why init can refuse to succeed
 
-`EL_PublishTick` and `EL_PublishBar` once **kept their names while changing signature**. They are `__stdcall`, where the callee cleans the stack, so a call with the wrong argument count corrupts the stack — TradeStation crashes or misbehaves rather than returning an error.
+The socket is **XPUB**, not PUB. Send semantics are identical; the difference is that subscriptions come back as readable messages, so the DLL can tell whether anyone is attached.
 
-Renaming init instead is what makes that unreachable. Every publish call in the indicator is guarded by `InitDone`, which stays False whenever `InitRC < 0`, so **init is the only interception point**:
+`EL_Init` returns `-7` and publishes nothing until a subscriber covers the control topic `__ts2py__`. That is not a failure — it is the normal state whenever TradeStation starts before the consumer. The indicator leaves `InitDone` False on any negative rc and retries on the next bar.
+
+It exists because PUB/SUB discards everything sent with nobody attached and reports nothing at all. The previous init returned `0` the moment `bind()` succeeded, so the Print Log said "init ok" while every frame went in the bin.
+
+On success `EL_Init` publishes a **hello** frame on `__ts2py__` naming the chart (`symbol`, `category`, `bar_type`, `bar_interval`). The DLL remembers every chart and re-announces all of them whenever a subscriber attaches, so restarting the consumer does not require touching TradeStation. Subscription matching is by **prefix**, exactly as ZMQ filters, so a consumer using `SUBSCRIBE ""` counts.
+
+### The tombstones, and the hole this revision opened
+
+`EL_PublishTick` and `EL_PublishBar` once **kept their names while changing signature**. They are `__stdcall`, where the callee cleans the stack, so a call with the wrong argument count corrupts the stack — TradeStation crashes or misbehaves rather than returning an error. They remain exported, returning `-6`.
+
+**They no longer protect anything.** The guard was that init's name changed on every signature change (`EL_Init` → `EL_Init2` → `EL_Init3`), so an old `.ELD` failed at init and never reached a moved publish signature. This revision reuses `EL_Init` with five parameters where the old one had one — and `DefineDLLFunc` resolves by name alone, so an old `.ELD` resolves it, calls it, and **corrupts the stack inside init**, before any tombstone is reachable. Nothing on the callee side can detect the argument count.
 
 | Deployment | Caught by | Result |
 | --- | --- | --- |
-| new `.ELD` + old DLL | old DLL has no `EL_Init3` export | `DefineDLLFunc` fails at Verify, with a named error |
-| old `.ELD` + new DLL | tombstone returns `-6` | `EL_Init FAILED rc=-6` in the Print Log; never publishes |
-| new `.ELD` + a future DLL | the indicator's `EL_DllVersion()` latch | `EL_DllVersion` takes no arguments, so calling it is always safe; anything `!= 1` latches publishing off |
+| new `.ELD` + old DLL | old DLL has no 5-parameter `EL_Init` export | `DefineDLLFunc` fails at Verify, with a named error |
+| old `.ELD` calling `EL_PublishTick`/`Bar` + new DLL | tombstone returns `-6` | `rc=-6` in the Print Log; never publishes |
+| new `.ELD` + a future DLL | the indicator's `EL_DllVersion()` latch | `EL_DllVersion` takes no arguments, so calling it is always safe; anything `!= 3` latches publishing off |
+| **old `.ELD` calling 1-arg `EL_Init` + new DLL** | **nothing** | **stack corruption; TradeStation crashes or misbehaves** |
 
-The tombstones are three lines each and **must stay in `TS2Python.def`**. Dropping the exports would also be safe, but the operator would get a symbol-resolution failure instead of a sentence they can act on.
+**Install the DLL and re-Verify the `.ELD` together.** That procedure is now the only thing preventing the last row.
 
-The DLL pins itself into the host process on first successful `EL_Init3` (Windows `GetModuleHandleExW` with `GET_MODULE_HANDLE_EX_FLAG_PIN`) so that TradeStation calling `FreeLibrary` does not trigger the C runtime's static-destructor chain — `zmq_ctx_term()` joining the ZMQ I/O thread under loader lock would deadlock TS otherwise. `EL_Shutdown()` exists for the standalone test harness only.
+The tombstones still **stay in `TS2Python.def`**: dropping an export only turns a `-6` into a symbol-resolution failure that names no cause.
+
+The DLL pins itself into the host process on first successful `EL_Init` (Windows `GetModuleHandleExW` with `GET_MODULE_HANDLE_EX_FLAG_PIN`) so that TradeStation calling `FreeLibrary` does not trigger the C runtime's static-destructor chain — `zmq_ctx_term()` joining the ZMQ I/O thread under loader lock would deadlock TS otherwise. `EL_Shutdown()` exists for the standalone test harness only.
 
 ## Standalone test
 
-Run the harness against the Python smoke subscriber to verify end-to-end without TradeStation:
+**Start the subscriber first — this is now mandatory, not a race-avoidance tip.** `EL_Init` returns `-7` until one is attached, so a harness run with no SUB waits out `--subscriber-timeout-ms` (default 15000) and exits non-zero.
 
 ```powershell
-# Terminal A — start the subscriber first
+# Terminal A — the subscriber MUST be up first
 python contract/tools/record.py --latency
 
 # Terminal B — fire the harness
 cpp\Release\TS2Python_TestHarness.exe --mode stress --rate 10000 --seconds 10
 ```
 
-A successful harness exits with code `0` (no dropped sends). The subscriber should print ~100 000 `SPY`-topic messages and per-percentile latency stats. Other harness modes: `--mode smoke` (3 topics plus one bar), `--mode noquote`, `--mode bars` (every `BarType`/`BarInterval` combination, none refused — including ones a `-5` mapping used to reject outright), `--mode session`, `--mode multithread --threads 8 --per-thread 5000`. Each fixture's mode and frame count is tabulated in [`../contract/fixtures/README.md`](../contract/fixtures/README.md).
+A successful harness exits with code `0` (no dropped sends). The subscriber should print two `__ts2py__` hello frames, then ~100 000 `SPY`-topic messages and per-percentile latency stats. Other harness modes: `--mode smoke` (3 topics plus one bar), `--mode noquote`, `--mode bars` (every `BarType`/`BarInterval` combination, none refused — including ones a `-5` mapping used to reject outright), `--mode session`, `--mode multithread --threads 8 --per-thread 5000`. Each fixture's mode and frame count is tabulated in [`../contract/fixtures/README.md`](../contract/fixtures/README.md).
 
-**Every run first asserts the ABI**: `EL_DllVersion() == 2`, and both tombstones returning `-6`, before any init. A check that only runs when someone remembers to run it is not a check.
+**Every run first asserts the ABI**: `EL_DllVersion() == 3`, and both tombstones returning `-6`, before any init. It then checks that re-announcing the same chart returns `1` while a second, different chart returns `0`. A check that only runs when someone remembers to run it is not a check.

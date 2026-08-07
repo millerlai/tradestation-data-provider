@@ -12,6 +12,8 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 #if defined(_WIN32)
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -22,7 +24,22 @@
 
 namespace {
 
-constexpr int kDllVersion = 2;
+constexpr int kDllVersion = 3;
+
+// Where hello frames go. NOT a symbol topic.
+//
+// A consumer subscribes per symbol, from a list it was configured with. A
+// chart on a symbol that is not on that list is precisely the case an
+// operator needs told about — and announcing it on its own symbol topic
+// would deliver it to nobody. So the announcement rides a fixed topic the
+// consumer always subscribes to, and the topic is what tells a hello frame
+// apart from a point frame. No discriminator field on the payload, and the
+// point frame is untouched.
+//
+// The leading underscores keep it out of TradeStation's symbol space: ZMQ
+// SUBSCRIBE is a prefix match, so a topic that could prefix a real symbol
+// (or be prefixed by one) would cross-deliver.
+constexpr char kControlTopic[] = "__ts2py__";
 
 std::mutex       g_mutex;
 // Raw pointers, never destroyed implicitly. See pin_self_module_once()
@@ -72,6 +89,64 @@ std::unordered_map<std::string, std::uint64_t>    g_seq;
 // would hide real losses behind a contiguous sequence.
 std::uint64_t reserve_seq(const char* symbol) {
     return ++g_seq[std::string(symbol)];
+}
+
+// ---- chart registry ------------------------------------------------------
+//
+// One entry per chart that has called EL_Init. TradeStation runs the
+// indicator once per chart, each with its own symbol and interval, and all
+// of them share this one DLL and one socket.
+//
+// The registry exists so a consumer restart does not need TradeStation
+// touched. EL_Init runs once per chart, on its first bar; if the only
+// record of a chart were that call, a consumer that started, stopped and
+// started again would never learn what is attached until every chart was
+// re-Verified by hand. Instead the DLL re-announces everything it knows the
+// moment a subscriber appears.
+//
+// A plain vector: a TradeStation workspace holds a handful of charts, and
+// the linear scan happens once per chart on its first bar and once per
+// subscriber attach. Guarded by g_mutex like everything else here.
+struct Chart {
+    std::string symbol;
+    int         category;
+    int         bar_type;
+    int         bar_interval;
+    bool        announced;
+};
+std::vector<Chart> g_charts;
+
+// Topics with at least one subscriber attached, as reported by XPUB.
+//
+// XPUB (not PUB) is what makes EL_Init able to answer "is anyone actually
+// listening". A subscription arrives on the socket as a readable message:
+// 0x01 followed by the topic on subscribe, 0x00 on unsubscribe. Non-verbose
+// XPUB reports only the first subscriber per topic and only the last
+// unsubscribe, which is exactly the "is at least one attached" question
+// being asked here.
+std::unordered_set<std::string> g_sub_topics;
+
+// Would a subscription to `s` deliver the control topic?
+//
+// PREFIX MATCH, not equality. ZMQ_SUBSCRIBE is a prefix filter, so a
+// subscriber that asked for "" gets every topic including this one, and one
+// that asked for "__" gets it too. Matching on equality left EL_Init
+// returning -7 forever against a perfectly good subscriber — which is
+// exactly what `contract/tools/record.py` does by default, and it deadlocked
+// the whole publisher.
+bool covers_control_topic(const std::string& s) {
+    const std::string ctrl(kControlTopic);
+    return s.size() <= ctrl.size() && ctrl.compare(0, s.size(), s) == 0;
+}
+
+// True once a subscriber is attached that would RECEIVE the control topic —
+// i.e. once a hello would actually reach someone. Must be called with
+// g_mutex held. A linear scan over a handful of topics, once per publish.
+bool control_topic_subscribed() {
+    for (const std::string& s : g_sub_topics) {
+        if (covers_control_topic(s)) return true;
+    }
+    return false;
 }
 
 // ---- quote availability --------------------------------------------------
@@ -180,6 +255,96 @@ std::uint64_t recv_unix_microseconds() {
 // unparseable el_timestamp now reaches the binding intact instead of being
 // flagged at the publisher.
 
+// Publish one chart's hello on the control topic. Must be called with
+// g_mutex held, and only when g_sock exists.
+//
+// The frame declares proto 2 like every other frame on this socket. It is
+// not a point and does not pretend to be one: it carries no OHLC, no
+// quantity words and no quote, and it is told apart by its topic. A
+// consumer that only wants points never subscribes here and cannot see it.
+bool send_hello(Chart& c) {
+    const std::uint64_t seq = reserve_seq(kControlTopic);
+
+    char payload[512];
+    const int n = std::snprintf(
+        payload, sizeof(payload),
+        "{\"proto\":2,\"seq\":%llu,\"sid\":%llu,\"ts\":%.6f,"
+        "\"symbol\":\"%s\",\"category\":%d,"
+        "\"bar_type\":%d,\"bar_interval\":%d}",
+        static_cast<unsigned long long>(seq),
+        static_cast<unsigned long long>(g_sid),
+        recv_unix_seconds(),
+        c.symbol.c_str(), c.category, c.bar_type, c.bar_interval);
+    if (n <= 0 || static_cast<size_t>(n) >= sizeof(payload)) return false;
+
+    zmq::message_t topic(kControlTopic, std::strlen(kControlTopic));
+    zmq::message_t body(payload, static_cast<size_t>(n));
+    if (!g_sock->send(topic, zmq::send_flags::sndmore)) return false;
+    if (!g_sock->send(body, zmq::send_flags::none)) return false;
+
+    c.announced = true;
+    return true;
+}
+
+// Read whatever subscription traffic XPUB has queued, and re-announce every
+// known chart when a consumer attaches. Must be called with g_mutex held.
+//
+// Called from both EL_Init and EL_Publish. EL_Init alone would not be
+// enough: it runs once per chart, on that chart's first bar, so a consumer
+// restarting an hour later would find nothing announcing itself and no
+// second EL_Init coming. Draining on every publish is what makes the
+// consumer restartable without touching TradeStation.
+void drain_subscriptions() {
+    if (!g_sock) return;
+
+    try {
+        zmq::message_t msg;
+        // An XPUB subscription message is 0x01 or 0x00 followed by the raw
+        // topic. dontwait returns an empty result on EAGAIN rather than
+        // throwing, so this drains the queue and stops.
+        while (g_sock->recv(msg, zmq::recv_flags::dontwait)) {
+            if (msg.size() < 1) continue;
+            const auto* d = static_cast<const unsigned char*>(msg.data());
+            std::string topic(reinterpret_cast<const char*>(d + 1), msg.size() - 1);
+
+            if (d[0] == 0) {
+                g_sub_topics.erase(topic);
+                continue;
+            }
+            if (d[0] != 1) continue;
+            g_sub_topics.insert(topic);
+            if (!covers_control_topic(topic)) continue;
+
+            // ANNOUNCE ON THE SUBSCRIBE ITSELF, not on a 0->1 transition in
+            // the subscriber count. A consumer restarting can overlap its
+            // predecessor by a few milliseconds, and libzmq then never sees
+            // the topic reach zero subscribers — measured, the reconnecting
+            // consumer got no hellos at all, while the same test with a
+            // six-second gap got both. XPUB_VERBOSE (set at bind) is what
+            // makes this reliable: without it XPUB reports only the FIRST
+            // subscriber per topic and the overlapping one is invisible.
+            //
+            // The cost is a duplicate hello for a consumer that subscribes
+            // to two topics both covering this one (say "" and __ts2py__).
+            // A repeated announcement is idempotent downstream; a missing
+            // one leaves the consumer blind to the whole workspace.
+            //
+            // Its predecessor's hellos died with it and TradeStation will
+            // not call EL_Init again for a chart already on screen, so
+            // everything this DLL knows goes out again.
+            for (auto& c : g_charts) {
+                c.announced = false;
+            }
+            for (auto& c : g_charts) {
+                send_hello(c);
+            }
+        }
+    } catch (...) {
+        // Nothing here is worth failing the caller's publish over; the next
+        // call drains again.
+    }
+}
+
 }  // namespace
 
 extern "C" {
@@ -188,33 +353,91 @@ TS2P_API int TS2P_CALL EL_DllVersion(void) {
     return kDllVersion;
 }
 
-static int init_impl(const char* zmq_endpoint) {
-    if (zmq_endpoint == nullptr) return -4;
+TS2P_API int TS2P_CALL EL_Init(const char* zmq_endpoint,
+                               const char* symbol,
+                               int         category,
+                               int         bar_type,
+                               int         bar_interval) {
+    if (zmq_endpoint == nullptr || symbol == nullptr) return -4;
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
-        if (g_sock) return 1;  // idempotent re-init
 
-        auto* ctx  = new zmq::context_t(1);
-        auto* sock = new zmq::socket_t(*ctx, zmq::socket_type::pub);
-        // PUB silently drops past SNDHWM (PUB never blocks publisher).
-        // 100k * ~512B payload ≈ 51MB per subscriber pipe — buys ~30 min
-        // of SUB stall at 50 tps, still safe inside TS's 32-bit address space.
-        // Drops past this point are invisible here; the `seq` field is what
-        // lets the subscriber notice them.
-        sock->set(zmq::sockopt::sndhwm, 100000);
-        sock->set(zmq::sockopt::linger, 0);
-        sock->bind(zmq_endpoint);
+        if (!g_sock) {
+            auto* ctx = new zmq::context_t(1);
+            // XPUB, not PUB. Same send semantics; the difference is that a
+            // subscription arrives as a readable message, which is the only
+            // way this side can answer "is anyone actually listening" — and
+            // without that, init reports success into a void.
+            auto* sock = new zmq::socket_t(*ctx, zmq::socket_type::xpub);
+            // Report EVERY subscription, not just the first per topic.
+            // A consumer restart can overlap its predecessor briefly, and
+            // without this the newcomer's subscription is swallowed as a
+            // duplicate — it then receives no chart announcements at all.
+            // See drain_subscriptions().
+            sock->set(zmq::sockopt::xpub_verbose, 1);
+            // Silently drops past SNDHWM (never blocks the publisher).
+            // 100k * ~512B payload ≈ 51MB per subscriber pipe — buys ~30 min
+            // of SUB stall at 50 tps, still safe inside TS's 32-bit address
+            // space. Drops past this point are invisible here; the `seq`
+            // field is what lets the subscriber notice them.
+            sock->set(zmq::sockopt::sndhwm, 100000);
+            sock->set(zmq::sockopt::linger, 0);
+            sock->bind(zmq_endpoint);
 
-        g_ctx  = ctx;
-        g_sock = sock;
-        // New publisher session: stamp its id and restart every counter.
-        // Only on a real init — the idempotent path above returned 1
-        // without touching either, so a re-Verify of the indicator does
-        // not look like a restart to subscribers.
-        g_sid = recv_unix_microseconds();
-        g_seq.clear();
-        pin_self_module_once();  // stay resident for the life of the host
-        return 0;
+            g_ctx  = ctx;
+            g_sock = sock;
+            // New publisher session: stamp its id and restart every counter.
+            // Only on the first bind — a second chart, or a re-Verify, must
+            // not look like a publisher restart to subscribers.
+            g_sid = recv_unix_microseconds();
+            g_seq.clear();
+            g_charts.clear();
+            g_sub_topics.clear();
+            pin_self_module_once();  // stay resident for the life of the host
+        }
+
+        // Register before draining: if the drain finds a consumer attaching
+        // right now, this chart is announced by the re-announce sweep rather
+        // than being missed until its next bar.
+        //
+        // An INDEX, not a pointer. drain_subscriptions() below does not
+        // resize g_charts today, and a pointer would be silently invalidated
+        // the day it does.
+        std::size_t idx = g_charts.size();
+        for (std::size_t i = 0; i < g_charts.size(); ++i) {
+            const Chart& c = g_charts[i];
+            if (c.symbol == symbol && c.category == category &&
+                c.bar_type == bar_type && c.bar_interval == bar_interval) {
+                idx = i;
+                break;
+            }
+        }
+        if (idx == g_charts.size()) {
+            g_charts.push_back(Chart{std::string(symbol), category,
+                                     bar_type, bar_interval, false});
+        }
+        // Whether this chart was ALREADY known and announced before this
+        // call. Read before the drain, because the drain's re-announce sweep
+        // can set `announced` on a chart this very call just registered —
+        // and reporting that as rc 1 ("nothing to do") would be a lie about
+        // who did the announcing.
+        const bool announced_before = g_charts[idx].announced;
+
+        drain_subscriptions();
+
+        // Nobody is listening yet. Not a failure: TradeStation routinely
+        // starts before the consumer does. The indicator leaves InitDone
+        // False on a negative rc and calls again on the next bar, so this
+        // resolves itself the moment the consumer comes up — and until it
+        // does, no publish is attempted into a socket that would drop it.
+        if (!control_topic_subscribed()) return -7;
+
+        if (!g_charts[idx].announced && !send_hello(g_charts[idx])) return -2;
+
+        // 0 = this call is what put the chart on the wire, whether it sent
+        // the hello itself or the attach sweep did it a microsecond earlier.
+        // 1 = the chart was already announced before this call.
+        return announced_before ? 1 : 0;
     } catch (const zmq::error_t&) {
         return -3;
     } catch (...) {
@@ -222,36 +445,23 @@ static int init_impl(const char* zmq_endpoint) {
     }
 }
 
-TS2P_API int TS2P_CALL EL_Init3(const char* zmq_endpoint) {
-    return init_impl(zmq_endpoint);
-}
-
 // ---- tombstones -----------------------------------------------------------
 //
-// The init exports of the superseded protocol. They still exist, and they
-// never initialise anything.
+// The publish exports of the superseded protocol. They still exist, and they
+// never publish anything.
 //
 // EL_PublishTick and EL_PublishBar kept their names but changed arity. Under
 // __stdcall the callee pops the arguments, so an .ELD built against the old
 // signatures would corrupt the stack rather than fail — TradeStation
 // misbehaves or dies, and there is no return code to look at.
 //
-// Every publish call in the indicator sits behind a successful init, so
-// stopping the old .ELD here stops it everywhere. Returning -6 rather than
-// dropping the export is what puts a readable "EL_Init2 FAILED rc=-6" in the
-// Print Log instead of an unexplained DefineDLLFunc resolution failure.
-//
-// Do not delete these until it is safe to assume no old .ELD survives in any
-// install this repo cannot see — which is not a thing this repo can observe.
-TS2P_API int TS2P_CALL EL_Init(const char* /*zmq_endpoint*/) {
-    return -6;
-}
-
-TS2P_API int TS2P_CALL EL_Init2(const char* /*zmq_endpoint*/,
-                                int /*publisher_version*/) {
-    return -6;
-}
-
+// These no longer stop anything by themselves. The guard used to be that
+// every publish sat behind an init export whose name had changed, so an old
+// .ELD failed at init and never reached them. EL_Init's name is now reused
+// with five parameters instead of one, so an old .ELD corrupts the stack
+// inside EL_Init first. Keeping these exported can still only help: a
+// missing export produces a DefineDLLFunc failure that names no cause,
+// while -6 puts a readable line in the Print Log.
 TS2P_API int TS2P_CALL EL_PublishTick(
     const char* /*symbol*/, const char* /*el_timestamp*/, double /*price*/,
     double /*volume*/, double /*ticks*/, double /*upticks*/,
@@ -305,6 +515,11 @@ TS2P_API int TS2P_CALL EL_Publish(
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!g_sock) return -1;
 
+        // A consumer may have restarted since the last point. Draining here
+        // is what re-announces every known chart to it — EL_Init runs once
+        // per chart and will not run again for one already on screen.
+        drain_subscriptions();
+
         const std::uint64_t seq = reserve_seq(symbol);
 
         char bid_s[32], ask_s[32];
@@ -357,6 +572,8 @@ TS2P_API int TS2P_CALL EL_Shutdown(void) {
     delete g_sock; g_sock = nullptr;
     delete g_ctx;  g_ctx  = nullptr;
     g_seq.clear();
+    g_charts.clear();
+    g_sub_topics.clear();
     g_sid = 0;
     return 0;
 }

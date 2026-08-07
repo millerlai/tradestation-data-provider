@@ -8,17 +8,22 @@
 ;
 ; Keep this in sync with include/ts2python.h.
 ;
-; EL_Init, EL_Init2, EL_PublishTick and EL_PublishBar are TOMBSTONES — they return -6 and initialise
-; nothing. They must stay listed here. Dropping them would make an .ELD
-; built against the superseded protocol fail at DefineDLLFunc resolution
-; with no explanation, whereas returning -6 puts a readable line in
-; TradeStation's Print Log. See ../contract/error_codes.md.
+; EL_PublishTick and EL_PublishBar are TOMBSTONES — they return -6 and
+; publish nothing. Keep them listed: dropping an export makes an .ELD built
+; against the superseded protocol fail at DefineDLLFunc resolution with no
+; explanation, whereas -6 puts a readable line in TradeStation's Print Log.
+; See ../contract/error_codes.md.
+;
+; EL_Init2 and EL_Init3 are GONE, and EL_Init now takes five parameters
+; instead of the one the superseded protocol's EL_Init took. That reuse is
+; deliberate and it is a hazard: __stdcall has the callee pop the arguments,
+; so an .ELD still bound to the one-argument EL_Init resolves this export,
+; calls it, and corrupts the stack. Nothing on this side can detect it. The
+; DLL and the .ELD are one unit — install and re-Verify them together.
 
 LIBRARY TS2Python
 EXPORTS
-    EL_Init3
     EL_Init
-    EL_Init2
     EL_Publish
     EL_PublishTick
     EL_PublishBar

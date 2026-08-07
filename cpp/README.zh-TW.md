@@ -216,13 +216,18 @@ cmake --install build/x86-release --prefix build/x86-release/stage
 
 ## C ABI
 
-DLL 版本 `EL_DllVersion() == 2`。return codes 見 [`../contract/error_codes.md`](../contract/error_codes.md)。
+DLL 版本 `EL_DllVersion() == 3`。return codes 見 [`../contract/error_codes.md`](../contract/error_codes.md)。
 
 ```c
 int __stdcall EL_DllVersion(void);
-int __stdcall EL_Init3(const char* zmq_endpoint);
 
-// 單筆成交。量值是 EasyLanguage reserved word 的原文。
+// 綁定 publisher（每個 process 一次）並宣告這張圖。
+// 在有訂閱者之前回 -7 —— 見下節。
+int __stdcall EL_Init(
+    const char* zmq_endpoint,
+    const char* symbol, int category, int bar_type, int bar_interval);
+
+// 單筆資料點。量值是 EasyLanguage reserved word 的原文。
 // 型別是 double，因為 DefineDLLFunc 沒有 64 位元整數型別；
 int __stdcall EL_Publish(
     const char* symbol, const char* el_timestamp,
@@ -233,36 +238,51 @@ int __stdcall EL_Publish(
     double bid, double ask);
 ```
 
-Return codes：`0` 成功、`1` 已初始化（重複呼叫 idempotent）、`-1` 未初始化、`-2` ZMQ send 失敗、`-3` init 失敗（bind / socket create）、`-4` 參數無效、`-6` ABI 不符（墓碑）。
+Return codes：`0` 成功、`1` 這張圖已宣告過、`-1` 未初始化、`-2` ZMQ send 失敗、`-3` init 失敗（bind / socket create）、`-4` 參數無效、`-6` ABI 不符（墓碑）、`-7` 尚無訂閱者。
 
-### 為什麼要留墓碑
+### `-7`，以及為什麼 init 可以拒絕成功
 
-`EL_PublishTick` 與 `EL_PublishBar` **名字沒改，簽章改了**。兩者都是 `__stdcall`（callee 清堆疊），所以參數個數不符的呼叫會**損毀堆疊** —— 不是回傳錯誤，是 TradeStation 崩潰或隨機行為。
+socket 是 **XPUB**，不是 PUB。送出語意完全相同；差別在於訂閱會以可讀訊息回到 publisher，所以 DLL 有辦法知道有沒有人接上。
 
-改掉 init 的名字，就讓那條路徑走不到。indicator 裡每一次 publish 都由 `InitDone` 守衛，而 `InitRC < 0` 時 `InitDone` 永遠是 False，所以 **init 是唯一的攔截點**：
+`EL_Init` 在控制 topic `__ts2py__` 沒有訂閱者涵蓋之前，回 `-7` 且什麼都不發。這不是失敗 —— TradeStation 先開、consumer 後開就是常態。indicator 對任何負值 rc 都保持 `InitDone = False`，下一根 bar 再試。
+
+它存在的理由是：PUB/SUB 在沒有訂閱者時丟棄一切且完全不回報。前一代的 init 只要 `bind()` 成功就回 `0`，於是 Print Log 印著「init ok」，而每一根 bar 都進了垃圾桶。
+
+成功時 `EL_Init` 會在 `__ts2py__` 發一個 **hello** frame，指名這張圖（`symbol`、`category`、`bar_type`、`bar_interval`）。DLL 記住每一張圖，並在訂閱者接上時把它們全部重新宣告一次，所以 consumer 重啟不需要動 TradeStation。訂閱比對用 **prefix**，與 ZMQ 的過濾規則一致，所以 consumer 用 `SUBSCRIBE ""` 也算數。
+
+### 墓碑，以及這一版開的那個洞
+
+`EL_PublishTick` 與 `EL_PublishBar` **名字沒改，簽章改了**。兩者都是 `__stdcall`（callee 清堆疊），所以參數個數不符的呼叫會**損毀堆疊** —— 不是回傳錯誤，是 TradeStation 崩潰或隨機行為。兩者仍然匯出，回 `-6`。
+
+**它們現在保護不了任何東西。** 以前的守衛是：init 每次改簽章都跟著改名（`EL_Init` → `EL_Init2` → `EL_Init3`），所以舊 `.ELD` 停在 init，走不到換過簽章的 publish。這一版把 `EL_Init` 收回來重用，參數從 1 個變成 5 個 —— 而 `DefineDLLFunc` 只按名字解析，所以舊 `.ELD` 解析得到、呼叫得下去，然後**在 init 裡就損毀堆疊**，根本走不到墓碑。被呼叫端偵測不到參數個數。
 
 | 部署組合 | 攔截點 | 結果 |
 | --- | --- | --- |
-| 新 `.ELD` + 舊 DLL | 舊 DLL 沒有 `EL_Init3` 匯出 | `DefineDLLFunc` 在 Verify 階段就失敗，錯誤訊息指名道姓 |
-| 舊 `.ELD` + 新 DLL | 墓碑回 `-6` | Print Log 出現 `EL_Init FAILED rc=-6`，一次都不會 publish |
-| 新 `.ELD` + 未來某版 DLL | indicator 端的 `EL_DllVersion()` latch | `EL_DllVersion` 沒有參數，呼叫永遠安全；回值 `<> 1` 就 latch 停止發布 |
+| 新 `.ELD` + 舊 DLL | 舊 DLL 沒有 5 參數的 `EL_Init` 匯出 | `DefineDLLFunc` 在 Verify 階段就失敗，錯誤訊息指名道姓 |
+| 舊 `.ELD` 呼叫 `EL_PublishTick`/`Bar` + 新 DLL | 墓碑回 `-6` | Print Log 出現 `rc=-6`，一次都不會 publish |
+| 新 `.ELD` + 未來某版 DLL | indicator 端的 `EL_DllVersion()` latch | `EL_DllVersion` 沒有參數，呼叫永遠安全；回值 `<> 3` 就 latch 停止發布 |
+| **舊 `.ELD` 呼叫單參數 `EL_Init` + 新 DLL** | **沒有** | **堆疊損毀；TradeStation 崩潰或行為異常** |
 
-墓碑各只有三行，而且**必須留在 `TS2Python.def` 裡**。把匯出刪掉一樣安全，但 operator 拿到的會是一個 symbol 解析失敗，而不是一句看得懂、能照著做的話。
+**DLL 與 `.ELD` 要一起裝、一起重新 Verify。** 這個流程現在是防住最後一列的唯一手段。
 
-DLL 在第一次成功 `EL_Init3` 時，**把自己 pin 在 host process 的位址空間裡**（Windows `GetModuleHandleExW` 加 `GET_MODULE_HANDLE_EX_FLAG_PIN`）。這是為了避免 TradeStation 呼叫 `FreeLibrary` 觸發 C runtime 的 static destructor — 在 loader lock 下 `zmq_ctx_term()` join ZMQ I/O thread 會 deadlock TradeStation。`EL_Shutdown()` 僅供 standalone test harness 使用。
+墓碑仍然**必須留在 `TS2Python.def` 裡**：刪掉匯出只會把 `-6` 換成一個沒有上下文的 symbol 解析失敗。
+
+DLL 在第一次成功 `EL_Init` 時，**把自己 pin 在 host process 的位址空間裡**（Windows `GetModuleHandleExW` 加 `GET_MODULE_HANDLE_EX_FLAG_PIN`）。這是為了避免 TradeStation 呼叫 `FreeLibrary` 觸發 C runtime 的 static destructor — 在 loader lock 下 `zmq_ctx_term()` join ZMQ I/O thread 會 deadlock TradeStation。`EL_Shutdown()` 僅供 standalone test harness 使用。
 
 ## 獨立測試
 
 不用 TradeStation 就能驗證 wire end-to-end：harness 直接餵 Python smoke subscriber。
 
+**subscriber 必須先跑 —— 這是硬性要求，不是避免競態的建議。** `EL_Init` 在沒有訂閱者時回 `-7`，所以沒開 SUB 的 harness 會等到 `--subscriber-timeout-ms`（預設 15000）逾時後以非零碼退出。
+
 ```powershell
-# Terminal A — 先跑 subscriber
+# Terminal A — subscriber 必須先起來
 python contract/tools/record.py --latency
 
 # Terminal B — 跑 harness
 cpp\Release\TS2Python_TestHarness.exe --mode stress --rate 10000 --seconds 10
 ```
 
-Harness 退 `0` 表示沒掉訊。Subscriber 端應看到 ~100 000 筆 `SPY` topic 訊息，以及 p50 / p95 / p99 延遲統計。其他 harness 模式：`--mode smoke`（3 個 topic + 1 根 bar）、`--mode noquote`、`--mode bars`（每一個 `BarType`/`BarInterval` 組合，沒有任何一個被拒收——包含以前會被 `-5` 映射直接拒收的那些）、`--mode session`、`--mode multithread --threads 8 --per-thread 5000`。各 fixture 對應的 mode 與 frame 數列在 [`../contract/fixtures/README.md`](../contract/fixtures/README.md)。
+Harness 退 `0` 表示沒掉訊。Subscriber 端應先看到兩個 `__ts2py__` hello frame，接著是 ~100 000 筆 `SPY` topic 訊息，以及 p50 / p95 / p99 延遲統計。其他 harness 模式：`--mode smoke`（3 個 topic + 1 根 bar）、`--mode noquote`、`--mode bars`（每一個 `BarType`/`BarInterval` 組合，沒有任何一個被拒收——包含以前會被 `-5` 映射直接拒收的那些）、`--mode session`、`--mode multithread --threads 8 --per-thread 5000`。各 fixture 對應的 mode 與 frame 數列在 [`../contract/fixtures/README.md`](../contract/fixtures/README.md)。
 
-**每次啟動都會先驗 ABI**：在任何 init 之前斷言 `EL_DllVersion() == 2`、且兩個墓碑都回 `-6`。只有想到才會跑的檢查，不算檢查。
+**每次啟動都會先驗 ABI**：在任何 init 之前斷言 `EL_DllVersion() == 3`、且兩個墓碑都回 `-6`；接著驗證「同一張圖重複宣告回 `1`、第二張不同的圖回 `0`」。只有想到才會跑的檢查，不算檢查。

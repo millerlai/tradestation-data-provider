@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from datetime import UTC, datetime
 from zoneinfo import ZoneInfo
@@ -10,7 +11,7 @@ import zmq
 import zmq.asyncio
 
 from tradestation_data.domain.bar import Bar
-from tradestation_data.wire.el_subscriber import TradeStationELProvider
+from tradestation_data.wire.el_subscriber import CONTROL_TOPIC, TradeStationELProvider
 
 TS = datetime(2026, 4, 18, 13, 30, 45, tzinfo=UTC).timestamp()
 
@@ -746,3 +747,170 @@ def test_unambiguous_ts_str_says_nothing(caplog) -> None:
     with caplog.at_level("WARNING", logger="tradestation_data.wire.el_subscriber"):
         provider._parse_payload("SPY", json.dumps(_frame()).encode())
     assert not [r for r in caplog.records if "dst_ambiguous" in r.message]
+
+
+# ---- chart announcements (EL_Init hello) -----------------------------------
+
+
+def _hello(**over: object) -> dict[str, object]:
+    """A complete hello frame, as EL_Init publishes it on CONTROL_TOPIC."""
+    base: dict[str, object] = {
+        "proto": 2,
+        "seq": 1,
+        "sid": 7001,
+        "ts": TS,
+        "symbol": "SPY",
+        "category": 2,
+        "bar_type": 1,
+        "bar_interval": 5,
+    }
+    base.update(over)
+    return base
+
+
+async def _drain_until_bar(provider, timeout: float = 1.0) -> Bar:
+    """Run events() until it yields a point.
+
+    Announcements are consumed on the way through without ever surfacing,
+    which is the property most of these tests are really asserting: a hello
+    is not a MarketEvent and must not reach a consumer as one.
+    """
+    gen = provider.events()
+    try:
+        event = await asyncio.wait_for(anext(gen), timeout=timeout)
+    finally:
+        await gen.aclose()
+    assert isinstance(event, Bar)
+    return event
+
+
+@pytest.mark.asyncio
+async def test_control_topic_is_subscribed_by_connect_alone(zmq_inproc_bus) -> None:
+    """Not optional, and not tied to the symbol list.
+
+    The publisher's EL_Init returns -7 and publishes NOTHING until it sees a
+    subscriber on this topic. A consumer that only subscribed to its
+    configured symbols would leave every TradeStation chart waiting forever,
+    with the Print Log saying so and nothing else happening.
+
+    connect() alone must be enough — subscribe() is never called here.
+    """
+    ctx, pub, endpoint = zmq_inproc_bus
+    provider = TradeStationELProvider(endpoint=endpoint, context=ctx)
+    await provider.connect()
+    await asyncio.sleep(0)
+
+    await _publish(pub, CONTROL_TOPIC, _hello(symbol="QQQ"))
+
+    gen = provider.events()
+    pending = asyncio.ensure_future(anext(gen))
+    await asyncio.sleep(0.05)
+    assert provider.announced_charts == {("QQQ", 1, 5): 2}
+
+    pending.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await pending
+    await gen.aclose()
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_announcement_is_not_yielded_as_a_bar(zmq_inproc_bus) -> None:
+    """A hello carries no OHLC, no quantities and no quote.
+
+    `MarketEvent` is `Bar`; yielding a hello would force every consumer to
+    grow a second case for a frame that is not market data. The point that
+    follows it must be the first thing `events()` produces.
+    """
+    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
+    await _publish(pub, CONTROL_TOPIC, _hello())
+    await _publish(pub, "SPY", _frame())
+
+    event = await _drain_until_bar(provider)
+    assert event.symbol == "SPY"
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_announced_and_subscribed_chart_reports_it_is_receiving(
+    zmq_inproc_bus, caplog
+) -> None:
+    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
+    await _publish(pub, CONTROL_TOPIC, _hello(bar_type=1, bar_interval=5))
+    await _publish(pub, "SPY", _frame())
+
+    with caplog.at_level("INFO", logger="tradestation_data.wire.el_subscriber"):
+        await _drain_until_bar(provider)
+
+    record = next(r for r in caplog.records if r.message == "chart_announced_now_receiving")
+    assert record.symbol == "SPY"
+    assert record.category == 2
+    assert record.bar_type == 1
+    assert record.bar_interval == 5
+    assert provider.announced_charts == {("SPY", 1, 5): 2}
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_announced_but_unsubscribed_chart_warns_instead(zmq_inproc_bus, caplog) -> None:
+    """The case the control topic exists to surface.
+
+    A chart on a symbol absent from symbols.yaml publishes to a topic nobody
+    subscribed to. Reporting it as "now receiving" would be false, and saying
+    nothing leaves an operator staring at an empty partition.
+    """
+    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
+    await _publish(pub, CONTROL_TOPIC, _hello(symbol="$VIX.X", category=4))
+    await _publish(pub, "SPY", _frame())
+
+    with caplog.at_level("INFO", logger="tradestation_data.wire.el_subscriber"):
+        await _drain_until_bar(provider)
+
+    assert not [r for r in caplog.records if r.message == "chart_announced_now_receiving"]
+    record = next(r for r in caplog.records if r.message == "chart_announced_but_not_subscribed")
+    assert record.symbol == "$VIX.X"
+    assert record.category == 4
+    assert "symbols.yaml" in record.note
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_malformed_announcement_never_ends_the_stream(zmq_inproc_bus, caplog) -> None:
+    """A hello is not market data, so a bad one must cost nothing.
+
+    Letting it raise out of `events()` would kill the ingest task while
+    `run()` sat on its stop event — the process keeps running, the heartbeat
+    keeps logging, and nothing is ingested again.
+    """
+    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
+    await pub.send_multipart([CONTROL_TOPIC.encode(), b"{not json"])
+    await _publish(pub, CONTROL_TOPIC, _hello(symbol=None))
+    await _publish(pub, "SPY", _frame())
+
+    with caplog.at_level("ERROR", logger="tradestation_data.wire.el_subscriber"):
+        await _drain_until_bar(provider)
+
+    assert provider.frames_refused == 2
+    # A JSON null symbol must NOT become the string "None" and register a
+    # chart under a name that reads like a real symbol.
+    assert provider.announced_charts == {}
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_announcement_declaring_another_proto_is_refused(zmq_inproc_bus, caplog) -> None:
+    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
+    await _publish(pub, CONTROL_TOPIC, _hello(proto=1))
+    await _publish(pub, "SPY", _frame())
+
+    with caplog.at_level("WARNING", logger="tradestation_data.wire.el_subscriber"):
+        await _drain_until_bar(provider)
+
+    assert any(r.message == "chart_announcement_refused" for r in caplog.records)
+    assert provider.announced_charts == {}
+
+    await provider.close()

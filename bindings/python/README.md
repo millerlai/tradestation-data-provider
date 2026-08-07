@@ -43,7 +43,7 @@ flowchart TD
     Callback["CallbackSink"]
     Custom["Your custom sinks"]
 
-    DLL -- "ZMQ PUB" --> Provider
+    DLL -- "ZMQ XPUB" --> Provider
     Provider -- "point (EL_Publish)" --> Runtime
     Runtime -- "closed point" --> Snapshot
     Runtime -- "closed point" --> Pipeline
@@ -155,14 +155,18 @@ uv run python examples/04_replay_fixtures.py --fixture bars
 not have to be TradeStation — the C++ harness drives the DLL directly:
 
 ```powershell
-# Terminal A — from the repo root. --warmup-ms buys time to attach: a PUB
-# socket silently drops whatever it sends while no subscriber is listening.
-# The path is where cpp\build.bat (and Visual Studio) put it; a CMake preset
-# build leaves it in cpp\build\x86-release\Release\ instead.
-cpp\Release\TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
-
-# Terminal B — from bindings\python
+# Terminal A — from bindings\python. THE SUBSCRIBER STARTS FIRST: EL_Init
+# returns -7 and publishes nothing until one is attached, so the harness
+# would otherwise wait out its timeout and exit non-zero. (It used to be the
+# other way round, with --warmup-ms buying time to attach — a PUB socket
+# silently dropped whatever it sent while nobody was listening, and now the
+# publisher refuses to start instead of dropping.)
 uv run python examples\01_print_events.py --count 6
+
+# Terminal B — from the repo root. The path is where cpp\build.bat (and
+# Visual Studio) put it; a CMake preset build leaves it in
+# cpp\build\x86-release\Release\ instead.
+cpp\Release\TS2Python_TestHarness.exe --mode smoke
 ```
 
 No harness yet? Build it with `cd cpp && .\setup-build-env.bat && .\build.bat` — see [`cpp/README.md`](../../cpp/README.md).

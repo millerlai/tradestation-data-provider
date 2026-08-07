@@ -26,7 +26,7 @@ flowchart TB
         direction TB
         TS["TradeStation Desktop"]
         EL["EL Exporter Indicator"]
-        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 2"]
+        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 3"]
         TS --> EL --> DLL
     end
     subgraph CON["Contract — the product"]
@@ -40,7 +40,7 @@ flowchart TB
         GO["Go<br/>future"]
         RS["Rust · C#<br/>future"]
     end
-    DLL -->|"ZMQ PUB<br/>tcp://127.0.0.1:5555"| WIRE
+    DLL -->|"ZMQ XPUB<br/>tcp://127.0.0.1:5555"| WIRE
     WIRE -.->|specifies| PY
     WIRE -.->|specifies| GO
     WIRE -.->|specifies| RS
@@ -148,13 +148,14 @@ any minute/daily chart whose interval the wire supports (`1m` `5m` `15m` `30m`
 **Inspecting the wire without TradeStation:**
 
 ```powershell
-# terminal A — drives the DLL directly. Path depends on which toolchain built it:
+# terminal A — the subscriber goes FIRST. EL_Init returns -7 and publishes
+# nothing until one is attached, so the harness would otherwise just time out.
+python contract/tools/record.py
+
+# terminal B — drives the DLL directly. Path depends on which toolchain built it:
 #   build.bat / Visual Studio  ->  cpp\Release\
 #   cmake --preset             ->  cpp\build\x86-release\Release\
-cpp\Release\TS2Python_TestHarness.exe --mode smoke --warmup-ms 8000
-
-# terminal B
-python contract/tools/record.py
+cpp\Release\TS2Python_TestHarness.exe --mode smoke
 ```
 
 ## Versioning
@@ -162,8 +163,13 @@ python contract/tools/record.py
 | Version | Current | Who cares |
 | --- | ---: | --- |
 | Wire (`"proto"` in the payload) | 2 | Every binding |
-| DLL ABI (`EL_DllVersion()`) | 2 | Every binding |
+| DLL ABI (`EL_DllVersion()`) | 3 | Every binding |
 | Python package | 0.3.0 | Python consumers only |
+
+The two numbers differ on purpose. The ABI moved to 3 when `EL_Init` gained a
+chart identity and a control frame was added on its own topic; the point frame
+is byte-for-byte unchanged, so `proto` stayed at 2 and every recorded fixture
+stays valid.
 
 **There is one wire version and one ABI, and nothing older is supported.** A
 frame without `proto` is not this protocol; a binding refuses it rather than
@@ -172,10 +178,13 @@ used `v` and counted to 4, so restarting at 1 under the same key would have made
 `{"v":1}` a legal opening for two different protocols, and the mismatch would
 have surfaced as wrong numbers rather than a refusal.
 
-**Upgrade the DLL and the `.ELD` together.** They are separate install steps and
-the indicator binds `EL_Init3`, which an older DLL does not export. Every
-incompatible combination is caught before anything is published —
-[`contract/wire.md`](contract/wire.md) tabulates which check fires in each case.
+**Upgrade the DLL and the `.ELD` together, and re-Verify the indicator.** This
+is a hard requirement now, not advice: `EL_Init`'s name was reused with five
+parameters where the superseded protocol's had one, and `DefineDLLFunc` resolves
+by name alone — so an `.ELD` still bound to the old one-argument `EL_Init`
+corrupts the stack instead of getting an error code.
+[`contract/wire.md`](contract/wire.md) tabulates every combination, including
+that one.
 
 ## Status
 
