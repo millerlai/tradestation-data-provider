@@ -223,7 +223,7 @@ int __stdcall EL_DllVersion(void);
 
 // Bind the publisher (once per process) and announce this chart. Returns -7
 // until a subscriber is attached — see below.
-int __stdcall EL_Init(
+int __stdcall EL_InitChart(
     const char* zmq_endpoint,
     const char* symbol, int category, int bar_type, int bar_interval);
 
@@ -244,11 +244,11 @@ Return codes: `0` success, `1` this chart already announced, `-1` not initialize
 
 The socket is **XPUB**, not PUB. Send semantics are identical; the difference is that subscriptions come back as readable messages, so the DLL can tell whether anyone is attached.
 
-`EL_Init` returns `-7` and publishes nothing until a subscriber covers the control topic `__ts2py__`. That is not a failure — it is the normal state whenever TradeStation starts before the consumer. The indicator leaves `InitDone` False on any negative rc and retries on the next bar.
+`EL_InitChart` returns `-7` and publishes nothing until a subscriber covers the control topic `__ts2py__`. That is not a failure — it is the normal state whenever TradeStation starts before the consumer. The indicator leaves `InitDone` False on any negative rc and retries on the next bar.
 
 It exists because PUB/SUB discards everything sent with nobody attached and reports nothing at all. The previous init returned `0` the moment `bind()` succeeded, so the Print Log said "init ok" while every frame went in the bin.
 
-On success `EL_Init` publishes a **hello** frame on `__ts2py__` naming the chart (`symbol`, `category`, `bar_type`, `bar_interval`). The DLL remembers every chart and re-announces all of them whenever a subscriber attaches, so restarting the consumer does not require touching TradeStation. Subscription matching is by **prefix**, exactly as ZMQ filters, so a consumer using `SUBSCRIBE ""` counts.
+On success `EL_InitChart` publishes a **hello** frame on `__ts2py__` naming the chart (`symbol`, `category`, `bar_type`, `bar_interval`). The DLL remembers every chart and re-announces all of them whenever a subscriber attaches, so restarting the consumer does not require touching TradeStation. Subscription matching is by **prefix**, exactly as ZMQ filters, so a consumer using `SUBSCRIBE ""` counts.
 
 ### The tombstones, and the hole this revision opened
 
@@ -258,7 +258,7 @@ On success `EL_Init` publishes a **hello** frame on `__ts2py__` naming the chart
 
 | Deployment | Caught by | Result |
 | --- | --- | --- |
-| new `.ELD` + old DLL | old DLL has no 5-parameter `EL_Init` export | `DefineDLLFunc` fails at Verify, with a named error |
+| new `.ELD` + old DLL | old DLL has no 5-parameter `EL_InitChart` export | `DefineDLLFunc` fails at Verify, with a named error |
 | old `.ELD` calling `EL_PublishTick`/`Bar` + new DLL | tombstone returns `-6` | `rc=-6` in the Print Log; never publishes |
 | new `.ELD` + a future DLL | the indicator's `EL_DllVersion()` latch | `EL_DllVersion` takes no arguments, so calling it is always safe; anything `!= 3` latches publishing off |
 | **old `.ELD` calling 1-arg `EL_Init` + new DLL** | **nothing** | **stack corruption; TradeStation crashes or misbehaves** |
@@ -267,11 +267,11 @@ On success `EL_Init` publishes a **hello** frame on `__ts2py__` naming the chart
 
 The tombstones still **stay in `TS2Python.def`**: dropping an export only turns a `-6` into a symbol-resolution failure that names no cause.
 
-The DLL pins itself into the host process on first successful `EL_Init` (Windows `GetModuleHandleExW` with `GET_MODULE_HANDLE_EX_FLAG_PIN`) so that TradeStation calling `FreeLibrary` does not trigger the C runtime's static-destructor chain — `zmq_ctx_term()` joining the ZMQ I/O thread under loader lock would deadlock TS otherwise. `EL_Shutdown()` exists for the standalone test harness only.
+The DLL pins itself into the host process on first successful `EL_InitChart` (Windows `GetModuleHandleExW` with `GET_MODULE_HANDLE_EX_FLAG_PIN`) so that TradeStation calling `FreeLibrary` does not trigger the C runtime's static-destructor chain — `zmq_ctx_term()` joining the ZMQ I/O thread under loader lock would deadlock TS otherwise. `EL_Shutdown()` exists for the standalone test harness only.
 
 ## Standalone test
 
-**Start the subscriber first — this is now mandatory, not a race-avoidance tip.** `EL_Init` returns `-7` until one is attached, so a harness run with no SUB waits out `--subscriber-timeout-ms` (default 15000) and exits non-zero.
+**Start the subscriber first — this is now mandatory, not a race-avoidance tip.** `EL_InitChart` returns `-7` until one is attached, so a harness run with no SUB waits out `--subscriber-timeout-ms` (default 15000) and exits non-zero.
 
 ```powershell
 # Terminal A — the subscriber MUST be up first

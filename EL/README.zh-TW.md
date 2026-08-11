@@ -19,18 +19,19 @@ TradeStation Chart → TS2Python_Exporter.el → TS2Python.dll → ZMQ PUB → s
 ## 部署步驟
 
 > **DLL 與 `.ELD` 是一組的，永遠要一起換 —— 而且每次換 DLL 都要重新 Verify 這支
-> indicator。** 這不再只是好習慣。`EL_Init` 現在有 5 個參數，前一代只有 1 個，而
-> `DefineDLLFunc` 只按名字解析；`__stdcall` 由被呼叫端清堆疊，所以還綁在舊單參數
-> `EL_Init` 上的 `.ELD` 會**損毀堆疊** —— TradeStation 崩潰而不是回傳錯誤碼，兩側
-> 都沒有任何守衛攔得住。
+> indicator。** 裝錯現在是一個可讀的失敗而不是崩潰，但一樣會讓資料流停掉。
 >
-> 反方向是安全的：本 indicator 綁定 5 參數的 `EL_Init`，舊 DLL 沒有這個匯出，
-> Verify 會以指名的錯誤失敗。init 之後另有一道 `EL_DllVersion()` 檢查。
-> `EL_PublishTick` / `EL_PublishBar` 仍是回 `-6` 的墓碑，但它們現在擋不到東西 ——
-> 舊 `.ELD` 先死在 `EL_Init`。完整對照見 [`../contract/wire.md`](../contract/wire.md)。
+> 兩個方向都攔得住。本 indicator 綁定 `EL_InitChart`，舊 DLL 沒有這個匯出，Verify
+> 會以指名的錯誤失敗。而還綁在前一代單參數 `EL_Init` 上的 `.ELD`，會落在一個**簽章
+> 完全相同**的墓碑上並在 Print Log 讀到 `-6` —— 堆疊平衡，TradeStation 不會崩潰。
+> （`__stdcall` 由被呼叫端清堆疊，這正是舊名字必須釘在舊 arity 上的原因。）
+> `EL_PublishTick` / `EL_PublishBar` 是同樣理由的墓碑；init 之後另有一道
+> `EL_DllVersion()` 檢查。完整對照見 [`../contract/wire.md`](../contract/wire.md)。
 >
-> **consumer 沒跑起來之前不會發布任何東西。** 沒有訂閱者時 `EL_Init` 回 `-7`；
+> **consumer 沒跑起來之前不會發布任何東西。** 沒有訂閱者時 `EL_InitChart` 回 `-7`；
 > indicator 在 Print Log 說一次，然後每根 bar 重試，所以 consumer 一起來它就會自己開始。
+> 若 consumer 中途離線，`EL_Publish` 會每張圖回報一次 `-10` —— 那段期間的 bar 已經
+> 遺失，不會有任何機制補回來。
 
 先裝 DLL，再裝 indicator —— Verify 的時候 DLL 就必須已經在位：
 

@@ -43,7 +43,7 @@ exactly why the `contract/fixtures/` conformance suite exists (§9).
 | **Aggregation, resampling, backfill, caching** | `HistoryStore` only reads; it never derives. See §7.6 and §11. |
 | **Timeframe vocabulary / name mapping** | `bar_type`/`bar_interval` are EasyLanguage's own words, carried verbatim onto the wire and into storage — there is no translation layer that turns them into names like `"5m"`/`"1d"`. |
 | **A non-Windows producer** | Constrained by TradeStation Desktop, a 32-bit Windows process. The subscriber side has no such constraint — the Python binding runs on Windows/macOS/Linux. |
-| **Compatibility with the old protocol** | Wire `proto` / DLL ABI are always **2**; there is no older version to stay compatible with. An old payload cannot pass the version gate — it fails structurally (§5.4). |
+| **Compatibility with the old protocol** | Wire `proto` is always **2** and the DLL ABI is **4**; there is no older version to stay compatible with. An old payload cannot pass the version gate — it fails structurally (§5.4). |
 
 ---
 
@@ -60,9 +60,9 @@ flowchart TB
         direction TB
         TS["TradeStation Desktop<br/>32-bit process"]
         EL["EL Exporter Indicator<br/>TS2Python_Exporter.el"]
-        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 3"]
+        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 4"]
         TS -->|"one indicator per chart"| EL
-        EL -->|"DefineDLLFunc __stdcall<br/>EL_Init → EL_Publish"| DLL
+        EL -->|"DefineDLLFunc __stdcall<br/>EL_InitChart → EL_Publish"| DLL
     end
 
     subgraph WIRE["② Wire Contract — this repo's actual product"]
@@ -137,10 +137,10 @@ Key behaviors:
 
 - **Zero state**: every symbol/value comes from TradeStation's own built-in
   variables, so one compiled indicator covers every chart type.
-- **Version latch**: right after `EL_Init` succeeds it checks
+- **Version latch**: right after `EL_InitChart` succeeds it checks
   `EL_DllVersion()`; on a mismatch, publishing stops entirely and the mismatch is
   logged — it never calls any publish export with an incompatible signature.
-- **Nothing publishes until a consumer is listening**: `EL_Init` returns `-7`
+- **Nothing publishes until a consumer is listening**: `EL_InitChart` returns `-7`
   while no subscriber is attached, the indicator leaves `InitDone` False on any
   negative rc, and so it simply retries on the next bar. That is the normal path
   every time TradeStation starts before the consumer does. The Print Log says so
@@ -161,52 +161,57 @@ PUB `zmq::socket_t`.
 
 | Responsibility | Implementation notes |
 | --- | --- |
-| **Init** (`EL_Init`) | 5 parameters — endpoint plus this chart's `symbol`/`category`/`bar_type`/`bar_interval`. Binds an **XPUB** socket on the first call (`SNDHWM=100000`, `linger=0`, new `g_sid` at microsecond precision, `g_seq` cleared); registers the chart; drains XPUB's subscription queue. Returns **`-7` and publishes nothing** while no subscriber covers the control topic, `0` when this call put the chart on the wire, `1` when the chart was already announced |
-| **Chart registry / re-announce** | Every chart that called `EL_Init` is remembered. **Each subscription message covering the control topic re-announces all of them** — `EL_Init` runs once per chart, so without this a consumer restart could never re-learn the workspace |
+| **Init** (`EL_InitChart`) | 5 parameters — endpoint plus this chart's `symbol`/`category`/`bar_type`/`bar_interval`. Binds an **XPUB** socket on the first call (`SNDHWM=100000`, `linger=0`, new `g_sid` at microsecond precision, `g_seq` cleared); registers the chart; drains XPUB's subscription queue. Returns **`-7` and publishes nothing** while no subscriber covers the control topic, `0` when this call put the chart on the wire, `1` when the chart was already announced |
+| **Chart registry / re-announce** | Every chart that called `EL_InitChart` is remembered. **Each subscription message covering the control topic re-announces all of them** — `EL_InitChart` runs once per chart, so without this a consumer restart could never re-learn the workspace |
 | **`ZMQ_XPUB_VERBOSE`** | Set at bind, and load-bearing. The trigger is the subscribe message itself, *not* a 0→1 edge in the subscriber count: a restarting consumer can overlap its predecessor by milliseconds, so libzmq never sees the topic reach zero and an edge test delivers **nothing** to the reconnecting consumer (measured; the same test with a 6-second gap delivered both hellos). Default XPUB reports only the first subscriber per topic and swallows the overlapping one. Cost: a consumer subscribing to two topics that both cover the control topic gets a duplicate hello — idempotent downstream, unlike a missing one |
 | **Subscription matching** | XPUB reports subscriptions as `0x01`/`0x00` + topic. The control topic counts as subscribed on a **prefix** match, exactly as ZMQ filters — an equality test left `SUBSCRIBE ""` (what `record.py` does by default) looking like nobody, and deadlocked the publisher |
 | **Publish** (`EL_Publish`) | 16 parameters, `__stdcall`; narrows the five quantities first (`double` → `int64`, range-checked against `±9.0e15`, failing with `-4` rather than clamping); then reserves a sequence number (`reserve_seq`, consumed even if the send that follows fails); assembles the payload with `snprintf` (a 768-byte buffer); sends as a 2-frame ZMQ message |
 | **Quote nulling** | `InsideBid`/`InsideAsk` ≤ 0 (including NaN) are always turned into JSON `null` — "no quote" is said once on the wire, rather than left for every binding to separately remember what 0 means |
 | **DLL pinning** | On the first successful init, `GetModuleHandleExW` pins the DLL into the process's address space, avoiding a deadlock that would occur if TradeStation's `FreeLibrary` triggered `zmq_ctx_term()` under the loader lock |
-| **Tombstone exports** | `EL_PublishTick`, `EL_PublishBar` just `return -6;` — see §4.3 |
+| **Tombstone exports** | `EL_Init` (one parameter), `EL_PublishTick`, `EL_PublishBar` just `return -6;`, each held at its superseded signature — see §4.3 |
 
 ### 4.3 DLL ABI Version and the Compatibility Matrix
 
-`EL_DllVersion()` returns `3`, while the wire `proto` stays `2`. They are
-separate numbers for a reason: the ABI changed (`EL_Init`'s signature) and a
-control frame was added on its own topic, but the point frame is byte-for-byte
-unchanged, so every recorded fixture stays valid.
+`EL_DllVersion()` returns `4`, while the wire `proto` stays `2`. They are
+separate numbers for a reason: the ABI changed (the init export's signature,
+then its name) and a control frame was added on its own topic, but the point
+frame is byte-for-byte unchanged, so every recorded fixture stays valid.
 
-**The safety property this repo relied on for three revisions has been given
-up here, deliberately, and it is worth stating plainly.** The rule was: a name
-whose meaning changed is never reused. `EL_PublishTick`/`EL_PublishBar` once
-kept the previous generation's names while their signatures changed, and under
-`__stdcall` the callee pops the stack, so a mismatched call **corrupts the
-stack** rather than returning an error. That is why init was renamed on every
-signature change — `EL_Init` → `EL_Init2` → `EL_Init3` — and why every publish
-in the indicator sits behind a successful init.
+**The rule this repo relies on is: a name whose meaning changed is never
+reused.** `EL_PublishTick`/`EL_PublishBar` once kept the previous generation's
+names while their signatures changed, and under `__stdcall` the callee pops the
+stack, so a mismatched call **corrupts the stack** rather than returning an
+error. That is why init was renamed on every signature change — `EL_InitChart` →
+`EL_Init2` → `EL_Init3` — and why every publish in the indicator sits behind a
+successful init.
 
-This revision reuses `EL_Init` with five parameters where the superseded one
-had one. `DefineDLLFunc` resolves by name alone, so an old `.ELD` **resolves it,
-calls it, and corrupts the stack inside init** — earlier than before, and with
-no return code anywhere. The callee cannot see how many arguments the caller
-pushed; no code on this side can detect it.
+**ABI 3 broke that rule** by reusing `EL_Init` for a five-parameter init where
+the superseded one had one. `DefineDLLFunc` resolves by name alone, so an old
+`.ELD` resolved it, called it, and corrupted the stack inside init — with no
+return code anywhere, and nothing on the callee side able to see how many
+arguments the caller pushed.
 
-`EL_PublishTick`/`EL_PublishBar` remain tombstones, but understand that they
-now catch nothing: an old `.ELD` dies in `EL_Init` before reaching them. They
-stay because a missing export fails less legibly than a `-6`.
+**ABI 4 restores it.** Init is exported as `EL_InitChart`, and `EL_InitChart` goes
+back to being a **one-parameter** tombstone returning `-6`. The old name pinned
+to the old arity is what makes a stale call balance instead of corrupting the
+stack. The decorated names are the proof:
+
+```
+EL_Init      = _EL_Init@4        <- 1 parameter; a stale .ELD balances here
+EL_InitChart = _EL_InitChart@20  <- 5 parameters; only a current .ELD finds it
+```
 
 | Deployment scenario | Where it's caught | What the operator sees |
 | --- | --- | --- |
-| New `.ELD` + old (ABI-1/2) DLL | The old DLL has no 5-parameter `EL_Init` export | `DefineDLLFunc` fails right at Verify time, naming `EL_Init` |
+| New `.ELD` + old (ABI-1/2/3) DLL | The old DLL has no `EL_InitChart` export | `DefineDLLFunc` fails right at Verify time, naming `EL_InitChart` |
 | New `.ELD` + a mismatched new DLL | The indicator's `EL_DllVersion()` latch | A version-mismatch message; the indicator stops publishing |
 | Old `.ELD` (calling `EL_PublishTick`/`Bar`) + new DLL | Tombstone returns `-6` | `rc=-6` in the Print Log; never publishes |
-| **Old `.ELD` (calling 1-arg `EL_Init`) + new DLL** | **Nowhere. The name resolves; `__stdcall` corrupts the stack** | **TradeStation crashes or misbehaves** |
+| Old `.ELD` (calling 1-arg `EL_Init`) + new DLL | The one-parameter `EL_Init` tombstone returns `-6` | `rc=-6` in the Print Log; never publishes. **The stack balances — no crash** |
 
-The first three fail **readably**. The fourth does not, and it is new in this
-revision. **The DLL and the `.ELD` must be installed and re-Verified as a
-pair** — that procedure is now the only thing standing between an operator and
-a crash, where previously the ABI itself was.
+All four now fail **readably**. The last row was an uncatchable crash under
+ABI 3; the rename closed it. **The DLL and the `.ELD` must still be installed
+and re-Verified as a pair** — the difference is that getting it wrong now costs
+a log line rather than a TradeStation crash.
 
 ---
 
@@ -219,8 +224,8 @@ a crash, where previously the ABI itself was.
 | Pattern | ZeroMQ **XPUB/SUB**, fire-and-forget per message, no delivery guarantee |
 | Publisher | The DLL `bind`s, defaulting to `tcp://127.0.0.1:5555` |
 | Subscriber | An ordinary `SUB`. `connect`s to the same endpoint, subscribes to each symbol precisely, **plus the control topic unconditionally** |
-| Why XPUB | Identical send semantics to PUB, but subscriptions arrive back as readable messages — the only way the DLL can answer "is anyone listening", which is what `EL_Init`'s `-7` rests on |
-| Topics | `<symbol>` carries points (`EL_Publish`); `__ts2py__` carries chart announcements (`EL_Init`). **The topic is the discriminator** — no `kind` field was added |
+| Why XPUB | Identical send semantics to PUB, but subscriptions arrive back as readable messages — the only way the DLL can answer "is anyone listening", which is what `EL_InitChart`'s `-7` rests on |
+| Topics | `<symbol>` carries points (`EL_Publish`); `__ts2py__` carries chart announcements (`EL_InitChart`). **The topic is the discriminator** — no `kind` field was added |
 | Frame count | 2 (`ZMQ_SNDMORE`): frame 1 = UTF-8 topic, frame 2 = UTF-8 JSON payload |
 | High-water marks | Publisher `SNDHWM=100000`; Python binding `RCVHWM=1_000_000` |
 | Prefix-match trap | ZMQ `SUBSCRIBE` is a prefix match — subscribing to `SPY` also delivers `SPYG` messages. A binding **must** re-filter by exact string equality after receipt (`contract/semantics.md` §5). The DLL applies the same prefix rule when deciding whether the control topic has a subscriber, so `SUBSCRIBE ""` counts |
@@ -283,14 +288,14 @@ matches" and "this is actually old data" can never both be true at once.
 
 | Code | Meaning | Returned by |
 | --- | --- | --- |
-| `0` | Success — and for `EL_Init`, this call announced the chart | All |
-| `1` | This chart was already announced in this session; an idempotent no-op | `EL_Init` |
+| `0` | Success — and for `EL_InitChart`, this call announced the chart | All |
+| `1` | This chart was already announced in this session; an idempotent no-op | `EL_InitChart` |
 | `-1` | Publish called before a successful init | `EL_Publish` |
-| `-2` | ZMQ send failed (hit the high-water mark, or an exception) | `EL_Init` `EL_Publish` |
-| `-3` | Init's bind/socket creation failed (most commonly: the port is already in use) | `EL_Init` |
-| `-4` | Invalid argument: a null pointer; **a quantity outside ±9.0e15** (just under 2^53, the largest integer a `double` holds exactly — *not* `int64`'s range, and rejected rather than clamped); or **the assembled payload being truncated by `snprintf`** past its buffer | `EL_Init` `EL_Publish` |
-| `-6` | ABI mismatch — the caller is a `.ELD` older than this protocol | The two tombstone exports |
-| `-7` | **No subscriber yet. Retryable, and the normal state at startup** | `EL_Init` |
+| `-2` | ZMQ send failed (hit the high-water mark, or an exception) | `EL_InitChart` `EL_Publish` |
+| `-3` | Init's bind/socket creation failed (most commonly: the port is already in use) | `EL_InitChart` |
+| `-4` | Invalid argument: a null pointer; **a quantity outside ±9.0e15** (just under 2^53, the largest integer a `double` holds exactly — *not* `int64`'s range, and rejected rather than clamped); or **the assembled payload being truncated by `snprintf`** past its buffer | `EL_InitChart` `EL_Publish` |
+| `-6` | ABI mismatch — the caller is a `.ELD` older than this protocol | The three tombstone exports |
+| `-7` | **No subscriber yet. Retryable, and the normal state at startup** | `EL_InitChart` |
 
 `-7` is not a failure, and it is what closed the biggest hole in this list. Every
 code above it reports something the publisher *did*; none of them could report
@@ -722,7 +727,7 @@ is being ingested anymore.
 
 | Knob | Where | Notes |
 | --- | --- | --- |
-| Publish endpoint | The EL indicator's `ZMQEndpoint` input (`EL/TS2Python_Exporter.el`), default `tcp://127.0.0.1:5555` | This is the **only** place the producer's endpoint is set — the DLL binds whatever the indicator passes to `EL_Init`. If TradeStation already holds the port, init returns `-3` (§5.4) and this input is what to change |
+| Publish endpoint | The EL indicator's `ZMQEndpoint` input (`EL/TS2Python_Exporter.el`), default `tcp://127.0.0.1:5555` | This is the **only** place the producer's endpoint is set — the DLL binds whatever the indicator passes to `EL_InitChart`. If TradeStation already holds the port, init returns `-3` (§5.4) and this input is what to change |
 | Publish on/off, error logging | The indicator's `Enabled` / `LogErrors` inputs | |
 | Per-publish quantity dump | The indicator's `LogPublish` input, off by default | Prints all five quantity words per call — the switch to use when working out what a chart type really hands over |
 

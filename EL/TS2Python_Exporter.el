@@ -33,15 +33,15 @@
   attached and reports nothing. The previous version printed "init ok" and
   published into that void.
 
-  VERSIONED WITH THE DLL: this file binds EL_Init and checks EL_DllVersion
-  once, after init. Publishing latches off on a mismatch. The DLL and the
-  .ELD must be installed as a pair — and with THIS revision that is not
-  advice, it is a hard requirement: EL_Init's name was reused with five
-  parameters instead of one, and __stdcall has the callee pop the arguments,
-  so an .ELD still bound to the old one-argument EL_Init corrupts the stack
-  rather than getting an error code. Re-Verify this file whenever you replace
-  the DLL. contract/wire.md tabulates what each mismatched combination
-  looks like.
+  VERSIONED WITH THE DLL: this file binds EL_InitChart and checks
+  EL_DllVersion once, after init. Publishing latches off on a mismatch. The
+  DLL and the .ELD must still be installed as a pair, but a mismatch is now
+  LEGIBLE rather than fatal: the init export is named EL_InitChart, so an
+  .ELD built against the superseded one-argument EL_Init lands on a tombstone
+  that returns -6 instead of corrupting the stack, and this file run against
+  an older DLL finds no EL_InitChart and fails at Verify before anything
+  executes. Re-Verify this file whenever you replace the DLL.
+  contract/wire.md tabulates what each mismatched combination looks like.
 
   WHY BarInterval IS PASSED: BarType = 1 covers every intraday minute chart —
   1-min, 5-min, 15-min and 60-min are all BarType 1, told apart only by
@@ -98,7 +98,8 @@ Inputs:
 
       Off by default and worth leaving off: on a tick chart, or on any chart in
       "update every tick" mode, this prints once per print. }
-    LogPublish(False);
+    LogPublish(False),
+    Debug(False);
 
 Variables:
     InitRC(0),
@@ -125,19 +126,19 @@ Variables:
   either: a name that changed meaning is the hazard, so it did not change
   meaning.
 
-  EL_Init IS NO LONGER A SAFE GATE, because its own name is now reused with
-  a different arity. An .ELD built against the superseded one-argument
-  EL_Init resolves the new five-argument export and corrupts the stack on
-  the call; no return code exists for that. The direction that IS safe is
-  this file against an older DLL: an ABI-2 DLL exports EL_Init3, not a
-  five-argument EL_Init, so DefineDLLFunc fails to resolve at Verify and
-  nothing runs. EL_PublishTick and EL_PublishBar remain tombstones returning
-  -6. The EL_DllVersion latch below covers what is left. See
-  contract/wire.md.
+  THE INIT EXPORT IS EL_InitChart, AND THAT NAME IS THE GATE. It used to be
+  called EL_Init, which is the name the superseded protocol's ONE-argument
+  init already had — so a stale .ELD resolved it, called it with one argument
+  against five, and corrupted the stack with no return code. Renaming fixes
+  both directions: a stale .ELD now lands on the one-argument EL_Init
+  tombstone and reads -6, and this file against an older DLL finds no
+  EL_InitChart and fails at Verify. EL_PublishTick and EL_PublishBar remain
+  tombstones returning -6 for the same reason. The EL_DllVersion latch below
+  covers what is left. See contract/wire.md.
 
   The quantity parameters are double because EasyLanguage has no 64-bit
   integer type; the DLL casts them to int64 before they reach the wire. }
-DefineDLLFunc: "TS2Python.dll", int, "EL_Init", LPSTR, LPSTR, int, int, int;
+DefineDLLFunc: "TS2Python.dll", int, "EL_InitChart", LPSTR, LPSTR, int, int, int;
 DefineDLLFunc: "TS2Python.dll", int, "EL_Publish",
     LPSTR, LPSTR, int, int, int,
     double, double, double, double,
@@ -178,7 +179,7 @@ Cat = Category;
      "who are you" unconditionally. A mismatch latches publishing off instead
      of letting the version-specific signatures below be called. }
 If Enabled and InitDone = False Then Begin
-    InitRC = EL_Init(ZMQEndpoint, Sym, Cat, BarType, BarInterval);
+    InitRC = EL_InitChart(ZMQEndpoint, Sym, Cat, BarType, BarInterval);
     If InitRC < 0 Then Begin
         { rc -7 is NOT a failure. It means no consumer is subscribed yet,
           which is the normal state every time TradeStation starts before
@@ -203,11 +204,11 @@ If Enabled and InitDone = False Then Begin
     End Else Begin
         InitDone = True;
         DllVer = EL_DllVersion;
-        If DllVer <> 3 Then Begin
+        If DllVer <> 4 Then Begin
             VersionMismatch = True;
             If LogErrors Then
                 Print("[TS2Python] DLL ABI mismatch: EL_DllVersion=", DllVer,
-                      " but this indicator is built for 3.",
+                      " but this indicator is built for 4.",
                       " Publishing stopped on symbol=", Sym, ".",
                       " Reinstall TS2Python.dll and re-import the .ELD that",
                       " shipped with it — they are versioned together.");
@@ -413,4 +414,7 @@ If Enabled and InitDone and VersionMismatch = False Then Begin
 End;
 
 { No-op plot so the indicator shows up cleanly on charts. }
-Plot1(0, "ts2python");
+if Debug Then
+Begin
+  Plot1(Close, "ts2python");
+End;

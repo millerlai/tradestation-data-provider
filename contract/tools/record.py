@@ -46,7 +46,7 @@ import zmq
 # Where the publisher announces charts (contract/wire.md §"hello"). Always
 # subscribed, whatever symbol filter was asked for.
 #
-# This is not a convenience. The publisher's socket is XPUB and EL_Init
+# This is not a convenience. The publisher's socket is XPUB and EL_InitChart
 # returns -7 — publishing NOTHING — until it sees a subscriber here. A
 # recorder invoked as `record.py SPY` without this would subscribe to SPY,
 # see the DLL refuse to start, and record an empty fixture with no error

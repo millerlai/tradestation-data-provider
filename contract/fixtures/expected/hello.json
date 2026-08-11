@@ -1,6 +1,6 @@
 {
   "fixture": "../hello.jsonl",
-  "recorded_from": "cpp TS2Python_TestHarness.exe --mode smoke (the two EL_Init announcements only)",
+  "recorded_from": "cpp TS2Python_TestHarness.exe --mode smoke (the two EL_InitChart announcements only)",
   "dll_abi": 3,
   "proto": 2,
   "derivation": [
@@ -18,7 +18,7 @@
     "              symbol's. Both frames here are from one session, so it",
     "              runs 1, 2.",
     "  sid       = the same publisher session id the point frames carry.",
-    "  ts        = DLL receive clock when EL_Init was called. There is no",
+    "  ts        = DLL receive clock when EL_InitChart was called. There is no",
     "              ts_str: a hello is not a bar and has no bar time.",
     "",
     "A binding must NOT surface these as market events. The required",

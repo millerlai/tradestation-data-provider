@@ -32,9 +32,19 @@ extern "C" {
 //  -2  zmq send failed
 //  -3  init failed (bind / socket create)
 //  -4  invalid argument (null pointer, non-representable quantity, ...)
-//  -5  unsupported bar type / interval (no wire timeframe for it)
 //  -6  ABI mismatch — the caller is an .ELD older than this protocol
 //  -7  no subscriber yet — RETRYABLE, and the normal state at startup
+//  -8  endpoint conflict — this chart asked for an endpoint other than the
+//      one already bound by the first chart
+//  -9  the subscription queue could not be read, so "is anyone listening"
+//      has no answer this call
+// -10  published with no subscriber for the symbol — the point is lost.
+//      Reported once per episode per chart, not once per bar
+//
+// -5 is RETIRED, not free. It meant "unsupported bar type / interval", from
+// back when the DLL mapped a chart onto a timeframe vocabulary and refused
+// what it had no word for. Nothing refuses an interval any more. Per
+// ../contract/error_codes.md a retired code is never reused.
 
 // Bind the publisher (once per process) and announce this chart.
 //
@@ -56,9 +66,25 @@ extern "C" {
 //
 //   rc  0  bound, a subscriber is attached, and this chart's hello was sent
 //   rc  1  this exact chart already announced in this session; nothing to do
+//   rc -2  the hello frame could not be sent
 //   rc -3  bind / socket create failed
 //   rc -4  zmq_endpoint or symbol was NULL
 //   rc -7  no subscriber on the control topic yet — call again next bar
+//   rc -8  a different endpoint is already bound — see below
+//   rc -9  the XPUB subscription queue could not be read
+//
+// -9 EXISTS TO KEEP -7 HONEST. Subscriptions arrive as readable messages, so
+// "nobody has subscribed yet" and "the socket could not be read" both end
+// with an empty subscriber set. Reporting the second as -7 told the operator
+// it was the normal startup state — which the indicator logs once and then
+// retries in silence forever, while the consumer sits there running. They
+// are different facts and now they have different codes.
+//
+// ONE ENDPOINT PER PROCESS. The first chart to get here binds; every later
+// chart is handed that same socket. A chart naming a different endpoint is
+// therefore refused with -8 rather than being silently published to the
+// first chart's port, which is indistinguishable from working until someone
+// notices the consumer on the named port has been idle all session.
 //
 // On success a hello frame goes out on the CONTROL topic (not the symbol's),
 // carrying symbol / category / bar_type / bar_interval. It has to be a
@@ -71,16 +97,21 @@ extern "C" {
 // again — restarting the consumer — every chart is re-announced without
 // TradeStation having to re-Verify a single indicator.
 //
-// THE NAME IS REUSED AND THAT IS A HAZARD. `EL_Init` was the init export of
-// the superseded protocol, with one parameter instead of five. __stdcall
-// makes the callee pop the arguments, so an .ELD still bound to the old
-// one-argument EL_Init will resolve this symbol, call it, and corrupt the
-// stack — TradeStation misbehaves or dies rather than returning a code. No
-// code here can prevent that; nothing on the callee side can see how many
-// arguments the caller pushed. The DLL and the .ELD are one unit and must be
-// installed together. The other direction is safe: an .ELD built against the
-// superseded EL_Init3 finds no such export and fails at Verify.
-TS2P_API int TS2P_CALL EL_Init(
+// THE NAME CHANGED WITH THE SIGNATURE, AND THAT IS THE GUARD. A revision of
+// this DLL called this `EL_Init` — the name the superseded protocol's
+// one-parameter init already had. __stdcall makes the callee pop the
+// arguments, so a stale .ELD resolved that name, called it with one argument
+// against five, and corrupted the stack: TradeStation misbehaved or died with
+// no return code, and nothing on the callee side can see how many arguments
+// the caller pushed.
+//
+// Renaming restores the gate in both directions. A stale .ELD now resolves
+// the one-parameter `EL_Init` TOMBSTONE below, its stack balances, and it
+// gets -6 in the Print Log. A current .ELD run against an older DLL finds no
+// `EL_InitChart` at all and fails at DefineDLLFunc resolution during Verify,
+// before anything executes. The DLL and the .ELD are still one unit and must
+// be installed together — but a mismatch is now legible instead of fatal.
+TS2P_API int TS2P_CALL EL_InitChart(
     const char* zmq_endpoint,
     const char* symbol,        // EL `GetSymbolName`
     int         category,      // EL `Category`
@@ -134,20 +165,23 @@ TS2P_API int TS2P_CALL EL_Publish(
     double      bid,            // EL `InsideBid`
     double      ask);           // EL `InsideAsk`
 
-// TOMBSTONES. Both return -6 and publish nothing.
+// TOMBSTONES. All three return -6 and do nothing.
 //
-// They kept their names across a signature change once already, which on
-// __stdcall corrupts the caller's stack rather than returning an error. The
-// names stay exported so an indicator built against the superseded protocol
-// gets a readable -6 in the Print Log instead of a crash.
+// Each keeps the name AND the signature it had in the superseded protocol.
+// That pairing is the point: __stdcall has the callee pop the arguments, so
+// a name that survives a signature change corrupts the caller's stack rather
+// than returning an error. Held at the old arity, a stale .ELD's call
+// balances and gets a readable -6 in the Print Log instead of a crash.
 //
-// They no longer protect anything on their own. The guard used to be that
-// every publish sat behind an init whose name had changed, so an old .ELD
-// stopped at init and never reached a signature that had moved underneath
-// it. EL_Init's name is now reused with a different arity, which removes
-// that gate — an old .ELD corrupts the stack inside EL_Init before these
-// are ever called. They are kept because deleting an export can only make
-// the failure less legible, not because they still catch anything.
+// EL_Init is the one that matters. It is the gate: every publish sits behind
+// a successful init, so a stale .ELD stops here and never reaches a publish
+// signature that moved underneath it. That gate was briefly given away by
+// reusing `EL_Init` for the five-parameter init — see EL_InitChart above —
+// and renaming put it back.
+//
+// Do not delete these until it is safe to assume no old .ELD survives.
+TS2P_API int TS2P_CALL EL_Init(const char* zmq_endpoint);
+
 TS2P_API int TS2P_CALL EL_PublishTick(
     const char* symbol,
     const char* el_timestamp,
@@ -177,14 +211,17 @@ TS2P_API int TS2P_CALL EL_PublishBar(
 
 TS2P_API int TS2P_CALL EL_Shutdown(void);
 
-// ABI version of this DLL build. Currently 3.
+// ABI version of this DLL build. Currently 4.
 //
 // It is NOT the wire version. Point frames are byte-for-byte what `proto` 2
 // always was, and every recorded fixture still validates — what changed is
-// the C ABI (EL_Init's signature) and an additive control frame on its own
-// topic, which a proto-2 consumer simply never subscribes to. Bumping
-// `proto` would have invalidated every fixture to describe a frame the
-// point schema does not cover.
+// the C ABI and an additive control frame on its own topic, which a proto-2
+// consumer simply never subscribes to. Bumping `proto` would have
+// invalidated every fixture to describe a frame the point schema does not
+// cover.
+//
+// 3 -> 4 is the init export's rename to EL_InitChart. Renaming an export IS
+// an ABI change, and this number is what says so.
 //
 // Takes no arguments, so its signature can never drift — it is the one
 // export an indicator can call unconditionally against any build to ask

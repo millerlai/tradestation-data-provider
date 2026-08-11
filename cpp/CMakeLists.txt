@@ -36,7 +36,7 @@ find_package(cppzmq CONFIG REQUIRED)
 # -----------------------------------------------------------------------------
 add_library(TS2Python SHARED
     src/ts2python.cpp
-    # .def pins undecorated export names (EL_Init, EL_PublishTick, ...) so
+    # .def pins undecorated export names (EL_InitChart, EL_PublishTick, ...) so
     # EasyLanguage's DefineDLLFunc can resolve them on x86 + __stdcall.
     # MSVC auto-picks this up as /DEF:; ignored by non-MSVC toolchains.
     src/TS2Python.def

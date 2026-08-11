@@ -153,7 +153,7 @@ uv run python examples/04_replay_fixtures.py --fixture bars
 C++ harness 可以直接驅動 DLL：
 
 ```powershell
-# 終端機 A —— 在 bindings\python 執行。subscriber 要先跑：EL_Init 在沒有
+# 終端機 A —— 在 bindings\python 執行。subscriber 要先跑：EL_InitChart 在沒有
 # 訂閱者時回 -7 且什麼都不發，否則 harness 只會空等到逾時然後以非零碼退出。
 #（順序以前是反過來的，用 --warmup-ms 留時間給你接上 —— PUB socket 在沒有
 # subscriber 時送出的東西會被靜默丟棄；現在改成 publisher 拒絕開始，而不是丟。）

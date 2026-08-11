@@ -20,23 +20,24 @@ TradeStation Chart → TS2Python_Exporter.el → TS2Python.dll → ZMQ PUB → s
 ## Deploying
 
 > **The DLL and the `.ELD` are a matched pair — always install both, and
-> re-Verify this indicator every time you replace the DLL.** This is no longer
-> just good practice. `EL_Init` now takes five parameters where the superseded
-> protocol's took one, and `DefineDLLFunc` resolves by name alone; under
-> `__stdcall` the callee pops the arguments, so an `.ELD` still bound to the
-> old one-argument `EL_Init` **corrupts the stack** — TradeStation crashes
-> rather than returning a code, and no guard on either side can catch it.
+> re-Verify this indicator every time you replace the DLL.** Getting it wrong
+> is now a readable failure rather than a crash, but it still stops the feed.
 >
-> The reverse direction is safe: this indicator binds a 5-parameter `EL_Init`
-> that an older DLL does not export, so Verify fails with a named error. There
-> is also an `EL_DllVersion()` check after init. `EL_PublishTick` /
-> `EL_PublishBar` remain tombstones returning `-6`, but they catch nothing now
-> — an old `.ELD` dies in `EL_Init` first. See
+> Both directions are caught. This indicator binds `EL_InitChart`, which an
+> older DLL does not export, so Verify fails with a named error. An `.ELD`
+> still bound to the superseded one-argument `EL_Init` lands on a tombstone of
+> that exact signature and reads `-6` in the Print Log — the stack balances, so
+> TradeStation does not crash. (Under `__stdcall` the callee pops the
+> arguments, which is why the old name is kept pinned to the old arity.)
+> `EL_PublishTick` / `EL_PublishBar` are tombstones for the same reason, and
+> there is an `EL_DllVersion()` check after init. See
 > [`../contract/wire.md`](../contract/wire.md) for the full table.
 >
-> **Nothing publishes until a consumer is running.** `EL_Init` returns `-7`
-> while no subscriber is attached; the indicator says so once in the Print Log
-> and retries on every bar, so it starts by itself once the consumer comes up.
+> **Nothing publishes until a consumer is running.** `EL_InitChart` returns
+> `-7` while no subscriber is attached; the indicator says so once in the Print
+> Log and retries on every bar, so it starts by itself once the consumer comes
+> up. If the consumer later goes away, `EL_Publish` reports `-10` once per
+> chart — those bars are lost and nothing backfills them.
 
 Install the DLL first, then the indicator — Verify needs the DLL to be in place
 already:

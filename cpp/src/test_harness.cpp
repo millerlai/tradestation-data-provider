@@ -9,7 +9,7 @@
 //   TS2Python_TestHarness.exe --mode stress --rate 10000 --seconds 10
 //   TS2Python_TestHarness.exe --mode multithread --threads 8 --per-thread 5000
 //
-// A SUBSCRIBER MUST BE RUNNING FIRST. EL_Init returns -7 until one attaches
+// A SUBSCRIBER MUST BE RUNNING FIRST. EL_InitChart returns -7 until one attaches
 // to the control topic, so start `contract/tools/record.py` (or any SUB on
 // the endpoint) in another window before this. That is the point of the
 // change: the old harness "succeeded" with nobody listening and every frame
@@ -45,7 +45,7 @@ struct Options {
     int         subscriber_timeout_ms = 15000;
 };
 
-// The chart this harness announces itself as. EL_Init now carries a chart
+// The chart this harness announces itself as. EL_InitChart carries a chart
 // identity, so the harness has to have one; these are the values a hello
 // fixture is recorded from.
 constexpr const char* kInitSymbol      = "SPY";
@@ -142,8 +142,9 @@ Options parse_args(int argc, char** argv) {
                 "  --warmup-ms <N>           settle sleep after init (default 250ms)\n"
                 "  --subscriber-timeout-ms <N>\n"
                 "                            how long to wait for a SUB to attach\n"
-                "                            before giving up on EL_Init (default\n"
-                "                            15000). EL_Init returns -7 until one is,\n"
+                "                            before giving up on EL_InitChart\n"
+                "                            (default 15000). It returns -7 until\n"
+                "                            one is attached,\n"
                 "                            so a subscriber must be running.\n");
             std::exit(0);
         } else {
@@ -326,12 +327,30 @@ int run_stress(const Options& o) {
 int run_multithread(const Options& o) {
     std::atomic<long long> sent{0};
     std::atomic<long long> failed{0};
+    std::atomic<long long> init_failed{0};
     std::vector<std::thread> workers;
     workers.reserve(o.threads);
 
     for (int t = 0; t < o.threads; ++t) {
-        workers.emplace_back([t, &o, &sent, &failed]() {
+        workers.emplace_back([t, &o, &sent, &failed, &init_failed]() {
             std::string sym = "T" + std::to_string(t);
+            // EACH THREAD INITS ITS OWN CHART FIRST. This is the multi-chart
+            // startup TradeStation actually performs — one indicator per
+            // chart, on the host's own threads — and it used to have no
+            // coverage at all: main() init'd once, single-threaded, and this
+            // mode only parallelised publishing. Everything EL_InitChart touches
+            // under g_mutex (the chart registry, the XPUB drain, the hello
+            // sweep) was therefore never exercised concurrently.
+            //
+            // A subscriber is already attached by the time this runs, so -7
+            // is not expected here; any negative rc is a failure.
+            const int rc_init = EL_InitChart(o.endpoint.c_str(), sym.c_str(),
+                                        /*category*/ 2, /*bar_type*/ 0,
+                                        /*bar_interval*/ 1);
+            if (rc_init < 0) {
+                init_failed.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
             for (int i = 0; i < o.per_thread; ++i) {
                 const int rc = pub(sym.c_str(), "", /*bar_type*/ 0, /*bar_interval*/ 1,
                         /*category*/ 2, 100.0 + t * 0.01, 100.0 + t * 0.01, 100.0 + t * 0.01, 100.0 + t * 0.01,
@@ -343,10 +362,11 @@ int run_multithread(const Options& o) {
     }
     for (auto& w : workers) w.join();
 
-    std::printf("[harness] multithread: threads=%d per_thread=%d sent=%lld failed=%lld\n",
+    std::printf("[harness] multithread: threads=%d per_thread=%d "
+                "sent=%lld failed=%lld init_failed=%lld\n",
                 o.threads, o.per_thread,
-                sent.load(), failed.load());
-    return failed.load() == 0 ? 0 : 5;
+                sent.load(), failed.load(), init_failed.load());
+    return (failed.load() == 0 && init_failed.load() == 0) ? 0 : 5;
 }
 
 }  // namespace
@@ -355,35 +375,42 @@ int main(int argc, char** argv) {
     const Options o = parse_args(argc, argv);
 
     std::printf("[harness] dll version = %d\n", EL_DllVersion());
-    if (EL_DllVersion() != 3) {
-        std::fprintf(stderr, "[harness] expected ABI 3, got %d\n", EL_DllVersion());
+    if (EL_DllVersion() != 4) {
+        std::fprintf(stderr, "[harness] expected ABI 4, got %d\n", EL_DllVersion());
         return 1;
     }
 
-    // Tombstone check, BEFORE any init. EL_PublishTick and EL_PublishBar
-    // kept their names but changed arity, and __stdcall would corrupt the
-    // stack rather than fail. Verifying the refusal here means the
-    // protection is regression-tested on every harness run instead of
-    // resting on a manual check nobody repeats.
+    // Tombstone check, BEFORE any init. Each of these kept a superseded
+    // protocol's NAME, so each is held at that protocol's ARITY — otherwise
+    // __stdcall corrupts the caller's stack instead of failing. Verifying the
+    // refusal here means the protection is regression-tested on every harness
+    // run instead of resting on a manual check nobody repeats.
+    //
+    // EL_Init is the one that matters: it is the init gate, so a stale .ELD
+    // stops here and never reaches a publish signature that moved underneath
+    // it. Calling it with ONE argument is the whole point — that is exactly
+    // what a stale .ELD does, and it must balance and return -6.
+    const int rc_tomb0 = EL_Init("tcp://127.0.0.1:5555");
     const int rc_tomb1 = EL_PublishTick("SPY", "", 0, 0, 0, 0, 0, 0, 0, 0);
     const int rc_tomb2 = EL_PublishBar("SPY", "", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
-    if (rc_tomb1 != -6 || rc_tomb2 != -6) {
+    if (rc_tomb0 != -6 || rc_tomb1 != -6 || rc_tomb2 != -6) {
         std::fprintf(stderr,
                      "[harness] tombstones must return -6, got "
-                     "EL_PublishTick=%d EL_PublishBar=%d\n",
-                     rc_tomb1, rc_tomb2);
+                     "EL_Init=%d EL_PublishTick=%d EL_PublishBar=%d\n",
+                     rc_tomb0, rc_tomb1, rc_tomb2);
         return 2;
     }
-    std::printf("[harness] tombstones EL_PublishTick / EL_PublishBar refuse with -6\n");
+    std::printf("[harness] tombstones EL_Init / EL_PublishTick / EL_PublishBar "
+                "refuse with -6\n");
 
-    // EL_Init returns -7 until a subscriber is attached to the control
+    // EL_InitChart returns -7 until a subscriber is attached to the control
     // topic. That is the normal startup state, not an error — so this loop
     // is what the EasyLanguage indicator does across successive bars,
     // compressed into a poll.
     //
     // IT MEANS THE HARNESS NEEDS A SUBSCRIBER. Start `contract/tools/record.py`
     // (or any SUB on the endpoint) first, or this exits with -7.
-    std::printf("[harness] EL_Init(%s) — waiting up to %dms for a subscriber\n",
+    std::printf("[harness] EL_InitChart(%s) — waiting up to %dms for a subscriber\n",
                 o.endpoint.c_str(), o.subscriber_timeout_ms);
     int rc = -7;
     {
@@ -391,7 +418,7 @@ int main(int argc, char** argv) {
         const auto deadline =
             clock::now() + std::chrono::milliseconds(o.subscriber_timeout_ms);
         while (true) {
-            rc = EL_Init(o.endpoint.c_str(), kInitSymbol,
+            rc = EL_InitChart(o.endpoint.c_str(), kInitSymbol,
                          kInitCategory, kInitBarType, kInitBarInterval);
             if (rc != -7 || clock::now() >= deadline) break;
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -403,12 +430,12 @@ int main(int argc, char** argv) {
                      rc == -7 ? " (no subscriber attached — start a SUB first)" : "");
         return 1;
     }
-    std::printf("[harness] EL_Init rc=%d — subscriber attached, hello sent\n", rc);
+    std::printf("[harness] EL_InitChart rc=%d — subscriber attached, hello sent\n", rc);
 
     // Idempotency: the SAME chart again returns 1 without rebinding or
     // restamping the session id, which is what keeps a re-Verify of the
     // indicator from looking like a publisher restart to subscribers.
-    const int rc2 = EL_Init(o.endpoint.c_str(), kInitSymbol,
+    const int rc2 = EL_InitChart(o.endpoint.c_str(), kInitSymbol,
                             kInitCategory, kInitBarType, kInitBarInterval);
     if (rc2 != 1) {
         std::fprintf(stderr, "[harness] expected rc=1 re-announcing the same chart, "
@@ -417,7 +444,7 @@ int main(int argc, char** argv) {
     }
     // A DIFFERENT chart is a different announcement, not a re-init. This is
     // the multi-chart case: one DLL, one socket, one hello per chart.
-    const int rc3 = EL_Init(o.endpoint.c_str(), "QQQ", 2, /*bar_type*/ 1,
+    const int rc3 = EL_InitChart(o.endpoint.c_str(), "QQQ", 2, /*bar_type*/ 1,
                             /*bar_interval*/ 5);
     if (rc3 != 0) {
         std::fprintf(stderr, "[harness] expected rc=0 announcing a second chart, "
@@ -425,6 +452,22 @@ int main(int argc, char** argv) {
         return 2;
     }
     std::printf("[harness] second chart announced rc=%d\n", rc3);
+
+    // A chart naming a DIFFERENT endpoint must be REFUSED. Only the first
+    // chart binds, so this one's points would otherwise go to the port that
+    // chart chose while a consumer on the endpoint it names sits idle all
+    // session — reported as rc 0, with nothing on either side to reveal it.
+    // Checked here so the refusal is regression-tested on every harness run.
+    const int rc_conflict = EL_InitChart("tcp://127.0.0.1:1", "ZZZ",
+                                    /*category*/ 2, /*bar_type*/ 1,
+                                    /*bar_interval*/ 1);
+    if (rc_conflict != -8) {
+        std::fprintf(stderr,
+                     "[harness] expected rc=-8 for a conflicting endpoint, "
+                     "got rc=%d\n", rc_conflict);
+        return 2;
+    }
+    std::printf("[harness] conflicting endpoint refused rc=%d\n", rc_conflict);
 
     // Settle time. The subscription is already confirmed by this point, so
     // this only absorbs pipe setup jitter rather than guarding against the

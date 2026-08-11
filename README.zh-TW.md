@@ -24,7 +24,7 @@ flowchart TB
         direction TB
         TS["TradeStation Desktop"]
         EL["EL Exporter Indicator"]
-        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 3"]
+        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 4"]
         TS --> EL --> DLL
     end
     subgraph CON["Contract — 真正的產品"]
@@ -137,7 +137,7 @@ TradeStation 開著也沒關係：DLL 要等 EasyLanguage 真的載入它之後�
 **不開 TradeStation 也能檢視 wire：**
 
 ```powershell
-# 終端機 A —— subscriber 要先跑。EL_Init 在沒有訂閱者時回 -7 且什麼都不發，
+# 終端機 A —— subscriber 要先跑。EL_InitChart 在沒有訂閱者時回 -7 且什麼都不發，
 # 否則 harness 只會空等到逾時。
 python contract/tools/record.py
 
@@ -152,22 +152,24 @@ cpp\Release\TS2Python_TestHarness.exe --mode smoke
 | 版本 | 現值 | 誰在乎 |
 | --- | ---: | --- |
 | Wire（payload 的 `"proto"`） | 2 | 所有 binding |
-| DLL ABI（`EL_DllVersion()`） | 3 | 所有 binding |
+| DLL ABI（`EL_DllVersion()`） | 4 | 所有 binding |
 | Python 套件 | 0.3.0 | 僅 Python 消費端 |
 
-兩個數字不同是刻意的。ABI 走到 3 是因為 `EL_Init` 多了 chart 身分、而且多了一個走
-獨立 topic 的控制 frame；point frame 一個 byte 都沒變，所以 `proto` 維持 2，所有已錄製
-的 fixture 全部繼續有效。
+兩個數字不同是刻意的。ABI 走到 3 是因為 init 多了 chart 身分、而且多了一個走獨立 topic
+的控制 frame；走到 4 是因為那個 init 匯出改名為 `EL_InitChart`。point frame 從頭到尾
+一個 byte 都沒變，所以 `proto` 維持 2，所有已錄製的 fixture 全部繼續有效。
 
 **wire 與 ABI 各只有一個版本，更舊的一律不支援。** 沒有 `proto` 欄位的 frame 就不是
 這個協定，binding 會拒收而不是猜。版本欄位叫 `proto` 而不是沿用 `v` 是刻意的 ——
 前一代 wire 用 `v` 一路數到 4，若在同一個 key 上從 1 重新起算，`{"v":1}` 會同時是兩個
 協定的合法開頭，錯配就會表現成「數字不對」而不是「明確拒收」。
 
-**升級時 DLL 與 `.ELD` 必須一起換，而且要重新 Verify indicator。** 這是硬性要求，不是
-建議：`EL_Init` 這個名字被收回重用，參數從前一代的 1 個變成 5 個，而 `DefineDLLFunc`
-只按名字解析 —— 所以還綁在舊單參數 `EL_Init` 上的 `.ELD` 會損毀堆疊，而不是拿到錯誤碼。
-所有組合（包含這一種）列在 [`contract/wire.md`](contract/wire.md)。
+**升級時 DLL 與 `.ELD` 必須一起換，而且要重新 Verify indicator。** 現在每一種錯配組合
+都會可讀地失敗：舊 `.ELD` 會落在一個與它當初編譯對象簽章完全相同的墓碑上並讀到 `-6`；
+新 `.ELD` 配舊 DLL 則因為那邊沒有 `EL_InitChart` 而在 Verify 階段失敗。這一切建立在
+一條規則上 —— **簽章一改，名字就改** —— ABI 3 曾短暫破壞它（重用 `EL_Init`），讓舊
+`.ELD` 變成一次沒有錯誤碼的堆疊損毀。所有組合列在
+[`contract/wire.md`](contract/wire.md)。
 
 ## 現況
 

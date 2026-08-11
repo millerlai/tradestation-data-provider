@@ -15,7 +15,7 @@
 | `noquote.jsonl` | `expected/noquote.json` | 無報價 → wire 上為 `null`（§3.1）。含 **非指數 symbol**（SPY）的無報價 tick —— 只有 `$TICK` 的話，無法分辨「publisher 沒有報價」與「binding 自己丟掉了報價」 |
 | `bars.jsonl` | `expected/bars.json` | 每一個 `BarType`/`BarInterval` 組合逐字上 wire · **沒有任何組合被拒收** —— 2 分鐘圖(1/2)、週線(3/1)、2 日(2/2) 以前會被 DLL 回 `-5` 整根不送 · `bar_type=2` 與盤中同一條規則:時間戳原樣落地(§2)
 | `session.jsonl` | `expected/session.json` | session 首尾兩根 bar（§2）。**wire 送 EL 的收盤時間 `09:31` / `16:00`，期望值就是 `09:31` / `16:00`** —— 釘住「publisher 給什麼就存什麼」 |
-| `hello.jsonl` | `expected/hello.json` | **chart 宣告**（`EL_Init`）走固定的 `__ts2py__` topic：topic 就是鑑別子、沒有 `kind`；一個已訂閱與一個未訂閱的 chart，釘住「必須說話、而且兩者不可混為一談」；控制 topic 有自己的 `seq` |
+| `hello.jsonl` | `expected/hello.json` | **chart 宣告**（`EL_InitChart`）走固定的 `__ts2py__` topic：topic 就是鑑別子、沒有 `kind`；一個已訂閱與一個未訂閱的 chart，釘住「必須說話、而且兩者不可混為一談」；控制 topic 有自己的 `seq` |
 
 前四份是 point frame，`hello.jsonl` 不是 —— 它一根 bar 都沒有，`expected/hello.json`
 的 `events` 是空陣列。它驗的是 [`../wire.md`](../wire.md) 那節列的五條 binding 義務。
@@ -46,7 +46,7 @@
 用 [`../tools/record.py`](../tools/record.py) 搭配 `cpp` 的 `test_harness`（它不需要
 TradeStation 就能驅動 DLL）：
 
-**順序反過來了：先開 recorder，再開 harness。** DLL 的 `EL_Init` 在控制 topic 看不到
+**順序反過來了：先開 recorder，再開 harness。** DLL 的 `EL_InitChart` 在控制 topic 看不到
 訂閱者之前回 `-7` 且什麼都不發，所以 harness 現在**必須**有一個先在的 SUB，否則會等到
 `--subscriber-timeout-ms` 逾時然後以 `-7` 退出。舊寫法（harness 先跑、`--warmup-ms 8000`
 硬等）已經不成立。
@@ -54,7 +54,7 @@ TradeStation 就能驅動 DLL）：
 ```bash
 # recorder 先起來，harness 再跑
 python contract/tools/record.py --endpoint tcp://127.0.0.1:5599 \
-    --count 6 --quiet --record contract/fixtures/smoke.jsonl &
+    --count 8 --quiet --record contract/fixtures/smoke.jsonl &
 sleep 3
 cpp/Release/TS2Python_TestHarness.exe --mode smoke --endpoint tcp://127.0.0.1:5599
 wait
@@ -65,13 +65,18 @@ wait
 
 各 fixture 對應的 harness mode 與 frame 數：
 
-| fixture | `--mode` | `--count` |
-| --- | --- | ---: |
-| `smoke.jsonl` | `smoke` | 6 |
-| `noquote.jsonl` | `noquote` | 3 |
-| `bars.jsonl` | `bars` | 9 |
-| `session.jsonl` | `session` | 2 |
-| `hello.jsonl` | `smoke` | 2 |
+| fixture | `--mode` | `--count`（重錄用） | 其中 hello | point frame |
+| --- | --- | ---: | ---: | ---: |
+| `smoke.jsonl` | `smoke` | 8 | 2 | 6 |
+| `noquote.jsonl` | `noquote` | 5 | 2 | 3 |
+| `bars.jsonl` | `bars` | 11 | 2 | 9 |
+| `session.jsonl` | `session` | 4 | 2 | 2 |
+| `hello.jsonl` | `smoke` | 2 | 2 | 0 |
+
+> **`--count` 已含開頭那兩個 hello frame。** 每一個 mode 在進入 mode 本身之前都會先用
+> `EL_InitChart` 宣告兩張圖（`SPY` 1/1 與 `QQQ` 1/5），而 `record.py` 是逐 frame 計數、不分
+> topic。目前簽入的前四份 `*.jsonl` 只有 point frame（行數 6/3/9/2），因為它們錄製於
+> hello 機制存在之前；照舊值重錄會在 mode 送完之前就收滿而截斷。
 
 > `hello.jsonl` 用 `smoke` 錄，但只取前 2 個 frame —— harness 啟動時會宣告兩張圖
 > （`SPY` 1/1 與 `QQQ` 1/5），它們一定排在任何 point frame 之前。

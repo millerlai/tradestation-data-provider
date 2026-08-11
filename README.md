@@ -26,7 +26,7 @@ flowchart TB
         direction TB
         TS["TradeStation Desktop"]
         EL["EL Exporter Indicator"]
-        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 3"]
+        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 4"]
         TS --> EL --> DLL
     end
     subgraph CON["Contract — the product"]
@@ -148,7 +148,7 @@ any minute/daily chart whose interval the wire supports (`1m` `5m` `15m` `30m`
 **Inspecting the wire without TradeStation:**
 
 ```powershell
-# terminal A — the subscriber goes FIRST. EL_Init returns -7 and publishes
+# terminal A — the subscriber goes FIRST. EL_InitChart returns -7 and publishes
 # nothing until one is attached, so the harness would otherwise just time out.
 python contract/tools/record.py
 
@@ -163,13 +163,14 @@ cpp\Release\TS2Python_TestHarness.exe --mode smoke
 | Version | Current | Who cares |
 | --- | ---: | --- |
 | Wire (`"proto"` in the payload) | 2 | Every binding |
-| DLL ABI (`EL_DllVersion()`) | 3 | Every binding |
+| DLL ABI (`EL_DllVersion()`) | 4 | Every binding |
 | Python package | 0.3.0 | Python consumers only |
 
-The two numbers differ on purpose. The ABI moved to 3 when `EL_Init` gained a
-chart identity and a control frame was added on its own topic; the point frame
-is byte-for-byte unchanged, so `proto` stayed at 2 and every recorded fixture
-stays valid.
+The two numbers differ on purpose. The ABI moved to 3 when init gained a chart
+identity and a control frame was added on its own topic, and to 4 when that
+init export was renamed to `EL_InitChart`; the point frame is byte-for-byte
+unchanged throughout, so `proto` stayed at 2 and every recorded fixture stays
+valid.
 
 **There is one wire version and one ABI, and nothing older is supported.** A
 frame without `proto` is not this protocol; a binding refuses it rather than
@@ -178,13 +179,14 @@ used `v` and counted to 4, so restarting at 1 under the same key would have made
 `{"v":1}` a legal opening for two different protocols, and the mismatch would
 have surfaced as wrong numbers rather than a refusal.
 
-**Upgrade the DLL and the `.ELD` together, and re-Verify the indicator.** This
-is a hard requirement now, not advice: `EL_Init`'s name was reused with five
-parameters where the superseded protocol's had one, and `DefineDLLFunc` resolves
-by name alone — so an `.ELD` still bound to the old one-argument `EL_Init`
-corrupts the stack instead of getting an error code.
-[`contract/wire.md`](contract/wire.md) tabulates every combination, including
-that one.
+**Upgrade the DLL and the `.ELD` together, and re-Verify the indicator.** Every
+mismatched combination now fails readably: a stale `.ELD` lands on a tombstone
+of the exact signature it was built against and reads `-6`, and a current
+`.ELD` against an older DLL fails at Verify because `EL_InitChart` is not
+exported there. That rests on one rule — **change the signature, change the
+name** — which ABI 3 briefly broke by reusing `EL_Init`, turning a stale `.ELD`
+into a stack corruption with no error code. [`contract/wire.md`](contract/wire.md)
+tabulates every combination.
 
 ## Status
 

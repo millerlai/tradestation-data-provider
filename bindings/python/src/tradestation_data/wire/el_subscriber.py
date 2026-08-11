@@ -54,7 +54,7 @@ PROTO_VERSION = 2
 
 # Where the publisher announces charts. NOT a symbol topic.
 #
-# EL_Init sends one hello frame per chart carrying symbol / category /
+# EL_InitChart sends one hello frame per chart carrying symbol / category /
 # bar_type / bar_interval, and it rides a fixed topic rather than the
 # chart's own symbol because a consumer subscribes per symbol from a
 # configured list — a chart on a symbol nobody asked for could not be
@@ -200,7 +200,7 @@ class TradeStationELProvider:
 
       One other topic exists, and the topic is what tells them apart:
 
-          topic = "__ts2py__"    a chart announcing itself, from EL_Init
+          topic = "__ts2py__"    a chart announcing itself, from EL_InitChart
           {
             "proto": 2, "seq": <int>, "sid": <int>, "ts": <float>,
             "symbol": "<str>", "category": <int>,
@@ -208,7 +208,7 @@ class TradeStationELProvider:
           }
 
       Subscribing to it is not optional. The publisher's socket is XPUB, and
-      EL_Init returns -7 — publishing nothing — until it sees a subscriber
+      EL_InitChart returns -7 — publishing nothing — until it sees a subscriber
       on this topic. A consumer that does not subscribe here leaves every
       TradeStation chart waiting indefinitely.
     """
@@ -302,7 +302,7 @@ class TradeStationELProvider:
         # before connect(); changes after connect have no effect.
         self._socket.setsockopt(zmq.RCVHWM, 1_000_000)
         # The control topic is subscribed unconditionally, before any symbol.
-        # The publisher's EL_Init blocks on a subscriber being attached HERE —
+        # The publisher's EL_InitChart blocks on a subscriber being attached HERE —
         # it returns -7 and publishes nothing until one is, so a consumer that
         # skipped this would leave every chart waiting forever.
         self._socket.setsockopt_string(zmq.SUBSCRIBE, CONTROL_TOPIC)
@@ -402,7 +402,7 @@ class TradeStationELProvider:
     def _handle_hello(self, payload: bytes) -> None:
         """Record and report one chart announcing itself.
 
-        Sent by the publisher's ``EL_Init``, once per chart, and again for
+        Sent by the publisher's ``EL_InitChart``, once per chart, and again for
         every chart whenever a subscriber attaches — so restarting this
         process re-learns the whole workspace without TradeStation being
         touched.
