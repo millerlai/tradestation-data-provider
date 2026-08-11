@@ -36,6 +36,7 @@ flowchart TD
     Snapshot["MarketSnapshot"]
     Pipeline[["SinkPipeline · fan-out"]]
     OnBar(["optional on_bar callback"])
+    OnPartial(["optional on_partial_bar callback"])
 
     PBar["ParquetBarSink<br/>(預設)"]
     Memory["InMemorySink"]
@@ -46,7 +47,8 @@ flowchart TD
     Provider -- "point (EL_Publish)" --> Runtime
     Runtime -- "closed point" --> Snapshot
     Runtime -- "closed point" --> Pipeline
-    Runtime --> OnBar
+    Runtime -- "closed point" --> OnBar
+    Runtime -- "developing point · every frame" --> OnPartial
     Pipeline --> PBar
     Pipeline --> Memory
     Pipeline --> Callback
@@ -54,6 +56,18 @@ flowchart TD
 ```
 
 `IngestionRuntime` 的背景 loop：**ingest** / **advance**（wall-clock）/ **flush**（要求 flush 的 sink）/ **heartbeat**。
+
+`on_bar` 每根收盤的 point 觸發一次。`on_partial_bar` 則在**每一個修正到緩衝中那根 bar 的
+frame** 上觸發，所以五分鐘 K 線圖會持續回報自己，而不是收盤時才出現一次。它不去重、不節流，
+也永遠不會進到 snapshot / sink / storage —— 一根寫進 Parquet 的發展中 bar 與已發布的 bar
+無從分辨。兩個 callback 都不可以是 `async def`：它們在 ingest loop 內同步呼叫，建構子會
+直接拒絕 coroutine function，而不是讓它被建立後原封不動丟掉。
+
+註冊之前要知道的四件事：partial 的 `bar_time` 在**未來**（EL 給發展中的 bar 蓋的是它
+將要**收**在的時間）；啟動時的圖表重載會把歷史從同一條通道重播一遍，看起來與即時資料
+完全一樣；sub-minute chart 唯一完整的一份是走這條通道而非 `on_bar`；tick chart
+（`bar_type` 0）永遠不會觸發它。完整契約寫在 `_on_partial_bar` 的 docstring，
+包含 callback 太慢時真正先壞掉的東西 —— 是 Parquet 的 flush loop，不是 `messages_lost`。
 
 > 上面的圖在 GitHub 上會被 render；在 PyPI 上會以 Mermaid 程式碼塊呈現。
 

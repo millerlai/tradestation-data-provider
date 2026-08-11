@@ -187,13 +187,17 @@ TradeStation EL DLL  ──ZMQ XPUB──▶  TradeStationELProvider (SUB, async
                               IngestionRuntime._handle_provider_bar
                               (intra-bar buffer, dedupe, replace-last)
                                             │
-                          closed point ◀────┘
-                                  │
-                                  ├──▶ MarketSnapshot.on_bar
-                                  ├──▶ SinkPipeline.on_bar  ──┬──▶ ParquetBarSink (default)
-                                  │                           ├──▶ InMemorySink / CallbackSink
-                                  │                           └──▶ user-defined sinks from sinks.yaml
-                                  └──▶ optional on_bar callback
+                    ┌───────────────────────┴───────────────────────┐
+             closed point                                  developing point
+                    │                                              │
+                    │                                              └──▶ optional on_partial_bar callback
+                    │                                                   (every frame; bar charts only;
+                    │                                                    never reaches snapshot/sinks/disk)
+                    ├──▶ MarketSnapshot.on_bar
+                    ├──▶ SinkPipeline.on_bar  ──┬──▶ ParquetBarSink (default)
+                    │                           ├──▶ InMemorySink / CallbackSink
+                    │                           └──▶ user-defined sinks from sinks.yaml
+                    └──▶ optional on_bar callback
 
 Background loops in IngestionRuntime: ingest / advance (wall-clock) / flush (sinks that advertise it) / heartbeat.
 ```
@@ -201,6 +205,27 @@ Background loops in IngestionRuntime: ingest / advance (wall-clock) / flush (sin
 **Nothing here builds a point from another.** There is one path and TradeStation is
 on the other end of it. Nothing here aggregates, resamples, backfills or caches — see "What this
 binding does not do" below.
+
+**`on_partial_bar` is the developing bar, and it is a callback only.** It fires on every
+frame that refines the bar currently in the buffer — the three assignments into
+`_current_direct_bars` and nowhere else, so a frame dropped as stale or out-of-order is
+never reported as a partial. It is neither de-duplicated nor throttled, and it never
+reaches `MarketSnapshot`, `SinkPipeline` or storage, because a developing bar in Parquet
+is indistinguishable from a published one — which is the whole reason this is a callback
+and not a sink. Neither bar callback may be `async def`: both are invoked synchronously
+and the constructor raises rather than let a coroutine be built and dropped unrun.
+**The wire carries no "closed" signal at all** — partial vs closed is entirely this
+binding's inference, which is why `contract/semantics.md` says nothing about it and a
+second binding omitting the callback loses convenience rather than correctness.
+
+Four things a consumer gets wrong by default. They are stated in full in the
+`_on_partial_bar` docstring and **must not be restated here** — five copies of this
+contract is what the last review found: a partial's `bar_time` is in the *future*;
+history replay at startup is indistinguishable from live; a sub-minute chart delivers
+its only complete copy through this channel rather than `on_bar`; and tick charts never
+fire it whatever the interval. One correction worth carrying: `messages_lost` is **not**
+the symptom of a slow callback — the queues are 100k and 1M deep, so what degrades first
+is `_flush_loop` leaving Parquet partitions without a footer.
 
 ### Pluggable sinks (`sinks/`)
 

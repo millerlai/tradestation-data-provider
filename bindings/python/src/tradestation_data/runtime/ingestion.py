@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from collections.abc import Callable
@@ -26,6 +27,32 @@ def _key(bar: Bar) -> tuple[str, int, int]:
     return (bar.symbol, bar.bar_type, bar.bar_interval)
 
 
+def _reject_async_callback(param: str, cb: Callable[[Bar], None] | None) -> None:
+    """Refuse a coroutine function where a plain callable is required.
+
+    Both bar callbacks are invoked synchronously, so an ``async def`` would have
+    its coroutine built and dropped: the callback never runs, `bars_out` /
+    `bars_partial_out` still count every frame as delivered, and nothing is
+    logged. On `on_partial_bar` that is an entirely dead channel plus one
+    RuntimeWarning per frame — and the docstrings steer people straight into it
+    by warning that a slow callback back-pressures the socket, for which
+    ``async def`` is the obvious reach. `Callable[[Bar], None]` only catches it
+    for callers who run mypy on their own code. One check per process does not.
+
+    `inspect.iscoroutinefunction`, not `asyncio`'s: the asyncio spelling is
+    deprecated in 3.14, which is in the CI matrix, and `filterwarnings = error`
+    would turn that into a build failure. It also unwraps `functools.partial`.
+    """
+    if cb is not None and inspect.iscoroutinefunction(cb):
+        raise TypeError(
+            f"{param} must be a plain callable, not `async def`: it is called "
+            f"synchronously inside the ingest loop, so its coroutine would be "
+            f"discarded unrun while the heartbeat still counted the delivery. "
+            f"Make it a sync function, and hand off from inside it with "
+            f"asyncio.get_running_loop().create_task(...) if it must await."
+        )
+
+
 @dataclass(slots=True)
 class _Counters:
     bars_out: int = 0
@@ -33,6 +60,8 @@ class _Counters:
     bars_direct_updated: int = 0  # intra-bar updates to a buffered direct bar
     bars_duplicate_dropped: int = 0  # stale/out-of-order direct bar (bar_time < buffered)
     bars_subminute_suspected: int = 0  # replaces that cannot be intra-bar refreshes
+    bars_partial_out: int = 0  # on_partial_bar deliveries; 0 when none is registered
+    partial_callback_failed: int = 0  # of those, the ones that raised
     last_report_monotonic: float = field(default_factory=time.monotonic)
     last_report_bars: int = 0
 
@@ -64,6 +93,16 @@ class IngestionRuntime:
     directly. For more general consumption, declare a CallbackSink in
     sinks.yaml instead — that path supports per-symbol filtering and
     multiple subscribers.
+
+    Optional `on_partial_bar` is the same idea for the bar that has not closed
+    yet, so a 5-minute chart reports itself continuously instead of once at the
+    close. Its contract — what fires it, what it costs, and the four cases where
+    it does not mean what it looks like — is stated once, in
+    :meth:`_on_partial_bar`. Read it before registering one.
+
+    Neither callback may be an `async def`; both are called synchronously and
+    the constructor refuses a coroutine function rather than letting it be
+    built and dropped unrun. See :func:`_reject_async_callback`.
     """
 
     def __init__(
@@ -74,6 +113,7 @@ class IngestionRuntime:
         sinks: SinkPipeline | None = None,
         *,
         on_bar: Callable[[Bar], None] | None = None,
+        on_partial_bar: Callable[[Bar], None] | None = None,
         heartbeat_interval: float = 60.0,
         flush_poll_interval: float = 1.0,
         advance_interval: float = 1.0,
@@ -82,7 +122,12 @@ class IngestionRuntime:
         self._symbols = symbols
         self._snapshot = snapshot
         self._sinks = sinks if sinks is not None else SinkPipeline()
+        _reject_async_callback("on_bar", on_bar)
+        _reject_async_callback("on_partial_bar", on_partial_bar)
         self._on_bar = on_bar
+        # Not `self._on_partial_bar` — that is the name of the method that
+        # calls it, and the attribute would shadow it.
+        self._on_partial = on_partial_bar
         self._heartbeat_interval = heartbeat_interval
         self._flush_poll_interval = flush_poll_interval
         self._advance_interval = advance_interval
@@ -109,6 +154,14 @@ class IngestionRuntime:
         # recurs on every print, and one line per chart is the signal — a line
         # per print would bury it.
         self._subminute_warned: set[tuple[str, int, int]] = set()
+        # Latched for the same reason, and harder: on_partial_bar fires per
+        # frame, not per bar, so a broken callback would write one traceback
+        # per print. Keyed by series AND exception type rather than a single
+        # process-wide flag: a benign KeyError on the first frame after startup
+        # must not permanently silence a real OSError hours later, which is
+        # exactly what one bool does. Bounded in practice — series count is the
+        # number of open charts, and exception types are the callback's own.
+        self._partial_callback_warned: set[tuple[tuple[str, int, int], str]] = set()
 
     # ---- lifecycle --------------------------------------------------
 
@@ -281,6 +334,11 @@ class IngestionRuntime:
         forwarded the moment it arrives, exactly as the old tick path did;
         the wire's ``ts`` (stored per row) is what orders prints within a
         minute, and any dedupe is the consumer's decision.
+
+        Every frame that this method installs as the buffer's current bar is
+        also offered to ``on_partial_bar`` — the three assignments below and
+        nothing else, so a frame dropped as stale or out-of-order is never
+        reported as a partial. See :meth:`_on_partial_bar`.
         """
         if bar.bar_type == 0:
             self._counters.bars_direct_in += 1
@@ -296,6 +354,7 @@ class IngestionRuntime:
         current = self._current_direct_bars.get(key)
         if current is None:
             self._current_direct_bars[key] = bar
+            await self._on_partial_bar(bar)
             return
 
         if bar.bar_time == current.bar_time:
@@ -337,13 +396,18 @@ class IngestionRuntime:
                     )
             self._current_direct_bars[key] = bar
             self._counters.bars_direct_updated += 1
+            await self._on_partial_bar(bar)
             return
 
         if bar.bar_time > current.bar_time:
             self._current_direct_bars[key] = bar
             self._counters.bars_direct_in += 1
             self._last_emitted_direct_bucket[key] = current.bar_time
+            # Closed first, then partial: the consumer is told "the previous
+            # bar ended" before "this one began". The other order hands it a
+            # new bar while the previous one is still, as far as it knows, open.
             await self._on_closed_bar(current)
+            await self._on_partial_bar(bar)
             return
 
         # bar.bar_time < current.bar_time — reorder / reload.
@@ -359,6 +423,82 @@ class IngestionRuntime:
             except Exception:
                 log.exception("on_bar_callback_failed", extra={"symbol": bar.symbol})
 
+    async def _on_partial_bar(self, bar: Bar) -> None:
+        """Hand a still-developing bar to the caller's callback, if any.
+
+        THE CONTRACT LIVES HERE. The class docstring and `_handle_provider_bar`
+        point at this one rather than restating it, so a change to the firing
+        rule cannot leave a stale copy behind somewhere else in the file.
+
+        WHAT FIRES IT. Exactly the three assignments in `_handle_provider_bar`
+        that install a frame as the buffer's current bar for its series, and
+        nothing else. A frame the buffer rejects as stale or out-of-order is
+        not the series' current state, so it is not a partial either — there is
+        no second copy of that judgement to drift.
+
+        WHAT IT COSTS. It is neither de-duplicated nor throttled: one
+        `bar_time` is delivered as many times as EL sends it. It never reaches
+        the snapshot, the sinks or storage, because a developing bar reappears
+        under one `bar_time` many times over and one that reached a sink would
+        be written to Parquet indistinguishable from a published bar. And it
+        runs the caller's code inside the ingest loop, once per frame.
+
+        A slow callback therefore starves the whole loop — and what breaks
+        first is NOT `messages_lost`. The DLL's XPUB holds 100k frames
+        (cpp/src/ts2python.cpp:570) and this SUB's RCVHWM is 1_000_000
+        (wire/el_subscriber.py:303), so nothing is dropped and that counter
+        reads 0 through a long stall. What actually degrades: `_flush_loop`
+        stops driving `ParquetBarSink.flush()`, leaving an open partition with
+        no footer and unreadable to every reader; `_advance_direct_bars` stops
+        closing quiet symbols' last bars; and the heartbeat itself runs late.
+
+        FOUR CASES WHERE A PARTIAL DOES NOT MEAN WHAT IT LOOKS LIKE.
+
+        1. `bar_time` is in the FUTURE. EL stamps a developing bar with the
+           time it will close at, so a partial runs one interval ahead of the
+           wall clock — a whole trading day ahead on a daily. `on_bar`
+           deliveries are never ahead. A caller that filters `bar_time > now`
+           as implausible discards every partial while the counter climbs.
+        2. History replay is indistinguishable from live. At startup
+           `_last_emitted_direct_bucket` is empty, so a chart reload walks the
+           whole session through the buffer and every replayed bar fires here
+           claiming to be what is developing now. The wire carries no replay
+           flag and this binding will not invent one; the discriminator is (1)
+           — a genuinely developing bar's `bar_time` is ahead of the clock, a
+           replayed one's is far behind it.
+        3. On a sub-minute chart the partials are the ONLY copy. `ts_str` has
+           minute resolution, so distinct 1-second bars share one `bar_time`
+           and the same-bucket branch replaces them; only the last of each
+           minute ever reaches `on_bar`. `subminute_chart_suspected` in the log
+           marks the series. There, treating partials as provisional and
+           keeping only what `on_bar` confirms throws away real bars.
+        4. Tick charts never fire it at all — `bar_type == 0` returns before
+           the buffer is touched. At `bar_interval == 1` that is exactly right,
+           every print being a finished point. At larger intervals a 100-tick
+           bar does develop and this path still will not report it; that
+           follows from the pre-existing decision to keep tick charts out of
+           the buffer, and is not a claim that such a bar has no forming state.
+        """
+        if self._on_partial is None:
+            return
+        self._counters.bars_partial_out += 1
+        try:
+            self._on_partial(bar)
+        except Exception as exc:
+            self._counters.partial_callback_failed += 1
+            warned = (_key(bar), type(exc).__name__)
+            if warned not in self._partial_callback_warned:
+                self._partial_callback_warned.add(warned)
+                log.exception(
+                    "on_partial_bar_callback_failed",
+                    extra={
+                        "symbol": bar.symbol,
+                        "bar_type": bar.bar_type,
+                        "bar_interval": bar.bar_interval,
+                        "exc_type": type(exc).__name__,
+                    },
+                )
+
     # ---- observability ---------------------------------------------
 
     def _emit_heartbeat(self) -> None:
@@ -373,6 +513,8 @@ class IngestionRuntime:
                 "bars_direct_updated": self._counters.bars_direct_updated,
                 "bars_duplicate_dropped": self._counters.bars_duplicate_dropped,
                 "bars_subminute_suspected": self._counters.bars_subminute_suspected,
+                "bars_partial_out": self._counters.bars_partial_out,
+                "partial_callback_failed": self._counters.partial_callback_failed,
                 "bars_per_sec": round(bars_since / dt, 2),
                 "symbols_seen": len(self._snapshot.symbols()),
                 # Read together or not at all. `messages_lost` counts frames

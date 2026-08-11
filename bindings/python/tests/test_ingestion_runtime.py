@@ -709,3 +709,323 @@ async def test_heartbeat_loop_invokes_emit() -> None:
     runtime._stop.set()
     await asyncio.wait_for(task, timeout=2.0)
     assert calls
+
+
+# ---- on_partial_bar ----------------------------------------------------
+#
+# The developing-bar channel. Its entire contract is "fires exactly where
+# _handle_provider_bar installs a frame as the buffer's current bar for its
+# series", so most of what follows is about the frames where it must NOT fire.
+
+
+def _developing(
+    bar_time: datetime,
+    *,
+    high: float,
+    low: float,
+    close: float,
+    bar_type: int = 1,
+    bar_interval: int = 5,
+) -> Bar:
+    """A bar whose high/low are set independently of close.
+
+    `_bar` derives both from `close`, so a refreshed close raises the low too
+    and trips the sub-minute detector — which is a different test's subject. A
+    real intra-bar refresh only ever raises the high or lowers the low.
+    """
+    return Bar(
+        symbol="SPY",
+        bar_time=bar_time,
+        open=450.0,
+        high=high,
+        low=low,
+        close=close,
+        el_volume=100,
+        el_ticks=180,
+        el_upticks=100,
+        el_downticks=80,
+        el_open_interest=0,
+        bar_type=bar_type,
+        bar_interval=bar_interval,
+        category=2,
+    )
+
+
+@pytest.mark.asyncio
+async def test_partial_fires_on_every_intra_bar_frame() -> None:
+    """Three refinements of one 5m bucket, then the next bucket closes it."""
+    partial: list[Bar] = []
+    closed: list[Bar] = []
+    runtime = _make_runtime(on_bar=closed.append, on_partial_bar=partial.append)
+
+    t0 = datetime(2026, 4, 20, 13, 35, tzinfo=UTC)
+    await runtime._handle_provider_bar(_developing(t0, high=450.2, low=449.8, close=450.0))
+    await runtime._handle_provider_bar(_developing(t0, high=450.9, low=449.8, close=450.7))
+    await runtime._handle_provider_bar(_developing(t0, high=450.9, low=449.1, close=449.3))
+    t1 = t0 + timedelta(minutes=5)
+    await runtime._handle_provider_bar(_developing(t1, high=449.5, low=449.2, close=449.4))
+
+    # 3 refinements plus the first frame of the next bucket.
+    assert [b.close for b in partial] == [450.0, 450.7, 449.3, 449.4]
+    # Only t0 closed; t1 is still developing in the buffer.
+    assert [b.bar_time for b in closed] == [t0]
+    # And it closed carrying the LAST refinement, not the first.
+    assert closed[0].close == pytest.approx(449.3)
+    assert runtime._counters.bars_partial_out == 4
+
+
+@pytest.mark.asyncio
+async def test_close_precedes_partial_on_rollover() -> None:
+    """Order matters: "the previous bar ended" before "this one began"."""
+    events: list[tuple[str, datetime]] = []
+    runtime = _make_runtime(
+        on_bar=lambda b: events.append(("closed", b.bar_time)),
+        on_partial_bar=lambda b: events.append(("partial", b.bar_time)),
+    )
+
+    t0 = datetime(2026, 4, 20, 13, 35, tzinfo=UTC)
+    t1 = t0 + timedelta(minutes=5)
+    await runtime._handle_provider_bar(_developing(t0, high=450.2, low=449.8, close=450.0))
+    await runtime._handle_provider_bar(_developing(t1, high=449.5, low=449.2, close=449.4))
+
+    assert events == [("partial", t0), ("closed", t0), ("partial", t1)]
+
+
+@pytest.mark.asyncio
+async def test_tick_chart_never_fires_partial() -> None:
+    """bar_type 0 has no developing state — every print is already final."""
+    partial: list[Bar] = []
+    closed: list[Bar] = []
+    runtime = _make_runtime(on_bar=closed.append, on_partial_bar=partial.append)
+
+    ts = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)
+    for close in (450.0, 450.1, 450.2):
+        await runtime._handle_provider_bar(_bar("SPY", ts, close=close, bar_type=0))
+
+    assert partial == []
+    assert len(closed) == 3
+    assert runtime._counters.bars_partial_out == 0
+
+
+@pytest.mark.asyncio
+async def test_partial_not_fired_for_stale_or_reordered_frames() -> None:
+    """A frame the buffer refuses is not the series' current state."""
+    partial: list[Bar] = []
+    runtime = _make_runtime(on_partial_bar=partial.append)
+
+    newer = datetime(2026, 4, 20, 13, 35, tzinfo=UTC)
+    older = newer - timedelta(minutes=5)
+    await runtime._handle_provider_bar(_bar("SPY", newer))
+    assert len(partial) == 1
+
+    # Out of order: older than what is buffered. Dropped, not reported.
+    await runtime._handle_provider_bar(_bar("SPY", older))
+    assert len(partial) == 1
+    assert runtime._counters.bars_duplicate_dropped == 1
+
+    # Rolling forward closes `newer` and reports the new bucket as partial.
+    await runtime._handle_provider_bar(_bar("SPY", newer + timedelta(minutes=5)))
+    assert len(partial) == 2
+
+    # Stale: a chart reload replaying a bucket already closed and emitted.
+    await runtime._handle_provider_bar(_bar("SPY", newer))
+    assert len(partial) == 2
+    assert runtime._counters.bars_duplicate_dropped == 2
+
+
+@pytest.mark.asyncio
+async def test_every_closed_bar_was_partial_first() -> None:
+    """The invariant that makes the two channels safe to reason about.
+
+    A bar can only close by leaving the buffer, and it can only enter the
+    buffer through one of the three assignments that fire on_partial_bar. So
+    for bar_type != 0 there is no such thing as a bar that closes without
+    having been reported as developing at least once first.
+    """
+    partial: list[Bar] = []
+    closed: list[Bar] = []
+    runtime = _make_runtime(on_bar=closed.append, on_partial_bar=partial.append)
+
+    t = datetime(2026, 4, 20, 13, 35, tzinfo=UTC)
+    for i in range(6):
+        await runtime._handle_provider_bar(
+            _bar("SPY", t + timedelta(minutes=5 * i), close=450.0 + i)
+        )
+    # Drain the last bucket so it counts as closed too.
+    for bar in runtime._drain_direct_bars():
+        await runtime._on_closed_bar(bar)
+
+    assert len(closed) == 6
+    assert len(partial) >= len(closed)
+    assert {b.bar_time for b in closed} <= {b.bar_time for b in partial}
+
+
+@pytest.mark.asyncio
+async def test_partial_callback_exception_is_latched_and_swallowed(caplog) -> None:
+    """A broken callback must not kill ingestion, nor write one line per frame."""
+    import logging
+
+    def _boom(bar: Bar) -> None:
+        raise RuntimeError("cb failed")
+
+    runtime = _make_runtime(on_partial_bar=_boom)
+    t0 = datetime(2026, 4, 20, 13, 35, tzinfo=UTC)
+    with caplog.at_level(logging.ERROR):
+        for close in (450.0, 450.1, 450.2, 450.3):
+            await runtime._handle_provider_bar(_developing(t0, high=450.9, low=449.1, close=close))
+
+    failures = [r for r in caplog.records if "on_partial_bar_callback_failed" in r.message]
+    assert len(failures) == 1, "latched — a traceback per frame would bury the log"
+    assert runtime._counters.partial_callback_failed == 4
+    assert runtime._counters.bars_partial_out == 4
+    # The buffer still advanced despite every callback raising.
+    assert runtime._current_direct_bars[("SPY", 1, 5)].close == pytest.approx(450.3)
+
+
+@pytest.mark.asyncio
+async def test_partial_never_reaches_sinks_or_snapshot() -> None:
+    """Makes "a partial cannot pollute storage" a fact rather than an intent."""
+    from tradestation_data.sinks.memory import InMemorySink
+
+    sink = InMemorySink(name="mem")
+    snapshot = MarketSnapshot()
+    partial: list[Bar] = []
+    runtime = IngestionRuntime(
+        provider=_StubProvider(),
+        symbols=["SPY"],
+        snapshot=snapshot,
+        sinks=SinkPipeline([sink]),
+        on_partial_bar=partial.append,
+        heartbeat_interval=3600,
+        flush_poll_interval=3600,
+        advance_interval=3600,
+    )
+
+    t0 = datetime(2026, 4, 20, 13, 35, tzinfo=UTC)
+    for close in (450.0, 450.5, 451.0):
+        await runtime._handle_provider_bar(_developing(t0, high=451.2, low=449.1, close=close))
+
+    assert len(partial) == 3
+    assert list(snapshot.symbols()) == []
+    assert sink.bars() == []
+    assert runtime._counters.bars_out == 0
+
+
+@pytest.mark.asyncio
+async def test_no_partial_callback_registered_is_a_no_op() -> None:
+    """The default path: not passing on_partial_bar changes nothing."""
+    closed: list[Bar] = []
+    runtime = _make_runtime(on_bar=closed.append)
+
+    t0 = datetime(2026, 4, 20, 13, 35, tzinfo=UTC)
+    await runtime._handle_provider_bar(_developing(t0, high=450.2, low=449.8, close=450.0))
+    await runtime._handle_provider_bar(
+        _developing(t0 + timedelta(minutes=5), high=449.5, low=449.2, close=449.4)
+    )
+
+    assert len(closed) == 1
+    # Counted on delivery, so "nobody registered" reads as 0 rather than
+    # "here is how many you would have received".
+    assert runtime._counters.bars_partial_out == 0
+
+
+def _partial_failures(caplog) -> int:
+    return sum("on_partial_bar_callback_failed" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_async_callbacks_are_refused_at_construction() -> None:
+    """An `async def` would have its coroutine built and dropped unrun.
+
+    Silently: the callback never executes, the counters still record every
+    frame as delivered, and nothing is logged. The docstrings push people
+    toward it by warning that a slow callback back-pressures the socket, so
+    the constructor has to say no.
+    """
+
+    async def _acb(bar: Bar) -> None:  # pragma: no cover - never invoked
+        pass
+
+    with pytest.raises(TypeError, match="on_partial_bar must be a plain callable"):
+        _make_runtime(on_partial_bar=_acb)
+    with pytest.raises(TypeError, match="on_bar must be a plain callable"):
+        _make_runtime(on_bar=_acb)
+
+
+@pytest.mark.asyncio
+async def test_partial_failure_latch_is_keyed_by_series_and_exception_type(caplog) -> None:
+    """A benign first exception must not silence a different one hours later.
+
+    A single process-wide bool would: one warm-up KeyError at 09:31 and the
+    OSError that starts at 14:00 is never written down at all.
+    """
+    import logging
+
+    raising: list[type[Exception]] = [RuntimeError]
+
+    def _boom(bar: Bar) -> None:
+        raise raising[0]("cb failed")
+
+    runtime = _make_runtime(on_partial_bar=_boom)
+    t0 = datetime(2026, 4, 20, 13, 35, tzinfo=UTC)
+
+    def _frame(close: float, *, bar_interval: int = 5) -> Bar:
+        return _developing(t0, high=450.9, low=449.1, close=close, bar_interval=bar_interval)
+
+    with caplog.at_level(logging.ERROR):
+        # Same series, same exception type: one line however many frames.
+        await runtime._handle_provider_bar(_frame(450.0))
+        await runtime._handle_provider_bar(_frame(450.1))
+        assert _partial_failures(caplog) == 1
+
+        # Same series, a DIFFERENT exception type: said again.
+        raising[0] = OSError
+        await runtime._handle_provider_bar(_frame(450.2))
+        assert _partial_failures(caplog) == 2
+
+        # A different series, same exception type: said again.
+        await runtime._handle_provider_bar(_frame(450.3, bar_interval=15))
+        assert _partial_failures(caplog) == 3
+
+    assert runtime._counters.partial_callback_failed == 4
+
+
+@pytest.mark.asyncio
+async def test_partial_precedes_close_on_the_wall_clock_path() -> None:
+    """The invariant on the path a quiet symbol actually closes through.
+
+    Rollover is not the only way a bar closes, and it is not the way a breadth
+    index or a thin option closes — those only ever leave the buffer through
+    `_advance_direct_bars`.
+    """
+    partial: list[Bar] = []
+    closed: list[Bar] = []
+    runtime = _make_runtime(on_bar=closed.append, on_partial_bar=partial.append)
+
+    t0 = datetime(2026, 4, 20, 13, 35, tzinfo=UTC)
+    await runtime._handle_provider_bar(_developing(t0, high=450.2, low=449.8, close=450.0))
+    assert [b.bar_time for b in partial] == [t0]
+    assert closed == []
+
+    for bar in runtime._advance_direct_bars(t0 + timedelta(seconds=3)):
+        await runtime._on_closed_bar(bar)
+
+    assert [b.bar_time for b in closed] == [t0]
+    assert {b.bar_time for b in closed} <= {b.bar_time for b in partial}
+
+
+@pytest.mark.asyncio
+async def test_partial_precedes_close_on_the_shutdown_path() -> None:
+    """Same invariant through `_shutdown()`, the third and last close path."""
+    partial: list[Bar] = []
+    closed: list[Bar] = []
+    runtime = _make_runtime(on_bar=closed.append, on_partial_bar=partial.append)
+
+    t0 = datetime(2026, 4, 20, 13, 35, tzinfo=UTC)
+    await runtime._handle_provider_bar(_developing(t0, high=450.2, low=449.8, close=450.0))
+    assert closed == []
+
+    await runtime._shutdown()
+
+    assert [b.bar_time for b in closed] == [t0]
+    assert {b.bar_time for b in closed} <= {b.bar_time for b in partial}

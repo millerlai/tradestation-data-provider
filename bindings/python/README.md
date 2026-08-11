@@ -37,6 +37,7 @@ flowchart TD
     Snapshot["MarketSnapshot"]
     Pipeline[["SinkPipeline · fan-out"]]
     OnBar(["optional on_bar callback"])
+    OnPartial(["optional on_partial_bar callback"])
 
     PBar["ParquetBarSink<br/>(default)"]
     Memory["InMemorySink"]
@@ -47,7 +48,8 @@ flowchart TD
     Provider -- "point (EL_Publish)" --> Runtime
     Runtime -- "closed point" --> Snapshot
     Runtime -- "closed point" --> Pipeline
-    Runtime --> OnBar
+    Runtime -- "closed point" --> OnBar
+    Runtime -- "developing point · every frame" --> OnPartial
     Pipeline --> PBar
     Pipeline --> Memory
     Pipeline --> Callback
@@ -55,6 +57,22 @@ flowchart TD
 ```
 
 Background loops inside `IngestionRuntime`: **ingest** / **advance** (wall-clock) / **flush** (sinks that ask for it) / **heartbeat**.
+
+`on_bar` fires once per closed point. `on_partial_bar` fires on **every frame that
+refines the bar still being buffered**, so a 5-minute chart reports itself continuously
+rather than once at the close. It is neither de-duplicated nor throttled, and it never
+reaches the snapshot / sinks / storage — a developing bar in Parquet is
+indistinguishable from a published one. Neither callback may be `async def`: both run
+synchronously inside the ingest loop, and the constructor rejects a coroutine function
+rather than let it be built and discarded unrun.
+
+Four things to know before registering one: a partial's `bar_time` is in the **future**
+(EL stamps a forming bar with the time it will *close* at); a chart reload at startup
+replays history through this same channel and looks exactly like live data; a sub-minute
+chart delivers its only complete copy here rather than through `on_bar`; and tick charts
+(`bar_type` 0) never fire it. The `_on_partial_bar` docstring is the full contract,
+including what actually degrades when a callback is slow — the Parquet flush loop, not
+`messages_lost`.
 
 > The diagram above renders on GitHub; on PyPI it displays as a Mermaid code block.
 
