@@ -497,13 +497,14 @@ flowchart LR
     PARSE -->|"ok"| BAR["Bar (domain/bar.py)"]
     BAR --> INGEST["IngestionRuntime<br/>._handle_provider_bar()"]
     INGEST -->|"see the §7.3 decision diagram"| CLOSED["_on_closed_bar()"]
+    INGEST -->|"every frame that refines<br/>the buffered bar"| PARTIAL["_on_partial_bar()<br/>optional callback ONLY<br/>never a sink, never disk"]
     CLOSED --> SNAP["MarketSnapshot.on_bar()"]
     CLOSED --> PIPE["SinkPipeline.on_bar()"]
     PIPE --> PQ["ParquetBarSink → BarWriter.write()"]
     PQ -->|"should_flush() fires"| DISK["bars.parquet<br/>bartype=N/interval=M/symbol=SYM/date=YYYY-MM-DD/"]
 
     classDef existing fill:#e9ecef,stroke:#adb5bd,color:#495057
-    class DLL,RECV,TOPICCHK,DROP1,PARSE,DROP2,BAR,INGEST,CLOSED,SNAP,PIPE,PQ,DISK existing
+    class DLL,RECV,TOPICCHK,DROP1,PARSE,DROP2,BAR,INGEST,CLOSED,PARTIAL,SNAP,PIPE,PQ,DISK existing
 ```
 
 ### 7.3 `IngestionRuntime`: Buffering, Deduplication, and the Tick Bypass
@@ -543,12 +544,35 @@ flowchart TD
     NEWER -->|"yes"| EMITOLD["old bar emitted to _on_closed_bar<br/>new bar becomes the buffered one"]
     NEWER -->|"no"| DROPREORDER["bars_duplicate_dropped += 1<br/>dropped (out-of-order / reload)"]
 
+    BUFFER --> FIREP["_on_partial_bar() fires for the bar<br/>just installed as this series' current one"]
+    REPLACE --> FIREP
+    EMITOLD --> FIREP
+
     ADVANCE(["wall-clock advance loop, every second"]) --> GRACE{"bar_time + 2 s<br/>≤ now?"}
     GRACE -->|"yes"| EMITGRACE["emitted to _on_closed_bar<br/>(a quiet symbol's last bar is no longer held indefinitely)"]
 
     classDef existing fill:#e9ecef,stroke:#adb5bd,color:#495057
-    class START,ISTICK,EMITTICK,CHECKDUP,DROPDUP,HASCUR,BUFFER,SAMEBUCKET,REPLACE,NEWER,EMITOLD,DROPREORDER,ADVANCE,GRACE,EMITGRACE existing
+    class START,ISTICK,EMITTICK,CHECKDUP,DROPDUP,HASCUR,BUFFER,SAMEBUCKET,REPLACE,NEWER,EMITOLD,DROPREORDER,FIREP,ADVANCE,GRACE,EMITGRACE existing
 ```
+
+**The developing bar is available too, through `on_partial_bar`.** The three
+buffer-assignment nodes above (`BUFFER`, `REPLACE`, `EMITOLD`) are exactly the
+points that fire it, which is why a frame the buffer drops as stale or
+out-of-order is never reported as a partial: there is no second copy of that
+judgement to drift. It is a constructor callback only — never a sink, never
+`MarketSnapshot`, never Parquet, because a developing bar on disk is
+indistinguishable from a published one.
+
+Four properties surprise every first-time consumer, and
+`IngestionRuntime._on_partial_bar`'s docstring is the single authoritative
+statement of them — this file deliberately only names them: a partial's
+`bar_time` lies in the **future**; a chart reload at startup replays history
+through the same channel and is indistinguishable from live data; a sub-minute
+chart's *only* complete copy arrives here rather than through `on_bar`; and tick
+charts never fire it at any `bar_interval`. Note also that a slow callback's
+first visible symptom is **not** `messages_lost` — the XPUB holds 100k frames and
+the SUB's RCVHWM is 1,000,000 — but `_flush_loop` starving and leaving an open
+Parquet partition without a footer.
 
 **The buffer key includes the timeframe**, not just the symbol: one DLL, one PUB
 socket, and one topic now carry every interval the user has open at once. Keyed

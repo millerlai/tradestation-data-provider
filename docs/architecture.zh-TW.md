@@ -429,13 +429,14 @@ flowchart LR
     PARSE -->|"成功"| BAR["Bar（domain/bar.py）"]
     BAR --> INGEST["IngestionRuntime<br/>._handle_provider_bar()"]
     INGEST -->|"詳見 §7.3 決策圖"| CLOSED["_on_closed_bar()"]
+    INGEST -->|"每一個修正到<br/>緩衝中那根 bar 的 frame"| PARTIAL["_on_partial_bar()<br/>僅限 callback<br/>不進 sink、不落地"]
     CLOSED --> SNAP["MarketSnapshot.on_bar()"]
     CLOSED --> PIPE["SinkPipeline.on_bar()"]
     PIPE --> PQ["ParquetBarSink → BarWriter.write()"]
     PQ -->|"should_flush() 觸發"| DISK["bars.parquet<br/>bartype=N/interval=M/symbol=SYM/date=YYYY-MM-DD/"]
 
     classDef existing fill:#e9ecef,stroke:#adb5bd,color:#495057
-    class DLL,RECV,TOPICCHK,DROP1,PARSE,DROP2,BAR,INGEST,CLOSED,SNAP,PIPE,PQ,DISK existing
+    class DLL,RECV,TOPICCHK,DROP1,PARSE,DROP2,BAR,INGEST,CLOSED,PARTIAL,SNAP,PIPE,PQ,DISK existing
 ```
 
 ### 7.3 `IngestionRuntime`：緩衝、去重、tick bypass
@@ -470,12 +471,31 @@ flowchart TD
     NEWER -->|"是"| EMITOLD["送出舊 bar 到 _on_closed_bar<br/>新 bar 取而代之成為緩衝"]
     NEWER -->|"否"| DROPREORDER["bars_duplicate_dropped += 1<br/>捨棄（out-of-order / reload）"]
 
+    BUFFER --> FIREP["_on_partial_bar() 為剛被裝入<br/>成為該序列當前狀態的那根 bar 觸發"]
+    REPLACE --> FIREP
+    EMITOLD --> FIREP
+
     ADVANCE(["每秒 wall-clock advance loop"]) --> GRACE{"bar_time + 2 秒<br/>≤ now?"}
     GRACE -->|"是"| EMITGRACE["送出到 _on_closed_bar<br/>（安靜 symbol 的最後一根不再被無限期扣住）"]
 
     classDef existing fill:#e9ecef,stroke:#adb5bd,color:#495057
-    class START,ISTICK,EMITTICK,CHECKDUP,DROPDUP,HASCUR,BUFFER,SAMEBUCKET,REPLACE,NEWER,EMITOLD,DROPREORDER,ADVANCE,GRACE,EMITGRACE existing
+    class START,ISTICK,EMITTICK,CHECKDUP,DROPDUP,HASCUR,BUFFER,SAMEBUCKET,REPLACE,NEWER,EMITOLD,DROPREORDER,FIREP,ADVANCE,GRACE,EMITGRACE existing
 ```
+
+**發展中的 bar 也拿得到，透過 `on_partial_bar`。** 上圖三個緩衝賦值節點
+（`BUFFER`、`REPLACE`、`EMITOLD`）正是觸發它的地方，這也是為什麼被 buffer 當成
+陳舊或亂序丟棄的 frame 永遠不會被回報為 partial：那份判斷沒有第二份副本可以漂移。
+它只是建構子上的 callback —— 不進 sink、不進 `MarketSnapshot`、不落 Parquet，
+因為一根寫上磁碟的發展中 bar 與已發布的 bar 無從分辨。
+
+有四個性質會讓初次使用者意外，而
+`IngestionRuntime._on_partial_bar` 的 docstring 是它們唯一的權威敘述 ——
+本檔案刻意只點名不複述：partial 的 `bar_time` 落在**未來**；啟動時的圖表重載會把
+歷史從同一條通道重播、與即時資料無從分辨；sub-minute chart *唯一*完整的一份是
+走這裡而非 `on_bar`；tick chart 在任何 `bar_interval` 下都不會觸發它。另外，
+callback 太慢時第一個看得見的徵兆**不是** `messages_lost` —— XPUB 存 10 萬幀、
+SUB 的 RCVHWM 是 100 萬 —— 而是 `_flush_loop` 被餓死、留下一個沒有 footer 的
+Parquet 分區。
 
 **緩衝鍵包含 timeframe**，不能只用 symbol：一個 DLL、一個 PUB socket、一個 topic 現在
 同時承載使用者開啟的每一種 interval。若只用 symbol 當鍵，1 分鐘圖的 bar 到達會誤把
