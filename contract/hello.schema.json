@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/millerlai/tradestation-data-provider/contract/hello.schema.json",
   "title": "TS2Python chart announcement (hello, proto 2)",
-  "description": "One chart announcing itself, published by EL_Init on the fixed control topic __ts2py__. NOT a data point: it carries no OHLC, no quantity words and no quote. The topic is the discriminator — no `kind` field was added and the point frame is unchanged. It rides its own topic because a consumer subscribes per symbol from a configured list, so a chart on a symbol nobody asked for could not be announced on that symbol's own topic, and that is exactly the case an operator needs told about.",
+  "description": "One chart announcing itself, published by EL_InitChart on the fixed control topic __ts2py__. NOT a data point: it carries no OHLC, no quantity words and no quote. The topic is the discriminator — no `kind` field was added and the point frame is unchanged. It rides its own topic because a consumer subscribes per symbol from a configured list, so a chart on a symbol nobody asked for could not be announced on that symbol's own topic, and that is exactly the case an operator needs told about.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -32,7 +32,7 @@
     },
     "ts": {
       "type": "number",
-      "description": "DLL receive clock (UTC epoch seconds) at the moment EL_Init was called. There is no ts_str: a hello is not a bar and has no bar time."
+      "description": "DLL receive clock (UTC epoch seconds) at the moment EL_InitChart was called. There is no ts_str: a hello is not a bar and has no bar time."
     },
     "symbol": {
       "type": "string",

@@ -14,10 +14,10 @@
 | Publisher | DLL 端 `bind`，預設 `tcp://127.0.0.1:5555` |
 | Subscriber | `connect` 同一 endpoint |
 | 送達保證 | **無**，但可偵測（`seq`）；「有沒有人在聽」則可確知 |
-| 對應 DLL ABI | `EL_DllVersion() == 3` |
+| 對應 DLL ABI | `EL_DllVersion() == 4` |
 
 publisher 端是 **XPUB 而不是 PUB**。送出語意完全相同；差別是訂閱事件會以可讀訊息回到
-publisher，所以 DLL 有辦法回答「到底有沒有人在聽」。這是 `EL_Init` 能夠在無人訂閱時
+publisher，所以 DLL 有辦法回答「到底有沒有人在聽」。這是 `EL_InitChart` 能夠在無人訂閱時
 回 `-7` 並拒絕發布的唯一依據 —— PUB 在沒有訂閱者時靜默丟棄一切且不回報任何東西。
 
 consumer 端仍然是普通的 `SUB`，不需要任何改動。
@@ -33,7 +33,7 @@ topic 有兩種，**而 topic 本身就是 payload 形狀的鑑別子**：
 | topic | payload | 產生者 |
 | --- | --- | --- |
 | symbol（`SPY`、`$VIX.X`…） | data point | `EL_Publish` |
-| `__ts2py__`（固定） | chart 宣告（hello） | `EL_Init` |
+| `__ts2py__`（固定） | chart 宣告（hello） | `EL_InitChart` |
 
 沒有新增 `kind` 欄位，point frame 一個 byte 都沒變。
 
@@ -93,7 +93,7 @@ DLL 曾經把這一對映射成 `"5m"`、`"1d"` 之類的字串,並對**映射�
 
 ## hello —— chart 宣告 frame
 
-topic 固定為 **`__ts2py__`**。由 `EL_Init` 送出，每張圖一筆。
+topic 固定為 **`__ts2py__`**。由 `EL_InitChart` 送出，每張圖一筆。
 
 ```json
 {
@@ -113,7 +113,7 @@ topic 固定為 **`__ts2py__`**。由 `EL_Init` 送出，每張圖一筆。
 | `proto` | int | 恆為 `2`。point frame 沒有變，所以 wire 版本沒有變 |
 | `seq` | int | 控制 topic 自己的序號，與各 symbol 的序號互不相干 |
 | `sid` | int | publisher session id，與 point frame 同一個值 |
-| `ts` | float | DLL 收到 `EL_Init` 呼叫的 UTC epoch 秒 |
+| `ts` | float | DLL 收到 `EL_InitChart` 呼叫的 UTC epoch 秒 |
 | `symbol` | string | EL `GetSymbolName` |
 | `category` | int | EL `Category`，逐字（§3.5 的表） |
 | `bar_type` | int | EL `BarType`，逐字 |
@@ -137,7 +137,7 @@ consumer 是**逐 symbol 訂閱**的，而且訂閱清單來自它自己的設�
 ### binding 的義務
 
 1. **必須訂閱 `__ts2py__`，而且與 symbol 清單無關。** 這不是選配：publisher 在這個
-   topic 上看不到訂閱者之前，`EL_Init` 回 `-7` 且**什麼都不發**。沒訂的 consumer 會讓
+   topic 上看不到訂閱者之前，`EL_InitChart` 回 `-7` 且**什麼都不發**。沒訂的 consumer 會讓
    每一張 TradeStation 圖無限期空轉。
 2. **不得把 hello 當成 data point 交給下游。**
 3. **收到 hello 時必須說話。** symbol 在訂閱清單內 → 記錄「開始接收」並附上四個欄位；
@@ -149,10 +149,10 @@ consumer 是**逐 symbol 訂閱**的，而且訂閱清單來自它自己的設�
 
 ### 重播：consumer 重開不需要動 TradeStation
 
-DLL 記住每一張呼叫過 `EL_Init` 的圖。**每收到一則涵蓋控制 topic 的訂閱訊息，就把所有
+DLL 記住每一張呼叫過 `EL_InitChart` 的圖。**每收到一則涵蓋控制 topic 的訂閱訊息，就把所有
 已知的圖重新宣告一次。**
 
-這是必要的：`EL_Init` 一張圖只跑一次（在該圖的第一根 bar），TradeStation 不會為了一張
+這是必要的：`EL_InitChart` 一張圖只跑一次（在該圖的第一根 bar），TradeStation 不會為了一張
 已經開著的圖再呼叫一次。沒有這個重播機制，consumer 重啟後就再也學不到工作區裡有什麼，
 除非人工把每一張圖重新 Verify。
 
@@ -210,58 +210,64 @@ DLL 因此設定 **`ZMQ_XPUB_VERBOSE`**。預設的 XPUB 每個 topic 只回報*
 「存在但不得作權威用」的欄位需要每個 binding 各自記得別用。時間權威的完整規則見
 [`semantics.md`](semantics.md) §1。
 
-## 一個 publish 匯出,一個 init 匯出,兩個墓碑
+## 一個 publish 匯出,一個 init 匯出,三個墓碑
 
 | 匯出 | 簽章 | 用途 |
 | --- | --- | --- |
-| `EL_Init` | `(const char* endpoint, const char* symbol, int category, int bar_type, int bar_interval)` | **唯一的 init**;綁定 socket + 宣告這張圖 |
+| `EL_InitChart` | `(const char* endpoint, const char* symbol, int category, int bar_type, int bar_interval)` | **唯一的 init**;綁定 socket + 宣告這張圖 |
 | `EL_Publish` | 16 個參數 | **唯一的 publish** |
+| `EL_Init` | `(const char* endpoint)` | **墓碑**,一律回 `-6` |
 | `EL_PublishTick` | 10 個參數 | **墓碑**,一律回 `-6` |
 | `EL_PublishBar` | 13 個參數 | **墓碑**,一律回 `-6` |
 | `EL_Shutdown` | `()` | |
-| `EL_DllVersion` | `()` | 回 `3` |
+| `EL_DllVersion` | `()` | 回 `4` |
 
 `EL_Init2` 與 `EL_Init3` 已**刪除**。
 
-### `EL_Init` 這個名字被收回重用 —— 這是一個已知且無法補救的風險
+### 簽章一改,名字就改 —— 這是唯一有效的閘門
 
-前一代的 `EL_Init` 是**單參數**的。現在是五參數。`DefineDLLFunc` 只按名字
-`GetProcAddress`,所以舊 `.ELD` **解析得到這個匯出**;而 `__stdcall` 由被呼叫端清堆疊,
-被呼叫端看不見呼叫端推了幾個參數 —— **堆疊直接損毀,TradeStation 崩潰或行為異常,
-沒有任何回傳碼**。
+`DefineDLLFunc` 只按名字 `GetProcAddress`,而 `__stdcall` 由被呼叫端清堆疊,被呼叫端
+看不見呼叫端推了幾個參數。所以**一個名字如果在簽章改變後還指向新簽章,舊 `.ELD` 會
+解析得到、呼叫得下去、然後直接損毀堆疊** —— TradeStation 崩潰或行為異常,沒有任何
+回傳碼,程式碼補不起來。
 
-以前擋住這件事的一直是 init:每一個 publish 呼叫都在「init 成功」的閘門後面
-（`EL/TS2Python_Exporter.el`）,而 init 的名字每次改簽章時都跟著換
-（`EL_Init` → `EL_Init2` → `EL_Init3`）,所以舊 `.ELD` 停在自己的 init。
+擋住這件事的一直是 init:每一個 publish 呼叫都在「init 成功」的閘門後面
+（`EL/TS2Python_Exporter.el`）,所以只要 init 的名字跟著簽章換,舊 `.ELD` 就停在自己的
+init,永遠碰不到改過簽章的 publish。
 
-**這一版放棄了那個保護。** 名字重用本身就是那個洞,程式碼補不起來。剩下的只有流程:
-**DLL 與 `.ELD` 是同一個單位,換 DLL 就必須重新 Verify indicator。**
-`cpp/install-to-tradestation.bat` 安裝完會這樣提醒。
+**ABI 3 曾經放棄這個原則**,把 `EL_Init` 這個名字收回來重用成五參數的 init。ABI 4 把
+init 改名為 **`EL_InitChart`**,並把 `EL_Init` 放回**單參數**的墓碑,閘門就補回來了。
+舊名字釘在舊 arity 上,舊 `.ELD` 的呼叫才會平衡。
 
-`EL_PublishTick` / `EL_PublishBar` 的墓碑仍然留著,但要明白它們現在**擋不到任何東西**:
-舊 `.ELD` 在 `EL_Init` 就已經把堆疊弄壞了,走不到這兩個名字。留著只是因為刪掉匯出只會
-讓失敗更難讀。
+驗證方式是看匯出的裝飾名 —— `@` 後面的數字就是參數佔用的位元組數:
 
-**反方向（新 `.ELD` 打進舊 DLL）是安全的。** ABI-2 的 DLL 匯出的是 `EL_Init3`,沒有
-五參數的 `EL_Init`,`DefineDLLFunc` 在 verify 階段解析失敗,什麼都不會跑 —— 可自行驗證:
+```
+EL_Init      = _EL_Init@4        <- 單參數墓碑,舊 .ELD 打進來會平衡
+EL_InitChart = _EL_InitChart@20  <- 五參數,只有新 .ELD 找得到
+```
 
 ```bash
 git show 7faeabf:cpp/src/TS2Python.def   # ABI-1:有 EL_Init3,沒有 EL_Publish
 git show 2a8033f:cpp/src/TS2Python.def   # ABI-2:EL_Init3 + EL_Publish
-git show HEAD:cpp/src/TS2Python.def      # ABI-3:五參數 EL_Init,沒有 EL_Init3
+git show 510462c:cpp/src/TS2Python.def   # ABI-3:五參數 EL_InitChart（閘門缺口）
+git show HEAD:cpp/src/TS2Python.def      # ABI-4:EL_InitChart + EL_Init 墓碑
 ```
+
+**DLL 與 `.ELD` 仍然是同一個單位,換 DLL 就必須重新 Verify indicator**
+（`cpp/install-to-tradestation.bat` 安裝完會提醒）—— 差別在於現在裝錯只會得到一行可讀的
+訊息,而不是一次崩潰。
 
 ### 新舊部署不相容時會發生什麼
 
 | 情境 | 攔截點 | 使用者看到什麼 |
 | --- | --- | --- |
-| 新 `.ELD` + 舊（ABI-1/2）DLL | 舊 DLL 沒有五參數的 `EL_Init` 匯出 | `DefineDLLFunc` 解析 `EL_Init` 失敗，TradeStation 在 verify 階段就報錯 |
+| 新 `.ELD` + 舊（ABI-1/2/3）DLL | 舊 DLL 沒有 `EL_InitChart` 匯出 | `DefineDLLFunc` 解析 `EL_InitChart` 失敗，TradeStation 在 verify 階段就報錯 |
 | 新 `.ELD` + 版本不符的新 DLL | indicator 的 `EL_DllVersion()` latch | Print Log 出現版本不符訊息，indicator 停止發布。`EL_DllVersion` 是 0 參數，簽章永不變，呼叫它絕對安全 |
 | 舊 `.ELD`（呼叫 `EL_PublishTick`/`Bar`）+ 新 DLL | 墓碑回 `-6` | Print Log 出現 `rc=-6`，不發布 |
-| **舊 `.ELD`（呼叫單參數 `EL_Init`）+ 新 DLL** | **無。名字解析得到，`__stdcall` 堆疊損毀** | **TradeStation 崩潰或行為異常。這是上面那節說的洞** |
+| 舊 `.ELD`（呼叫單參數 `EL_Init`）+ 新 DLL | 單參數 `EL_Init` 墓碑回 `-6` | Print Log 出現 `rc=-6`，不發布。**堆疊平衡，不再崩潰** |
 
-前三個方向是可讀的失敗。**第四個不是**，而且它是這一版新開的 —— 唯一的防線是把 DLL 與
-`.ELD` 一起換。
+四個方向現在**都是可讀的失敗**。最後一列在 ABI 3 時是一個無法攔截的崩潰，ABI 4 的改名
+把它關上了。
 
 ## 邊界與限制
 
@@ -269,7 +275,7 @@ git show HEAD:cpp/src/TS2Python.def      # ABI-3:五參數 EL_Init,沒有 EL_Ini
 | --- | --- |
 | tick payload 緩衝區 | 640 bytes；超出回傳 `-4` 且不送出（序號已消耗） |
 | bar payload 緩衝區 | 768 bytes；同上 |
-| hello payload 緩衝區 | 512 bytes；超出 `EL_Init` 回 `-4` |
+| hello payload 緩衝區 | 512 bytes；超出 `EL_InitChart` 回 `-4` |
 | `ts_str` 未跳脫 | 直接插入 JSON 字串；binding **應對解析失敗有容錯** |
 | hello 的 `symbol` 未跳脫 | 同上。TradeStation 的 symbol 不含 `"` 或 `\`，但 binding 不得假設 —— 壞掉的 hello 必須被拒收並計入 `frames_refused`，不得中斷串流 |
 

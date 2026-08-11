@@ -22,26 +22,31 @@ implementation — this repo has already had a spec drift into describing fields
 no longer emitted, unnoticed, because nothing checked. Anything a second binding would
 have to guess belongs in `contract/semantics.md`, with a fixture.
 
-- **Wire `proto` 2 / DLL ABI 3.** They are separate numbers and this is why: the ABI
-  changed (`EL_Init`'s signature) and a control frame was added on its own topic, but
-  the point frame is byte-for-byte what it always was, so every recorded fixture stays
-  valid. Bumping `proto` would have invalidated all of them to describe a frame the
-  point schema does not cover. The version key is `proto`, not `v`: the superseded wire
-  used `v` and counted to 4, so restarting under the same key would have made `{"v":1}`
-  a legal opening for two different protocols. A frame without `proto` is simply not
-  this protocol, and `_parse_payload` refuses it with a message naming the fix.
-- **Upgrade DLL and `.ELD` together — this is now a hard requirement, not advice.**
-  `EL_Init`'s name was reused with five parameters where the superseded protocol's had
-  one. `DefineDLLFunc` resolves by name only and `__stdcall` has the callee pop the
-  arguments, so an `.ELD` still bound to the one-argument `EL_Init` **corrupts the
-  stack** — TradeStation crashes rather than returning a code, and nothing on the DLL
-  side can detect it. The old name-change-per-signature-change gate is gone; only the
-  install procedure protects this now.
+- **Wire `proto` 2 / DLL ABI 4.** They are separate numbers and this is why: the ABI
+  changed (the init export's signature, then its name) and a control frame was added on
+  its own topic, but the point frame is byte-for-byte what it always was, so every
+  recorded fixture stays valid. Bumping `proto` would have invalidated all of them to
+  describe a frame the point schema does not cover. The version key is `proto`, not `v`:
+  the superseded wire used `v` and counted to 4, so restarting under the same key would
+  have made `{"v":1}` a legal opening for two different protocols. A frame without
+  `proto` is simply not this protocol, and `_parse_payload` refuses it with a message
+  naming the fix.
+- **Change the signature, change the name. That rule is the only working ABI gate.**
+  `DefineDLLFunc` resolves by name only and `__stdcall` has the callee pop the
+  arguments, so an export whose name outlives a signature change lets a stale `.ELD`
+  resolve it, call it, and **corrupt the stack** — TradeStation crashes rather than
+  returning a code, and nothing on the DLL side can detect it. ABI 3 broke the rule by
+  reusing `EL_Init` for the five-parameter init; ABI 4 restores it. The init export is
+  **`EL_InitChart`**, and `EL_Init` is back to being a **one-parameter tombstone**
+  returning `-6` — the old name pinned to the old arity, which is what makes a stale
+  call balance. Verify with the decorated names: `_EL_Init@4` vs `_EL_InitChart@20`.
+  Upgrade DLL and `.ELD` together anyway; the difference is that a mismatch is now a
+  readable `-6` or a Verify-time resolution failure instead of a crash.
 - **One publish export, one point shape** — plus one control frame on its own topic.
   `EL_Publish` carries everything TradeStation hands the indicator for a data point:
   `Date`+`Time`, `BarType`, `BarInterval`, `Category`, OHLC, the five `el_*` words, and
   `InsideBid`/`InsideAsk`. There is no tick/bar split, no `kind`, and no `tf`.
-- **`EL_Init` announces a chart and refuses to succeed into a void.** It takes
+- **`EL_InitChart` announces a chart and refuses to succeed into a void.** It takes
   `(endpoint, symbol, category, bar_type, bar_interval)`, and the socket is **XPUB**,
   not PUB — so the DLL is told when a subscriber attaches. Until one is attached to the
   control topic `__ts2py__` it returns **`-7`** and publishes nothing; the indicator
@@ -53,19 +58,36 @@ have to guess belongs in `contract/semantics.md`, with a fixture.
   DLL matches that subscription by prefix, exactly as ZMQ does, so `SUBSCRIBE ""`
   counts.
 
+  The gate holds *past* init too. `EL_Publish` checks whether any subscription covers
+  the point's own symbol and returns **`-10`** when none does — once per episode per
+  chart, cleared when a subscriber returns. Without it, every bar published during a
+  consumer restart was discarded by ZMQ and reported as rc 0, and nothing backfills.
+
+  One endpoint per process: only the first chart binds, so a chart naming a different
+  one is refused with **`-8`** rather than silently published to the first chart's port.
+  And `-9` separates "the subscription queue could not be read" from `-7`'s "nobody has
+  subscribed yet" — both leave the subscriber set empty, and reporting a broken socket
+  as the normal startup state made it invisible.
+
+  The chart registry is capped at **24** entries, evicting the least recently published.
+  Nothing removes a chart otherwise: the wire carries no chart-closed signal and EL has
+  no per-chart unload hook, so editing a chart's symbol leaves its old 4-tuple behind
+  forever. Two charts with the *same* `(symbol, category, bar_type, bar_interval)` are
+  one registry entry sharing one topic and one `seq` — on a tick chart that doubles
+  every print, and nothing on the wire can reveal it.
+
   The split used to drop fields by chart type — tick sent `Close` alone and no chart
   identity; bar sent OHLC and no quote. Both were the publisher deciding which numbers
   were meaningful where, off the wire, where nothing downstream could see the decision.
   TradeStation supplies the same reserved words on every chart; a 1-tick series has
   `Open = High = Low = Close`, and that is a fact worth landing.
-- `EL_PublishTick` and `EL_PublishBar` survive as **tombstones** returning `-6`, and
-  stay in `TS2Python.def`: both once kept their spelling across a signature change, and
-  they are `__stdcall`, so a mismatched call corrupts the stack rather than returning an
-  error. `EL_Init2` and `EL_Init3` are **deleted**. Be clear about what the remaining
-  tombstones do: they no longer *stop* anything. The guard used to be that init's name
-  changed every time a signature did, so an old `.ELD` failed at init and never reached
-  a moved publish signature — reusing `EL_Init` gave that up. They are kept only because
-  a missing export fails less legibly than a `-6`.
+- `EL_Init`, `EL_PublishTick` and `EL_PublishBar` are **tombstones** returning `-6`, all
+  three listed in `TS2Python.def` and all three **held at the superseded protocol's
+  arity**. That pairing is the mechanism, not a formality: they are `__stdcall`, so the
+  old name at the old arity is what makes a stale call balance instead of corrupting the
+  stack. `EL_Init2` and `EL_Init3` are **deleted**. `EL_Init` is the one that matters —
+  init is the gate every publish sits behind, so a stale `.ELD` stops there and never
+  reaches a moved publish signature.
 - Python 3.12–3.14, managed with **uv**; all three are in the CI matrix. 3.11 was
   dropped so the Windows event loop can be selected with
   `asyncio.run(loop_factory=...)` (3.12+) instead of the policy API, which 3.14
@@ -129,20 +151,21 @@ cmake --build --preset x86-release
 msbuild TS2Python.sln /p:Configuration=Release /p:Platform=x86
 
 # Drive the DLL without TradeStation, then watch or record the wire.
-# THE SUBSCRIBER STARTS FIRST. EL_Init returns -7 and publishes nothing until one
+# THE SUBSCRIBER STARTS FIRST. EL_InitChart returns -7 and publishes nothing until one
 # is attached, so a harness run with no SUB just times out. --warmup-ms no longer
 # guards against the silent no-subscriber drop; it is only a settle sleep.
 # build.bat / VS write to cpp\Release\; cmake to cpp\build\x86-release\Release\.
 python contract/tools/record.py --endpoint tcp://127.0.0.1:5599     # window 1
 cpp/Release/TS2Python_TestHarness.exe --mode smoke --endpoint tcp://127.0.0.1:5599
-python contract/tools/record.py --count 6 --quiet --record contract/fixtures/smoke.jsonl
+# --count includes the two leading hello frames every mode announces first.
+python contract/tools/record.py --count 8 --quiet --record contract/fixtures/smoke.jsonl
 ```
 
 Harness modes: `smoke` (3 topics + one bar), `noquote` (bid/ask absent, the
 history-replay shape, on both an index and a non-index symbol), `bars` (every
 every BarType/BarInterval pair, none refused), `session` (RTH first/last bar),
 `stress`, `multithread`. Every mode first announces two charts (`SPY` 1/1 and
-`QQQ` 1/5) through `EL_Init`, so the first two frames of any recording are hellos.
+`QQQ` 1/5) through `EL_InitChart`, so the first two frames of any recording are hellos.
 Each fixture's mode and frame count is tabulated in `contract/fixtures/README.md`.
 
 Pytest is configured with `pythonpath = ["src"]`, `asyncio_mode = "auto"`, and
@@ -154,10 +177,10 @@ rather than widening the filter.
 ### Live ingest data-flow
 
 ```
-                     ◀── XPUB sees the subscription; EL_Init returns -7 until it does
+                ◀── XPUB sees the subscription; EL_InitChart returns -7 until it does
 TradeStation EL DLL  ──ZMQ XPUB──▶  TradeStationELProvider (SUB, asyncio)
       │                                     │
-      │  EL_Init  ──── topic __ts2py__ ─────┤  hello: symbol/category/bar_type/bar_interval
+      │ EL_InitChart ── topic __ts2py__ ───┤  hello: symbol/category/bar_type/bar_interval
       │                                     │  (logged, never yielded as a Bar)
       │  EL_Publish ── topic = symbol ──────┤  one point shape, whatever the chart
                                             ▼

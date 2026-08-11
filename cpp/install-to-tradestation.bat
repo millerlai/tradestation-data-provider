@@ -352,9 +352,11 @@ echo === INSTALLED - %COPIED% file^(s^) ===
 echo   %DEST%
 echo.
 echo NEXT - RECOMPILE THE INDICATOR TOO. The DLL and the indicator are one
-echo   unit: the indicator binds EL_Init3 and checks EL_DllVersion, so a chart
-echo   still running the previously compiled indicator stops publishing rather
-echo   than sending anything wrong.
+echo   unit: the indicator binds EL_InitChart and checks EL_DllVersion, so a
+echo   chart still running the previously compiled indicator stops publishing
+echo   rather than sending anything wrong. A stale indicator resolves the
+echo   one-parameter EL_Init tombstone instead and reports rc=-6 - readable,
+echo   and the stack stays balanced, but that chart publishes nothing.
 echo.
 echo   Open EL\TS2Python_Exporter.el ^(EasyLanguage source^) in the TradeStation
 echo   Development Environment, Verify ^(F3^) to compile it, then apply it to a

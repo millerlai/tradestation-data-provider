@@ -749,11 +749,11 @@ def test_unambiguous_ts_str_says_nothing(caplog) -> None:
     assert not [r for r in caplog.records if "dst_ambiguous" in r.message]
 
 
-# ---- chart announcements (EL_Init hello) -----------------------------------
+# ---- chart announcements (EL_InitChart hello) -----------------------------------
 
 
 def _hello(**over: object) -> dict[str, object]:
-    """A complete hello frame, as EL_Init publishes it on CONTROL_TOPIC."""
+    """A complete hello frame, as EL_InitChart publishes it on CONTROL_TOPIC."""
     base: dict[str, object] = {
         "proto": 2,
         "seq": 1,
@@ -788,7 +788,7 @@ async def _drain_until_bar(provider, timeout: float = 1.0) -> Bar:
 async def test_control_topic_is_subscribed_by_connect_alone(zmq_inproc_bus) -> None:
     """Not optional, and not tied to the symbol list.
 
-    The publisher's EL_Init returns -7 and publishes NOTHING until it sees a
+    The publisher's EL_InitChart returns -7 and publishes NOTHING until it sees a
     subscriber on this topic. A consumer that only subscribed to its
     configured symbols would leave every TradeStation chart waiting forever,
     with the Print Log saying so and nothing else happening.

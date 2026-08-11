@@ -223,7 +223,7 @@ int __stdcall EL_DllVersion(void);
 
 // 綁定 publisher（每個 process 一次）並宣告這張圖。
 // 在有訂閱者之前回 -7 —— 見下節。
-int __stdcall EL_Init(
+int __stdcall EL_InitChart(
     const char* zmq_endpoint,
     const char* symbol, int category, int bar_type, int bar_interval);
 
@@ -244,11 +244,11 @@ Return codes：`0` 成功、`1` 這張圖已宣告過、`-1` 未初始化、`-2`
 
 socket 是 **XPUB**，不是 PUB。送出語意完全相同；差別在於訂閱會以可讀訊息回到 publisher，所以 DLL 有辦法知道有沒有人接上。
 
-`EL_Init` 在控制 topic `__ts2py__` 沒有訂閱者涵蓋之前，回 `-7` 且什麼都不發。這不是失敗 —— TradeStation 先開、consumer 後開就是常態。indicator 對任何負值 rc 都保持 `InitDone = False`，下一根 bar 再試。
+`EL_InitChart` 在控制 topic `__ts2py__` 沒有訂閱者涵蓋之前，回 `-7` 且什麼都不發。這不是失敗 —— TradeStation 先開、consumer 後開就是常態。indicator 對任何負值 rc 都保持 `InitDone = False`，下一根 bar 再試。
 
 它存在的理由是：PUB/SUB 在沒有訂閱者時丟棄一切且完全不回報。前一代的 init 只要 `bind()` 成功就回 `0`，於是 Print Log 印著「init ok」，而每一根 bar 都進了垃圾桶。
 
-成功時 `EL_Init` 會在 `__ts2py__` 發一個 **hello** frame，指名這張圖（`symbol`、`category`、`bar_type`、`bar_interval`）。DLL 記住每一張圖，並在訂閱者接上時把它們全部重新宣告一次，所以 consumer 重啟不需要動 TradeStation。訂閱比對用 **prefix**，與 ZMQ 的過濾規則一致，所以 consumer 用 `SUBSCRIBE ""` 也算數。
+成功時 `EL_InitChart` 會在 `__ts2py__` 發一個 **hello** frame，指名這張圖（`symbol`、`category`、`bar_type`、`bar_interval`）。DLL 記住每一張圖，並在訂閱者接上時把它們全部重新宣告一次，所以 consumer 重啟不需要動 TradeStation。訂閱比對用 **prefix**，與 ZMQ 的過濾規則一致，所以 consumer 用 `SUBSCRIBE ""` 也算數。
 
 ### 墓碑，以及這一版開的那個洞
 
@@ -258,7 +258,7 @@ socket 是 **XPUB**，不是 PUB。送出語意完全相同；差別在於訂閱
 
 | 部署組合 | 攔截點 | 結果 |
 | --- | --- | --- |
-| 新 `.ELD` + 舊 DLL | 舊 DLL 沒有 5 參數的 `EL_Init` 匯出 | `DefineDLLFunc` 在 Verify 階段就失敗，錯誤訊息指名道姓 |
+| 新 `.ELD` + 舊 DLL | 舊 DLL 沒有 5 參數的 `EL_InitChart` 匯出 | `DefineDLLFunc` 在 Verify 階段就失敗，錯誤訊息指名道姓 |
 | 舊 `.ELD` 呼叫 `EL_PublishTick`/`Bar` + 新 DLL | 墓碑回 `-6` | Print Log 出現 `rc=-6`，一次都不會 publish |
 | 新 `.ELD` + 未來某版 DLL | indicator 端的 `EL_DllVersion()` latch | `EL_DllVersion` 沒有參數，呼叫永遠安全；回值 `<> 3` 就 latch 停止發布 |
 | **舊 `.ELD` 呼叫單參數 `EL_Init` + 新 DLL** | **沒有** | **堆疊損毀；TradeStation 崩潰或行為異常** |
@@ -267,13 +267,13 @@ socket 是 **XPUB**，不是 PUB。送出語意完全相同；差別在於訂閱
 
 墓碑仍然**必須留在 `TS2Python.def` 裡**：刪掉匯出只會把 `-6` 換成一個沒有上下文的 symbol 解析失敗。
 
-DLL 在第一次成功 `EL_Init` 時，**把自己 pin 在 host process 的位址空間裡**（Windows `GetModuleHandleExW` 加 `GET_MODULE_HANDLE_EX_FLAG_PIN`）。這是為了避免 TradeStation 呼叫 `FreeLibrary` 觸發 C runtime 的 static destructor — 在 loader lock 下 `zmq_ctx_term()` join ZMQ I/O thread 會 deadlock TradeStation。`EL_Shutdown()` 僅供 standalone test harness 使用。
+DLL 在第一次成功 `EL_InitChart` 時，**把自己 pin 在 host process 的位址空間裡**（Windows `GetModuleHandleExW` 加 `GET_MODULE_HANDLE_EX_FLAG_PIN`）。這是為了避免 TradeStation 呼叫 `FreeLibrary` 觸發 C runtime 的 static destructor — 在 loader lock 下 `zmq_ctx_term()` join ZMQ I/O thread 會 deadlock TradeStation。`EL_Shutdown()` 僅供 standalone test harness 使用。
 
 ## 獨立測試
 
 不用 TradeStation 就能驗證 wire end-to-end：harness 直接餵 Python smoke subscriber。
 
-**subscriber 必須先跑 —— 這是硬性要求，不是避免競態的建議。** `EL_Init` 在沒有訂閱者時回 `-7`，所以沒開 SUB 的 harness 會等到 `--subscriber-timeout-ms`（預設 15000）逾時後以非零碼退出。
+**subscriber 必須先跑 —— 這是硬性要求，不是避免競態的建議。** `EL_InitChart` 在沒有訂閱者時回 `-7`，所以沒開 SUB 的 harness 會等到 `--subscriber-timeout-ms`（預設 15000）逾時後以非零碼退出。
 
 ```powershell
 # Terminal A — subscriber 必須先起來

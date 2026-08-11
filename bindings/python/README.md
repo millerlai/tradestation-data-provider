@@ -155,7 +155,7 @@ uv run python examples/04_replay_fixtures.py --fixture bars
 not have to be TradeStation — the C++ harness drives the DLL directly:
 
 ```powershell
-# Terminal A — from bindings\python. THE SUBSCRIBER STARTS FIRST: EL_Init
+# Terminal A — from bindings\python. THE SUBSCRIBER STARTS FIRST: EL_InitChart
 # returns -7 and publishes nothing until one is attached, so the harness
 # would otherwise wait out its timeout and exit non-zero. (It used to be the
 # other way round, with --warmup-ms buying time to attach — a PUB socket

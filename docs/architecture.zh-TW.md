@@ -38,7 +38,7 @@ repo 真實發生過：舊版規格文件描述的欄位早已與 DLL 實際輸�
 | **聚合、重採樣、回補、快取** | `HistoryStore` 只讀，不推算。詳見 §7.6 與 §11。 |
 | **時間框架詞彙 / 命名映射** | `bar_type`/`bar_interval` 是 EasyLanguage 自己的詞，逐字上 wire、逐字入庫，沒有 `"5m"`/`"1d"` 這類名字的翻譯層。 |
 | **非 Windows producer** | 受 TradeStation Desktop（32-bit Windows process）限制。Subscriber 端不受此限，Python binding 支援 Windows/macOS/Linux。 |
-| **相容舊協定** | Wire `proto` / DLL ABI 恆為 **2**，沒有需要相容的舊版本。舊 payload 在結構上就無法通過版本閘門（§5.4）。 |
+| **相容舊協定** | Wire `proto` 恆為 **2**、DLL ABI 為 **4**，沒有需要相容的舊版本。舊 payload 在結構上就無法通過版本閘門（§5.4）。 |
 
 ---
 
@@ -55,9 +55,9 @@ flowchart TB
         direction TB
         TS["TradeStation Desktop<br/>32-bit process"]
         EL["EL Exporter Indicator<br/>TS2Python_Exporter.el"]
-        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 3"]
+        DLL["TS2Python.dll<br/>C++ · Win32 x86 · ABI 4"]
         TS -->|"每個 chart 掛一份 indicator"| EL
-        EL -->|"DefineDLLFunc __stdcall<br/>EL_Init → EL_Publish"| DLL
+        EL -->|"DefineDLLFunc __stdcall<br/>EL_InitChart → EL_Publish"| DLL
     end
 
     subgraph WIRE["② Wire Contract — 本 repo 真正的產品"]
@@ -127,9 +127,9 @@ repo 根沒有 `config/`——symbols.yaml / sinks.yaml 屬於 Python binding �
 關鍵行為：
 
 - **Zero state**：所有 symbol/數值都來自 TS 內建變數，一份編譯好的 indicator 涵蓋每一種圖表。
-- **Version latch**：`EL_Init` 成功後立刻檢查 `EL_DllVersion()`；版本不符則整根停止
+- **Version latch**：`EL_InitChart` 成功後立刻檢查 `EL_DllVersion()`；版本不符則整根停止
   publish 並記錄，不會用不相容的簽章去呼叫任何 publish 匯出。
-- **沒人在聽就不發布**：`EL_Init` 在無訂閱者時回 `-7`，indicator 對任何負值 rc 都保持
+- **沒人在聽就不發布**：`EL_InitChart` 在無訂閱者時回 `-7`，indicator 對任何負值 rc 都保持
   `InitDone = False`，所以下一根 bar 會再試一次。TradeStation 先開、consumer 後開是
   常態，這條路就是為它設計的。Print Log **只說一次**——這是一個 latch，因為重試每根
   bar 都在跑，一張開著過夜的圖會把 log 洗掉。
@@ -144,44 +144,49 @@ repo 根沒有 `config/`——symbols.yaml / sinks.yaml 屬於 Python binding �
 
 | 職責 | 實作要點 |
 | --- | --- |
-| **Init**（`EL_Init`） | 5 個參數——endpoint 加上這張圖的 `symbol`/`category`/`bar_type`/`bar_interval`。首次呼叫 bind 一個 **XPUB** socket（`SNDHWM=100000`、`linger=0`，以微秒精度戳新的 `g_sid`、清空 `g_seq`）；登記這張圖；排空 XPUB 的訂閱佇列。控制 topic 沒有訂閱者涵蓋時回 **`-7` 且什麼都不發**；本次呼叫把圖送上 wire 回 `0`；該圖先前已宣告過回 `1` |
-| **Chart registry / 重播** | 每一張呼叫過 `EL_Init` 的圖都被記住。**每收到一則涵蓋控制 topic 的訂閱訊息，就全部重新宣告一次**——`EL_Init` 一張圖只跑一次，少了這個機制，consumer 重啟後永遠學不回工作區有什麼 |
+| **Init**（`EL_InitChart`） | 5 個參數——endpoint 加上這張圖的 `symbol`/`category`/`bar_type`/`bar_interval`。首次呼叫 bind 一個 **XPUB** socket（`SNDHWM=100000`、`linger=0`，以微秒精度戳新的 `g_sid`、清空 `g_seq`）；登記這張圖；排空 XPUB 的訂閱佇列。控制 topic 沒有訂閱者涵蓋時回 **`-7` 且什麼都不發**；本次呼叫把圖送上 wire 回 `0`；該圖先前已宣告過回 `1` |
+| **Chart registry / 重播** | 每一張呼叫過 `EL_InitChart` 的圖都被記住。**每收到一則涵蓋控制 topic 的訂閱訊息，就全部重新宣告一次**——`EL_InitChart` 一張圖只跑一次，少了這個機制，consumer 重啟後永遠學不回工作區有什麼 |
 | **`ZMQ_XPUB_VERBOSE`** | bind 時設定，而且是關鍵。觸發條件是訂閱訊息本身，**不是**訂閱者數的 0→1 邊緣：重啟中的 consumer 可能與前一個重疊幾毫秒，libzmq 因此從未看到該 topic 掉到零，用邊緣判斷時重連的 consumer **一個 hello 都收不到**（實測；同一個測試隔六秒再連則兩個都收到）。預設 XPUB 每個 topic 只回報第一個訂閱者，會把重疊的那一個吃掉。代價：同時訂閱兩個都涵蓋控制 topic 的 consumer 會收到重複 hello——重複在消費端是冪等的，漏掉則不是 |
 | **訂閱比對** | XPUB 以 `0x01`/`0x00` + topic 回報訂閱。控制 topic 以 **prefix** 比對算作已訂閱，與 ZMQ 的過濾規則一致——用字串完全相等判斷會讓 `SUBSCRIBE ""`（`record.py` 的預設行為）看起來像沒人在聽，把整個 publisher 卡死 |
 | **Publish**（`EL_Publish`） | 16 個參數，`__stdcall`；先 narrow 五個 quantity（`double`→`int64`，範圍檢查 `±9.0e15`，失敗回 `-4` 而不是 clamp）；再取號（`reserve_seq`，即使後續送出失敗也消耗）；`snprintf` 組 payload（768 bytes 緩衝區）；2-frame ZMQ 送出 |
 | **Quote null 化** | `InsideBid`/`InsideAsk` ≤ 0（含 NaN）一律轉成 JSON `null`，把「沒有報價」這件事說在 wire 上，而不是留給每個 binding 各自記得 0 代表什麼 |
 | **DLL pinning** | 首次 init 成功後用 `GetModuleHandleExW` 把自己釘進 process 位址空間，避免 TradeStation `FreeLibrary` 觸發 `zmq_ctx_term()` 在 loader lock 下死鎖 |
-| **墓碑匯出** | `EL_PublishTick`、`EL_PublishBar` 只 `return -6;`，見 §4.3 |
+| **墓碑匯出** | `EL_Init`（單參數）、`EL_PublishTick`、`EL_PublishBar` 只 `return -6;`，且各自維持前一代的簽章，見 §4.3 |
 
 ### 4.3 DLL ABI 版本與相容性矩陣
 
-`EL_DllVersion()` 回傳 `3`，而 wire `proto` 維持 `2`。兩者是不同的數字，理由是：ABI 變了
-（`EL_Init` 的簽章）、多了一個走獨立 topic 的控制 frame，但 point frame 一個 byte 都沒變，
-所有已錄製的 fixture 全部繼續有效。
+`EL_DllVersion()` 回傳 `4`，而 wire `proto` 維持 `2`。兩者是不同的數字，理由是：ABI 變了
+（init 匯出的簽章，後來是它的名字）、多了一個走獨立 topic 的控制 frame，但 point frame
+一個 byte 都沒變，所有已錄製的 fixture 全部繼續有效。
 
-**這個 repo 撐了三個版本的那條安全性質，在這一版被刻意放棄了，必須說清楚。** 規則本來是：
-換過語意的名字絕不重用。`EL_PublishTick`/`EL_PublishBar` 曾經沿用前一代名字卻換了簽章，
-`__stdcall` 由 callee 清堆疊，簽章不符的呼叫會**弄壞堆疊**而不是回傳錯誤。所以 init 每次
-改簽章都跟著改名（`EL_Init` → `EL_Init2` → `EL_Init3`），而 indicator 的每一個 publish
-都在「init 成功」的閘門後面。
+**這個 repo 依賴的規則是：換過語意的名字絕不重用。** `EL_PublishTick`/`EL_PublishBar`
+曾經沿用前一代名字卻換了簽章，`__stdcall` 由 callee 清堆疊，簽章不符的呼叫會**弄壞堆疊**
+而不是回傳錯誤。所以 init 每次改簽章都跟著改名（`EL_Init` → `EL_Init2` → `EL_Init3`），
+而 indicator 的每一個 publish 都在「init 成功」的閘門後面。
 
-這一版把 `EL_Init` 收回來重用，參數從 1 個變成 5 個。`DefineDLLFunc` 只按名字解析，所以
-舊 `.ELD` **解析得到、呼叫得下去、然後在 init 裡就弄壞堆疊**——比以前更早，而且沒有任何
-回傳碼。被呼叫端看不見呼叫端推了幾個參數，這一側的程式碼補不起來。
+**ABI 3 破壞了這條規則**，把 `EL_Init` 收回來重用成 5 參數的 init。`DefineDLLFunc` 只按
+名字解析，所以舊 `.ELD` 解析得到、呼叫得下去、然後在 init 裡就弄壞堆疊 —— 沒有任何回傳
+碼，被呼叫端也看不見呼叫端推了幾個參數。
 
-`EL_PublishTick`/`EL_PublishBar` 仍是墓碑，但要明白它們現在**擋不到任何東西**：舊 `.ELD`
-在 `EL_Init` 就死了，走不到這兩個名字。留著只是因為刪掉匯出會讓失敗更難讀。
+**ABI 4 把它修回來了。** init 的匯出名是 `EL_InitChart`，而 `EL_Init` 回到**單參數**的
+墓碑並回 `-6`。舊名字釘在舊 arity 上，舊 `.ELD` 的呼叫才會平衡而不是弄壞堆疊。裝飾名
+就是證據：
+
+```
+EL_Init      = _EL_Init@4        <- 1 個參數；舊 .ELD 打進來會平衡
+EL_InitChart = _EL_InitChart@20  <- 5 個參數；只有新 .ELD 找得到
+```
 
 | 部署情境 | 攔截點 | Operator 看到什麼 |
 | --- | --- | --- |
-| 新 `.ELD` + 舊（ABI-1/2）DLL | 舊 DLL 沒有 5 參數的 `EL_Init` 匯出 | `DefineDLLFunc` 在 Verify 階段就報錯，指名 `EL_Init` |
+| 新 `.ELD` + 舊（ABI-1/2/3）DLL | 舊 DLL 沒有 `EL_InitChart` 匯出 | `DefineDLLFunc` 在 Verify 階段就報錯，指名 `EL_InitChart` |
 | 新 `.ELD` + 版本不符的新 DLL | indicator 的 `EL_DllVersion()` latch | 版本不符訊息，indicator 停止發布 |
 | 舊 `.ELD`（呼叫 `EL_PublishTick`/`Bar`）+ 新 DLL | 墓碑回 `-6` | Print Log 出現 `rc=-6`，一次都不會 publish |
-| **舊 `.ELD`（呼叫單參數 `EL_Init`）+ 新 DLL** | **無。名字解析得到，`__stdcall` 弄壞堆疊** | **TradeStation 崩潰或行為異常** |
+| 舊 `.ELD`（呼叫單參數 `EL_Init`）+ 新 DLL | 單參數 `EL_Init` 墓碑回 `-6` | Print Log 出現 `rc=-6`，一次都不會 publish。**堆疊平衡，不會崩潰** |
 
-前三個方向是**可讀的失敗**。**第四個不是**，而且它是這一版新開的。
-**DLL 與 `.ELD` 必須成對安裝並重新 Verify**——這個流程現在是 operator 與崩潰之間唯一的
-一道防線，而以前那道防線是 ABI 本身。
+四個方向現在**都是可讀的失敗**。最後一列在 ABI 3 時是一個攔不住的崩潰，改名把它關上了。
+**DLL 與 `.ELD` 仍必須成對安裝並重新 Verify** —— 差別在於裝錯現在的代價是一行 log，
+而不是一次 TradeStation 崩潰。
 
 ---
 
@@ -194,8 +199,8 @@ repo 根沒有 `config/`——symbols.yaml / sinks.yaml 屬於 Python binding �
 | Pattern | ZeroMQ **XPUB/SUB**，逐訊息 fire-and-forget，無送達保證 |
 | Publisher | DLL `bind`，預設 `tcp://127.0.0.1:5555` |
 | Subscriber | 普通的 `SUB`。`connect` 同一 endpoint，逐一精確訂閱 symbol，**外加無條件訂閱控制 topic** |
-| 為什麼是 XPUB | 送出語意與 PUB 完全相同，但訂閱事件會以可讀訊息回到 publisher——那是 DLL 唯一能回答「有沒有人在聽」的途徑，也是 `EL_Init` 的 `-7` 賴以成立的基礎 |
-| Topic | `<symbol>` 送 point（`EL_Publish`）；`__ts2py__` 送 chart 宣告（`EL_Init`）。**topic 就是鑑別子**，沒有新增 `kind` 欄位 |
+| 為什麼是 XPUB | 送出語意與 PUB 完全相同，但訂閱事件會以可讀訊息回到 publisher——那是 DLL 唯一能回答「有沒有人在聽」的途徑，也是 `EL_InitChart` 的 `-7` 賴以成立的基礎 |
+| Topic | `<symbol>` 送 point（`EL_Publish`）；`__ts2py__` 送 chart 宣告（`EL_InitChart`）。**topic 就是鑑別子**，沒有新增 `kind` 欄位 |
 | Frame 數 | 2（`ZMQ_SNDMORE`）：frame 1 = UTF-8 topic，frame 2 = UTF-8 JSON payload |
 | 高水位 | Publisher `SNDHWM=100000`；Python binding `RCVHWM=1_000_000` |
 | Prefix match 陷阱 | ZMQ `SUBSCRIBE` 是前綴比對，訂閱 `SPY` 也會收到 `SPYG`——binding **必須**在收訊後以字串完全相等再過濾一次（`contract/semantics.md` §5）。DLL 判斷控制 topic 有沒有訂閱者時用的是同一條前綴規則，所以 `SUBSCRIBE ""` 算數 |
@@ -250,14 +255,14 @@ repo 根沒有 `config/`——symbols.yaml / sinks.yaml 屬於 Python binding �
 
 | Code | 意義 | 由誰回傳 |
 | --- | --- | --- |
-| `0` | 成功——`EL_Init` 是指本次呼叫宣告了這張圖 | 全部 |
-| `1` | 這張圖在本 session 已宣告過，冪等 no-op | `EL_Init` |
+| `0` | 成功——`EL_InitChart` 是指本次呼叫宣告了這張圖 | 全部 |
+| `1` | 這張圖在本 session 已宣告過，冪等 no-op | `EL_InitChart` |
 | `-1` | 未初始化就呼叫 publish | `EL_Publish` |
-| `-2` | ZMQ 送出失敗（觸及 high-water mark 或例外） | `EL_Init` `EL_Publish` |
-| `-3` | init 的 bind/socket 建立失敗（最常見：port 已被佔用） | `EL_Init` |
-| `-4` | 參數無效：null 指標；**量值超出 ±9.0e15**（略小於 2^53，`double` 能精確表示的最大整數——**不是** `int64` 的範圍，且是拒收而非 clamp）；或 **payload 被 `snprintf` 截斷** | `EL_Init` `EL_Publish` |
+| `-2` | ZMQ 送出失敗（觸及 high-water mark 或例外） | `EL_InitChart` `EL_Publish` |
+| `-3` | init 的 bind/socket 建立失敗（最常見：port 已被佔用） | `EL_InitChart` |
+| `-4` | 參數無效：null 指標；**量值超出 ±9.0e15**（略小於 2^53，`double` 能精確表示的最大整數——**不是** `int64` 的範圍，且是拒收而非 clamp）；或 **payload 被 `snprintf` 截斷** | `EL_InitChart` `EL_Publish` |
 | `-6` | ABI 不符——呼叫端是早於本協定的 `.ELD` | 兩個墓碑匯出 |
-| `-7` | **尚無訂閱者。可重試，而且是啟動時的正常狀態** | `EL_Init` |
+| `-7` | **尚無訂閱者。可重試，而且是啟動時的正常狀態** | `EL_InitChart` |
 
 `-7` 不是失敗，而且它補掉了這張表上最大的一個洞。上面每一個碼回報的都是 publisher
 **做了什麼**，沒有一個能回報「根本沒有人在接」。PUB/SUB 在沒有訂閱者時丟棄一切且不出聲，
@@ -620,7 +625,7 @@ sequenceDiagram
 
 | 可調項 | 位置 | 說明 |
 | --- | --- | --- |
-| 發布 endpoint | EL indicator 的 `ZMQEndpoint` input（`EL/TS2Python_Exporter.el`），預設 `tcp://127.0.0.1:5555` | 這是 producer 端 endpoint **唯一**的設定處——DLL 綁定的就是 indicator 傳給 `EL_Init` 的值。若 TradeStation 已佔用該 port，init 會回 `-3`（§5.4），要改的就是這個 input |
+| 發布 endpoint | EL indicator 的 `ZMQEndpoint` input（`EL/TS2Python_Exporter.el`），預設 `tcp://127.0.0.1:5555` | 這是 producer 端 endpoint **唯一**的設定處——DLL 綁定的就是 indicator 傳給 `EL_InitChart` 的值。若 TradeStation 已佔用該 port，init 會回 `-3`（§5.4），要改的就是這個 input |
 | 發布開關、錯誤記錄 | indicator 的 `Enabled` / `LogErrors` inputs | |
 | 逐筆 publish 量值 dump | indicator 的 `LogPublish` input，預設關閉 | 每次呼叫印出全部五個量值保留字——想弄清楚某種圖表實際送出什麼時就開這個 |
 
