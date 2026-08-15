@@ -9,6 +9,87 @@ changes; patch releases (`0.x.Y`) will not.
 
 ## [Unreleased]
 
+### Changed — BREAKING: publishers connect through `ts2py-hub`; nobody binds but the hub
+
+TradeStation 10 gives **every chart its own `orchart.exe`**, each loading its own copy of
+the DLL with its own globals. `bind()` is exclusive, so the first chart took port 5555 and
+every other one returned `-3` for the life of the session. Measured 2026-08-14: 25
+configured symbols, **6 charts publishing**, all four core breadth indices dark. Nothing in
+the DLL could recover — the occupant was a sibling process of the same TradeStation
+session, which is exactly what `contract/error_codes.md` used to tell the operator to kill.
+
+Wire `proto` stays **2** and `EL_DllVersion()` stays **4**: the point frame is byte-for-byte
+unchanged, no export was added or renamed, and every recorded fixture still passes.
+
+- **The DLL `connect`s; `ts2py-hub` binds both sides** — XSUB `:5555` facing the chart
+  processes, XPUB `:5556` facing consumers. `bind()` is exclusive and `connect()` is not, so
+  the side that must tolerate "many of them" is the publisher. With both ends connecting,
+  something has to bind.
+
+  Publishers keep 5555 on purpose: `ZMQEndpoint` is an indicator **input**, so changing it
+  would mean re-adding and re-Verifying every chart in the workspace. **Only the DLL file is
+  replaced; no chart is touched.** Consumers move to 5556 — one line of config each.
+
+- **The hub is mandatory and always-on.** While it is down, bars are lost and not
+  backfilled. Both ends report it (`-10` per chart in the Print Log, `wire_silent` on a cold
+  consumer), but neither brings the bars back, so Task Scheduler at logon with
+  restart-on-failure is part of the install (`README.md`).
+
+- **Four undocumented libzmq behaviours appear only on this topology**, none of them in
+  zguide or `zmq_proxy(3)`, each one silently disabling a guarantee this repo already had.
+  They are tabulated with source citations in `contract/wire.md` because every workaround
+  they justify looks redundant in isolation: a brand-new pipe's first write is stranded;
+  XSUB's subscription trie is refcounted, so replaying a subscribe stops unsubscribes
+  propagating and **kills `-10`**; `ZMQ_XPUB_VERBOSE` reports every subscribe but only the
+  last unsubscribe; and a connect-side pipe survives its peer's death.
+
+  The last of those is why the DLL now carries a **socket monitor**: without it a dead hub
+  is invisible and `EL_Publish` returns `0` for every bar reaching nobody. Measured, 200 000
+  consecutive sends against a dead peer produced not one failure — XPUB past `SNDHWM` drops
+  silently, and the indicator only prints on `rc < 0`. With the monitor, a hub killed 6s
+  into a 16s stress run turned `sent=320 failed=0` into `sent=114 failed=206`.
+
+- **Gap detection is keyed `(sid, topic)`, never topic alone**, and expectations are never
+  evicted when another `sid` appears (`contract/semantics.md` §6.3). N chart processes means
+  N `sid`s interleaved on one socket — and the control topic `__ts2py__` carries all of them
+  at once as its steady state. A scalar `sid` re-baselines on every frame, so no gap is ever
+  reported and `messages_lost` reads 0 forever: a stream that looks healthy while detection
+  is dead. **A consumer that skips this change gets no error, only a silently useless
+  counter.**
+
+- `-3` no longer means "the port is in use" — the DLL connects now. `-7` covers "the hub is
+  not running". `-10` now also fires on hub death.
+
+### Added — `on_partial_bar`: the developing bar, as a callback only
+
+Consumers could only see **closed** bars, so a 5-minute chart said nothing for five minutes.
+`IngestionRuntime` now takes an optional `on_partial_bar` callback, fired on every frame
+that refines the bar currently in the buffer.
+
+It is deliberately **not** a sink and never reaches `MarketSnapshot`, `SinkPipeline` or
+storage: a developing bar on disk is indistinguishable from a published one. Neither bar
+callback may be `async def` — the constructor raises rather than let a coroutine be built
+and dropped unrun. The wire carries no "closed" signal at all; partial vs closed is entirely
+this binding's inference, which is why `contract/semantics.md` says nothing about it.
+
+### Changed — DLL ABI 4: the init export is `EL_InitChart`, restoring the signature gate
+
+ABI 3 (below) gave up the rule that a name whose meaning changed is never reused, and the
+hazard it documented was real: an `.ELD` bound to the superseded one-parameter `EL_Init`
+resolved the five-parameter export, called it, and corrupted the stack — no return code,
+nothing on the DLL side able to detect it.
+
+- **Init is now `EL_InitChart`**, and `EL_Init` is a one-parameter tombstone returning `-6`.
+  The old name pinned to the old arity is what makes a stale call balance. Verify with the
+  decorated names: `_EL_Init@4` vs `_EL_InitChart@20`. `EL_DllVersion()` returns `4`.
+- **All four incompatible deployment combinations are now readable failures** rather than a
+  crash — tabulated in `contract/wire.md`.
+- Also fixes a multi-chart init leak: a failed init used to leak an already-started
+  `zmq::context_t` per retry, per bar, per chart.
+
+> The ABI 3 entry below is kept as the record of that step. It was superseded before
+> release: `EL_Init` is **not** the five-parameter init any more.
+
 ### Changed — DLL ABI 3: `EL_Init` announces its chart and waits for a listener
 
 **Breaking, and it breaks in the one way this repo has always designed against:
