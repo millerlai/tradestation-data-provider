@@ -123,7 +123,9 @@ from tradestation_data.sinks.parquet import ParquetBarSink
 
 async def main() -> None:
     runtime = IngestionRuntime(
-        provider=TradeStationELProvider(endpoint="tcp://127.0.0.1:5555"),
+        # hub 的 XPUB port。5555 是它面向 publisher 的 XSUB 側 ——
+        # SUB 連過去是不相容的 socket 配對，唯一的症狀是靜默。
+        provider=TradeStationELProvider(endpoint="tcp://127.0.0.1:5556"),
         symbols=["SPY", "QQQ"],
         snapshot=MarketSnapshot(),
         sinks=SinkPipeline([
@@ -167,13 +169,19 @@ uv run python examples/04_replay_fixtures.py --fixture bars
 C++ harness 可以直接驅動 DLL：
 
 ```powershell
-# 終端機 A —— 在 bindings\python 執行。subscriber 要先跑：EL_InitChart 在沒有
-# 訂閱者時回 -7 且什麼都不發，否則 harness 只會空等到逾時然後以非零碼退出。
+# 終端機 A —— hub 要最先跑，而且不是選配。DLL 與 subscriber 兩端都是 connect，
+# 所以必須有人 bind，那就是 hub。少了它兩端誰也連不上誰，而且不會有任何錯誤：
+# harness 空等到逾時後以 -7 退出，subscriber 就只是坐在那裡。
+tradestation-data-hub
+
+# 終端機 B —— 在 bindings\python 執行。subscriber 排第二，仍然要在 harness 之前：
+# EL_InitChart 在訂閱還沒傳到之前回 -7 且什麼都不發。
 #（順序以前是反過來的，用 --warmup-ms 留時間給你接上 —— PUB socket 在沒有
 # subscriber 時送出的東西會被靜默丟棄；現在改成 publisher 拒絕開始，而不是丟。）
 uv run python examples\01_print_events.py --count 6
 
-# 終端機 B —— 在 repo root 執行。這個路徑是 cpp\build.bat（與 Visual Studio）
+# 終端機 C —— 在 repo root 執行。注意它打的是 hub 的**前台**（5555），
+# 而終端機 B 連的是後台（5556）。這個路徑是 cpp\build.bat（與 Visual Studio）
 # 的輸出位置；若用 CMake preset 建置，則在 cpp\build\x86-release\Release\。
 cpp\Release\TS2Python_TestHarness.exe --mode smoke
 ```

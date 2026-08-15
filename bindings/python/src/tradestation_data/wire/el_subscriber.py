@@ -93,26 +93,70 @@ def _quantities(data: dict[str, Any]) -> dict[str, int]:
 
 
 class _SequenceTracker:
-    """Per-symbol gap detection.
+    """Per-(sid, topic) gap detection.
 
     PUB/SUB drops silently at both high-water marks, so a missing message
     looks exactly like a quiet market. The publisher stamps a per-symbol
-    monotonic ``seq`` and a per-session ``sid``; comparing them against what
+    monotonic ``seq`` and a per-process ``sid``; comparing them against what
     we expected is the only way to notice loss.
+
+    Keyed by (sid, topic) rather than by topic alone, because the transport
+    fans in from N TradeStation chart processes at once (one `orchart.exe`
+    per open chart), each minting its own `sid`, all interleaved on this one
+    socket. A single scalar `sid` — correct when there was exactly one
+    publisher — read every OTHER process's frame as "the publisher
+    restarted": `_expected` was cleared on every single frame, every frame
+    re-established a fresh baseline, and no gap was ever reported.
+    `messages_lost` read 0 forever — a stream that reads as perfect health
+    while detection is silently dead. See contract/semantics.md §6.3.
 
     Sequences are per symbol because a subscriber may filter on one topic —
     a global counter's gaps would be indistinguishable from traffic it never
     asked for. ``tick`` and ``bar`` share a symbol's counter since they
     interleave on the same topic.
 
-    ``sid`` stays None until a sequenced frame arrives, which is what lets
-    the provider tell "nothing was lost" from "loss cannot be detected here".
+    A topic can have MORE THAN ONE LIVE sid at once, not just a superseded
+    one replaced by a current one. ``__ts2py__`` is not the exception, it is
+    the ordinary case: every open chart process sends its hello there, so N
+    sids are live on that one topic simultaneously, interleaved frame by
+    frame, for as long as N charts are open — this is steady state, not a
+    transition. The same happens on a symbol topic when two TradeStation
+    processes both have that chart open. Remembering only "the last sid
+    seen" and discarding its predecessor's expectation on every alternation
+    reintroduces the exact bug this class exists to fix, just narrowed to
+    topics with more than one live publisher instead of every topic: A's
+    frame evicts B's baseline, B's next frame evicts A's, and every single
+    frame re-baselines instead of ever comparing against one. So this class
+    remembers every sid ever seen per topic, and prunes nothing — see
+    ``observe()``.
     """
 
     def __init__(self) -> None:
-        self.sid: int | None = None
-        self._expected: dict[str, int] = {}
+        # Every sid ever seen publishing each topic. Sets, not "the last
+        # sid": see the class docstring for why a scalar is unsound here.
+        self._sids_by_topic: dict[str, set[int]] = {}
+        # Expected next seq, keyed by the (sid, topic) pair that produced
+        # it. Entries are NEVER removed. A topic can have more than one LIVE
+        # sid at once (see above), so there is no sid whose entry is ever
+        # safe to evict on sight — the previous version tried, by popping
+        # the just-superseded sid's entry, and that was the bug. A sid that
+        # genuinely stops publishing just leaves its entry unmatched
+        # forever; the cost is one int per (sid, topic) ever observed, which
+        # for a consumer running a year across daily TradeStation restarts
+        # is a few thousand entries — noise next to the alternative.
+        self._expected: dict[tuple[int, str], int] = {}
         self.messages_lost = 0
+
+    @property
+    def gap_detection_available(self) -> bool:
+        """True once at least one (sid, topic) pair has been observed.
+
+        `_sids_by_topic` only ever gains entries, so non-empty means exactly
+        "a sequenced frame has arrived, for some topic, at some point" —
+        what the provider needs to tell "nothing was lost" from "loss
+        cannot be detected here".
+        """
+        return bool(self._sids_by_topic)
 
     def observe(self, symbol: str, seq: int, sid: int) -> None:
         """Record one message, accumulating any gap into ``messages_lost``.
@@ -122,25 +166,37 @@ class _SequenceTracker:
         return value would look like a hook something downstream acts on,
         and nothing does.
         """
-        if sid != self.sid:
-            # New publisher session: counters restarted at the source, so a
-            # low seq here is a restart rather than 4 billion lost messages.
-            if self.sid is not None:
+        seen = self._sids_by_topic.setdefault(symbol, set())
+        if sid not in seen:
+            if seen:
+                # A sid we have not seen before is now publishing a topic
+                # that already had at least one other sid. That fact alone
+                # does not say WHY: it is identical on the wire whether this
+                # topic's one process restarted (old sid gone, new one
+                # replacing it) or a second process joined it (old sid still
+                # live too, e.g. two TradeStation processes with the same
+                # chart open) — `seq` cannot tell the two apart, so neither
+                # does this log. `known_sids` (before adding this one) is
+                # everything already on record for the topic; read growth
+                # over shrinkage as the more likely story on `__ts2py__`,
+                # where N sids alive at once is the normal steady state.
                 log.info(
                     "publisher_session_changed",
-                    extra={"old_sid": self.sid, "new_sid": sid, "symbol": symbol},
+                    extra={"topic": symbol, "new_sid": sid, "known_sids": sorted(seen)},
                 )
-            self.sid = sid
-            self._expected = {}
+            seen.add(sid)
 
-        expected = self._expected.get(symbol)
-        self._expected[symbol] = seq + 1
+        key = (sid, symbol)
+        expected = self._expected.get(key)
+        self._expected[key] = seq + 1
 
         if expected is None:
-            # First message seen for this symbol. A late subscriber joining
-            # at seq=21 did not lose 20 messages — it was not listening for
-            # them. Establish the baseline silently.
-            log.debug("sequence_baseline", extra={"symbol": symbol, "seq": seq})
+            # First message seen for this (sid, topic) pair. A late
+            # subscriber joining at seq=21 did not lose 20 messages — it was
+            # not listening for them. Establish the baseline silently,
+            # whether this is a brand-new topic or a new sid joining one
+            # that is already live.
+            log.debug("sequence_baseline", extra={"symbol": symbol, "seq": seq, "sid": sid})
             return
 
         if seq == expected:
@@ -151,9 +207,9 @@ class _SequenceTracker:
             # replay rather than reordering. Do not rewind the expectation.
             log.warning(
                 "sequence_regressed",
-                extra={"symbol": symbol, "seq": seq, "expected": expected},
+                extra={"symbol": symbol, "seq": seq, "expected": expected, "sid": sid},
             )
-            self._expected[symbol] = expected
+            self._expected[key] = expected
             return
 
         lost = seq - expected
@@ -166,6 +222,7 @@ class _SequenceTracker:
                 "received": seq,
                 "lost": lost,
                 "lost_total": self.messages_lost,
+                "sid": sid,
             },
         )
 
@@ -217,7 +274,10 @@ class TradeStationELProvider:
 
     def __init__(
         self,
-        endpoint: str = "tcp://127.0.0.1:5555",
+        # The hub's XPUB port. 5555 is the hub's XSUB side, where the chart
+        # processes connect — a SUB pointed there is an incompatible socket
+        # pair, which shows up as silence rather than an error.
+        endpoint: str = "tcp://127.0.0.1:5556",
         *,
         context: zmq.asyncio.Context | None = None,
     ) -> None:
@@ -229,10 +289,25 @@ class TradeStationELProvider:
         self._closed = False
         self._seq = _SequenceTracker()
         self._frames_refused = 0
+        # Every frame taken off the socket, hello and point alike, counted
+        # before any parsing or filtering. See `frames_received` below.
+        self._frames_received = 0
         # Charts the publisher has announced: (symbol, bar_type, bar_interval)
         # -> category. Exposed for tests and for anything that wants to know
-        # what is actually attached rather than what was configured.
+        # what is actually attached rather than what was configured. The key
+        # deliberately excludes `sid` — this property answers "what charts
+        # are attached", and chart identity does not include which publisher
+        # process attached it.
         self._announced_charts: dict[tuple[str, int, int], int] = {}
+        # Which sids have announced each chart identity. A chart appearing
+        # under a second, different sid means two TradeStation processes
+        # have it open — both publish, so every point on that topic arrives
+        # twice, and nothing in `seq` can reveal it (each process's stream
+        # is internally contiguous). Tracked as a set rather than "the last
+        # sid" so a chart's original sid re-announcing (the ordinary hub
+        # replay-on-attach case) never re-triggers the warning; only a
+        # genuinely new sid for a chart already claimed does.
+        self._chart_sids: dict[tuple[str, int, int], set[int]] = {}
 
     @property
     def announced_charts(self) -> dict[tuple[str, int, int], int]:
@@ -265,6 +340,33 @@ class TradeStationELProvider:
         return self._frames_refused
 
     @property
+    def frames_received(self) -> int:
+        """Every frame taken off the socket — hello and point alike.
+
+        Counted before any parsing, topic filtering or proto check, so this
+        is the one counter that answers "did the transport deliver anything
+        at all". Its purpose is telling "the transport is dead" (this stays
+        0 — no hub, wrong port, both ends bound instead of one bound one
+        connected) apart from "the market is quiet" (frames — hellos at
+        least — do arrive; specific symbols just are not trading). Neither
+        `messages_lost` nor `frames_refused` can make that distinction: both
+        require at least one frame to have arrived before they can report
+        anything.
+        """
+        return self._frames_received
+
+    @property
+    def endpoint(self) -> str:
+        """The address this provider connects to.
+
+        Read-only, and touched by nothing inside this module after
+        connect() — it exists so a caller (the ingestion runtime's
+        `wire_silent` diagnostic) can name the endpoint in a log line
+        without reaching into a private attribute.
+        """
+        return self._endpoint
+
+    @property
     def gap_detection_available(self) -> bool:
         """True once a frame carrying ``seq``/``sid`` has arrived.
 
@@ -273,7 +375,7 @@ class TradeStationELProvider:
         still matters, because ``messages_lost == 0`` before the first frame
         is not a statement about the link. See semantics.md §6.6.
         """
-        return self._seq.sid is not None
+        return self._seq.gap_detection_available
 
     @property
     def messages_lost(self) -> int | None:
@@ -340,6 +442,12 @@ class TradeStationELProvider:
                     return  # type: ignore[unreachable]
                 log.warning("zmq recv error: %s", exc)
                 continue
+
+            # Counted for every frame that actually made it off the socket,
+            # before any parsing or topic filtering below — a refused or
+            # dropped-as-mismatched frame still proves the transport itself
+            # is alive. See `frames_received`.
+            self._frames_received += 1
 
             topic = topic_bytes.decode("utf-8", errors="replace")
             if topic == CONTROL_TOPIC:
@@ -414,8 +522,9 @@ class TradeStationELProvider:
         try:
             data = json.loads(payload)
             seq = data.get("seq")
+            sid = int(data.get("sid", 0))
             if seq is not None:
-                self._seq.observe(CONTROL_TOPIC, int(seq), int(data.get("sid", 0)))
+                self._seq.observe(CONTROL_TOPIC, int(seq), sid)
 
             proto = data.get("proto")
             if proto != PROTO_VERSION:
@@ -450,7 +559,43 @@ class TradeStationELProvider:
             "bar_type": bar_type,
             "bar_interval": bar_interval,
         }
-        self._announced_charts[(symbol, bar_type, bar_interval)] = category
+        chart_key = (symbol, bar_type, bar_interval)
+        self._announced_charts[chart_key] = category
+
+        # `announced_charts`'s key deliberately excludes `sid` (chart identity
+        # is not a publisher session), so a chart claimed by a second process
+        # is invisible there. This is the only place that can still see it —
+        # both processes would publish under the same topic with their own
+        # internally-contiguous `seq`, so no gap ever appears either.
+        #
+        # SAY WHAT IS OBSERVABLE, NOT WHY. A sid this chart has not used before
+        # has two causes and the wire cannot tell them apart: its process
+        # restarted (the old sid is dead, nothing is duplicated), or a second
+        # process opened the same chart (everything on that topic arrives
+        # twice). Claiming the second one would put a false "your data is
+        # duplicated" line against EVERY open chart on the routine event of
+        # TradeStation restarting under a consumer that stayed up — and an
+        # operator who learns to scroll past N of those will scroll past the
+        # real one too. `_SequenceTracker.observe` hedges the identical signal
+        # for the identical reason; see contract/semantics.md §6.3.
+        known_sids = self._chart_sids.setdefault(chart_key, set())
+        if known_sids and sid not in known_sids:
+            log.warning(
+                "chart_announced_under_new_sid",
+                extra={
+                    **fields,
+                    "new_sid": sid,
+                    "known_sids": sorted(known_sids),
+                    "note": (
+                        "this chart was announced under a sid it had not used "
+                        "before - either its TradeStation process restarted "
+                        "(nothing is duplicated) or a second process has the "
+                        "same chart open (every point on this topic arrives "
+                        "twice); the wire cannot tell these apart"
+                    ),
+                },
+            )
+        known_sids.add(sid)
 
         if symbol in self._subscribed:
             log.info("chart_announced_now_receiving", extra=fields)

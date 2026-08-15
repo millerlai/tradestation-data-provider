@@ -13,15 +13,28 @@ catch the places where the implementation and the spec disagree.
 Usage:
   python contract/tools/record.py                       # subscribe to all
   python contract/tools/record.py SPY QQQ               # filter
-  python contract/tools/record.py --endpoint tcp://127.0.0.1:5555
+  python contract/tools/record.py --endpoint tcp://127.0.0.1:5556
   python contract/tools/record.py --count 100           # exit after N msgs
   python contract/tools/record.py --latency             # print end-to-end ms
 
-Recording a fixture (pair with cpp test_harness, which drives the DLL
-without TradeStation):
+This is a SUB that connects, so it belongs on the hub's XPUB port (5556).
+5555 is the hub's XSUB side, where the chart processes connect; a SUB pointed
+there is an incompatible socket pair whose only symptom is silence.
 
-  python contract/tools/record.py --count 6 --quiet \\
-      --record ../fixtures/smoke.jsonl
+Recording a fixture — THREE processes now, because the DLL connects and
+something has to bind:
+
+  tradestation-data-hub --frontend tcp://127.0.0.1:5599 \\
+      --backend tcp://127.0.0.1:5600                       # window 1
+  python contract/tools/record.py --endpoint tcp://127.0.0.1:5600 \\
+      --count 6 --quiet --record ../fixtures/smoke.jsonl   # window 2
+  cpp/Release/TS2Python_TestHarness.exe --mode smoke \\
+      --endpoint tcp://127.0.0.1:5599                      # window 3
+
+START THIS BEFORE THE HARNESS. It calls EL_Shutdown the moment it finishes
+publishing and its socket has LINGER=0, so a recorder that is not already
+draining gets the hello frames and none of the points — measured, and the
+extra hub hop widens the window.
 
 Each output line is {"topic": ..., "payload": ...} where `payload` is the
 frame verbatim, before any parsing. Payloads are UTF-8 JSON per
@@ -72,7 +85,7 @@ def fixture_entry(symbol: str, payload: bytes) -> dict[str, str]:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("symbols", nargs="*", help="topics to subscribe to (default: all)")
-    ap.add_argument("--endpoint", default="tcp://127.0.0.1:5555")
+    ap.add_argument("--endpoint", default="tcp://127.0.0.1:5556")
     ap.add_argument("--count", type=int, default=0, help="exit after N messages (0 = forever)")
     ap.add_argument("--latency", action="store_true", help="print per-message end-to-end latency")
     ap.add_argument("--quiet", action="store_true", help="only print summary")

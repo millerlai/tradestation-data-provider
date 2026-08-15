@@ -8,11 +8,17 @@
 
 ## Transport
 
+**三方，中間一個 forwarder。兩端都 `connect`，`bind` 的是 hub。**
+
+| 角色 | Socket | 動作 | 預設 endpoint |
+| --- | --- | --- | --- |
+| Publisher（DLL） | `XPUB` | `connect` | `tcp://127.0.0.1:5555` |
+| **hub 前台** | `XSUB` | **`bind`** | `tcp://127.0.0.1:5555` |
+| **hub 後台** | `XPUB` | **`bind`** | `tcp://127.0.0.1:5556` |
+| Consumer | `SUB` | `connect` | `tcp://127.0.0.1:5556` |
+
 | 項目 | 值 |
 | --- | --- |
-| Pattern | ZeroMQ **XPUB / SUB** |
-| Publisher | DLL 端 `bind`，預設 `tcp://127.0.0.1:5555` |
-| Subscriber | `connect` 同一 endpoint |
 | 送達保證 | **無**，但可偵測（`seq`）；「有沒有人在聽」則可確知 |
 | 對應 DLL ABI | `EL_DllVersion() == 4` |
 
@@ -20,7 +26,137 @@ publisher 端是 **XPUB 而不是 PUB**。送出語意完全相同；差別是�
 publisher，所以 DLL 有辦法回答「到底有沒有人在聽」。這是 `EL_InitChart` 能夠在無人訂閱時
 回 `-7` 並拒絕發布的唯一依據 —— PUB 在沒有訂閱者時靜默丟棄一切且不回報任何東西。
 
-consumer 端仍然是普通的 `SUB`，不需要任何改動。
+consumer 端是普通的 `SUB` 且仍然 `connect`，**除了 port 之外不需要任何改動**。
+
+## 為什麼需要 hub
+
+TradeStation 10 用 `-multiexe` 把圖表分散到多個 `orchart.exe` 程序，**每開一張圖就是一個
+新的程序**，而 DLL 的狀態是每個程序各一份（普通全域，沒有共享節區）。
+
+`bind()` 天生獨佔。DLL 過去直接 bind，於是只有搶到 port 的那一個程序能發布，其餘每一個
+都拿到 `-3`，而且佔用者是同一個 TradeStation session 的兄弟程序，活到 TradeStation 關掉
+為止 —— 實測 25 個 symbol 只有 6 張圖在發。
+
+不對稱的是 **bind 獨佔而 connect 不獨佔**，不是「port 是固定的」。改成動態 port 只會把
+「綁不到」換成「找不到」。所以承受「有很多個」的那一側必須是 connect 側，也就是 publisher。
+
+**但兩端都 connect 就沒有人 bind 了**，所以中間需要一個 bind 兩個 port 的 forwarder。
+它同時換回一件事：多個 consumer 仍然各自 connect，互不干擾。
+
+### 為什麼不是「consumer 直接 bind」
+
+那是最少零件的做法，而且**行不通**，理由值得寫下來因為它看起來顯然可行：
+
+ZMQ 的訂閱必須**逆流**傳到 publisher（3.0 起 topic 過濾在 publisher 端做），而在 bind 側，
+訂閱只會送給「送出那一瞬間已經連上的」publisher。之後才連上的一律收不到，而且 bind 側的
+subscriber **沒有任何事件可以知道有新 publisher 接上了**（`SUB` / `XSUB` 都沒有）。
+一張圖一個程序、陸續啟動 —— 每一張圖都是晚加入者，會全部卡在 `-7`。
+
+hub 能成立的關鍵不是「它是中介」，而是**它的 XSUB 在 bind 側、可以掛 socket monitor**，
+因此拿得到「有新 publisher 接上」這個事件。那是這條路上唯一能取得它的位置。
+
+## hub 的義務
+
+**以下每一條少做一條，就有一個保證會靜默失效。** 這些不是實作細節：它們繞的是四個
+libzmq 未文件化的行為（見下節），任何語言的重寫都必須逐條滿足。
+
+1. `XSUB` **bind** 前台，面向 publisher。
+2. `XPUB` **bind** 後台，面向 consumer，且**必須**設 `ZMQ_XPUB_VERBOSE`。理由與 DLL 設它
+   的理由相同：consumer 重啟時新舊訂閱者可能重疊幾毫秒，非 verbose 的 XPUB 會把後來那個
+   當成重複訂閱吃掉，重連的 consumer 就一個 hello 都收不到。
+3. 前台收到的訊息**原封不動**轉發到後台。hub **絕不解析 payload** —— 它是 transport，
+   不是 binding。
+4. 後台收到 `\x01topic` → **原樣轉發到前台一次**，並把該 topic 的轉發次數 +1。
+5. 後台收到 `\x00topic` → 往前台送出**與轉發次數相同數量**的 `\x00topic`，並清除計數。
+   若該 topic 從未被記錄過（計數為 0），仍然**至少送出一筆**。這個下限是刻意的：兩種
+   偏差的代價不對稱 —— 多送一筆，上游 `rm()` 回 false、不轉發，完全無害；少送一筆，
+   publisher 會永遠以為有人在聽，`-10` 從此不再出現。追蹤本身若有 bug，寧可被這個下限
+   蓋掉，也不要變成靜默的資料遺失。
+6. 前台掛 socket monitor（`ACCEPTED` / `HANDSHAKE_SUCCEEDED`）。每次事件、以及每次訂閱
+   集合變動，都排定數次 **wake**：往前台送 `\x01__ts2py_wake__` 緊接 `\x00__ts2py_wake__`。
+7. **真實訂閱永不重送。** 喚醒只用那個 nonce topic。
+8. `LINGER = 0`；前台 `RCVHWM`、後台 `SNDHWM` 比照 publisher 端的量級（1M / 100k）。
+9. 前台 bind 失敗必須以可讀訊息結束，並點名兩個可能：另一個 hub，或一顆反轉之前、
+   仍然會 bind 的舊 `TS2Python.dll`。
+
+> nonce 的名字要同時滿足兩件事：不是 `__ts2py__` 的前綴，也不被 `__ts2py__` 前綴。
+> `__ts2py_wake__` 的第 8 個字元是 `w` 而控制 topic 是 `_`，兩邊互不覆蓋 —— 所以它既不會
+> 誤觸 hello 重播，也不會被當成控制 topic 的訂閱。
+
+不變式：**轉發計數是 hub 對上游 XSUB 訂閱樹的鏡射，而 hub 是該 socket 唯一的寫入者。**
+任何繞過計數的寫入都會讓鏡射失真，取消訂閱就再也送不出去。
+
+## 四個 libzmq 行為，以及上面每一條在繞什麼
+
+沒有任何一條出現在 zguide 或 `zmq_proxy(3)` 裡。全部只在「subscriber 在 bind 側、
+publisher 在 connect 側」這個組合上顯現，量測於 libzmq 4.3.5。
+
+| | 行為 | 依據 | 被哪一條繞掉 | 少了會怎樣 |
+| --- | --- | --- | --- | --- |
+| L1 | 全新 pipe 的**第一次寫入會擱淺**：`ypipe_t::flush()` 在新 pipe 上回 `true`，`pipe_t::flush()` 因此跳過 `send_activate_read`，而 XPUB 讀訂閱只有 `process_activate_read` 一條路。任何後續寫入會把它們一起釋出 | `src/ypipe.hpp`、`src/pipe.cpp` | 第 6 條（wake） | `xattach_pipe` 替新 publisher 重放的訂閱沒人讀 → 晚啟動的圖卡在 `-7`。**但見下方的但書** |
+| L2 | XSUB 的訂閱**引用計數**：`xsub_t::xsend` 每次訂閱 `add()`，取消訂閱只在 `rm()` 回 true 時才轉發 | `src/xsub.cpp` | 第 4、7 條 | 重送真實訂閱會灌大計數，取消訂閱再也送不出去 → **`-10` 靜默死亡** |
+| L3 | `ZMQ_XPUB_VERBOSE` 回報**每一次**訂閱，但只回報**最後一次**取消訂閱 | `src/xpub.cpp` | 第 5 條（計數鏡射） | N 個 consumer 訂同一 topic 時上游計數停在 N-1 → 全部離線後 publisher 仍以為有人在聽，`-7` 失準 |
+| L4 | connect 側的 pipe **跨重連保留**（`ZMQ_IMMEDIATE=0`，預設），對端死亡不觸發 `xpipe_terminated`，因此不產生取消訂閱 | `src/session_base.cpp` | 不由 hub 繞，由 **DLL 的 socket monitor** 繞 | hub 死掉時 DLL 的訂閱集合永不清空，`EL_Publish` 對每根 bar 回 `0` 而資料進虛空，兩端都沒有任何訊號 |
+
+### L1 的但書：wake 是有意保留的、沒有測試涵蓋的機制
+
+L1 的擱淺現象是量出來的：一個**不做 poll** 的 XSUB，在 publisher 接上之後等 10 秒，
+`xattach_pipe` 重放的訂閱一筆都沒送達；把 XSUB 關掉（termination 強制排空）才突然出現。
+
+但**一個持續 `poll()` 的 XSUB 會自己把它釋出** —— 同樣的情境，不再送任何東西、只是持續
+poll，訂閱在 10 秒內就到了 publisher。實作上 hub 本來就是一個 poll 迴圈，所以第 6 條的
+wake 在這個形狀下是雙保險，而且**任何測試都無法證明它必要**：把 wake 拿掉，測試照樣全綠。
+
+這件事必須寫在這裡，因為它有兩個相反的陷阱：
+
+- 把 wake 當成死碼刪掉 —— 那是在賭 libzmq 命令處理的一個**未文件化的副作用**，它不是保證，
+  而且換一個實作形狀（例如事件驅動而非輪詢的 hub）就不成立；
+- 以為測試涵蓋了它 —— 沒有。這是**已知且刻意保留的測試缺口**，不是疏漏。
+
+**L2 與 L3 不同**：兩者都有自動化測試會在移除機制後轉紅（實測過 —— 把
+`decide_subscription_forward` 的 `\x00` 分支從「乘上鏡射計數」改成只送一筆，
+`test_unsubscribe_reaches_publisher_once_every_consumer_is_gone` 與對應的單元測試立刻轉紅）。
+
+**L4 是第三種情況：它有證據，但沒有自動化測試。** 它的機制在 C++（DLL 的
+`drain_monitor()`），而 CI 只跑 Python，根本不編譯 C++。它是用真實 DLL 手動驗證的：
+
+```
+harness --mode stress --seconds 16 --rate 20，中途殺掉 hub
+  hub 全程存活    ->  sent=320 failed=0
+  hub 第 6 秒被殺  ->  sent=114 failed=206
+```
+
+那 206 筆就是「沒有 monitor 的話會靜默消失、而且 `EL_Publish` 回 0」的資料。
+**改動 `drain_monitor()` 或 `g_monitor` 之後，必須用手重跑這個情境** —— 沒有任何測試會替你發現它壞了。
+
+### L3 的標準修法在這個版本上不存在
+
+`ZMQ_XSUB_VERBOSE_UNSUBSCRIBE` 是 L3 的正解。**libzmq 4.3.5 不支援它**，`setsockopt`
+回 `EINVAL`（pyzmq 有常數但底層沒有實作）。升級 libzmq 之後若要改用它，**必須先重跑
+「所有 consumer 離線 → publisher 收到取消訂閱」那條測試**。
+
+L2 / L3 的實測數字（XSUB 的 pipe 已接上且醒著，排除 L1 的干擾）：
+
+```
+送 3 次 \x01SPY  ->  publisher 收到 3 次   （訂閱不去重，每次都讓計數 +1）
+送 3 次 \x00SPY  ->  publisher 收到 1 次   （只有把計數歸零的那一次會轉發）
+```
+
+這個不對稱就是第 4、5 條存在的全部理由。
+
+`ZMQ_IMMEDIATE=1` 看起來像 L4 的一行修法（它確實讓取消訂閱出現），但它同時讓 hub 重啟後
+資料**完全不再流動** —— 把暫時失效換成永久失效。不要用。
+
+## 版本歪斜怎麼被發現
+
+| 組合 | 症狀 |
+| --- | --- |
+| 舊 DLL（會 bind 5555）+ hub | 誰先起誰贏，另一邊拿到 `EADDRINUSE` / `-3`，兩者都有可讀訊息 |
+| 新 DLL + 沒開 hub | 收不到訂閱 → `-7` → Print Log 的「waiting for a subscriber」。這**就是**正常啟動狀態的訊息 |
+| 舊 consumer（connect 5555） | 撞上 hub 的 XSUB，socket 型別不相容 → 靜默。由 binding 的啟動診斷攔下（見〈binding 的義務〉） |
+
+`proto` 與 `EL_DllVersion` 都**沒有變**：point frame 一個 byte 都沒動，C ABI 的匯出名與
+簽章也沒動。transport 拓樸不是這兩個號碼描述的東西。
 
 ## Frame 結構
 
@@ -146,6 +282,10 @@ consumer 是**逐 symbol 訂閱**的，而且訂閱清單來自它自己的設�
    逸出會殺掉 ingest 迴圈。
 5. `symbol` 必須檢查是不是字串。JSON `null` 經 `str()` 會變成字串 `"None"`，然後以一個
    看起來像真 symbol 的名字被登記下來。
+6. **啟動後若一個 frame 都沒收到，必須說一次話。** hub 沒開、連錯 port、或兩端 transport
+   方向不一致，在 consumer 這一側全部長得一模一樣：安靜。而收盤後安靜是正常的，所以這個
+   訊號只能由 binding 自己給。附上 endpoint 與已訂閱的 symbol 數，並沿用 `-7`「只說一次」
+   的慣例 —— 它是「連上了沒」的診斷，不是持續監控。
 
 ### 重播：consumer 重開不需要動 TradeStation
 

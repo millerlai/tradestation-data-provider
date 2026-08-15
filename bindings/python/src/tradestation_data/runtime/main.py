@@ -29,6 +29,7 @@ import sys
 from pathlib import Path
 from typing import ClassVar
 
+from tradestation_data._logging import PLAIN_FORMAT, STD_LOG_RECORD_KEYS, ExtraDumpFilter
 from tradestation_data.aggregation.snapshot import MarketSnapshot
 from tradestation_data.domain.bar import Bar
 from tradestation_data.runtime.config import load_symbols
@@ -54,41 +55,15 @@ def _configure_logging(level: str, *, json_output: bool) -> None:
     if json_output:
         handler.setFormatter(_JsonFormatter())
     else:
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s %(extra_dump)s")
-        )
-        handler.addFilter(_ExtraDumpFilter())
+        handler.setFormatter(logging.Formatter(PLAIN_FORMAT))
+        handler.addFilter(ExtraDumpFilter())
     root.addHandler(handler)
 
 
 class _JsonFormatter(logging.Formatter):
     """Minimal JSON log formatter — timestamp, level, logger, msg, + extras."""
 
-    _STD_KEYS: ClassVar[set[str]] = {
-        "name",
-        "msg",
-        "args",
-        "levelname",
-        "levelno",
-        "pathname",
-        "filename",
-        "module",
-        "exc_info",
-        "exc_text",
-        "stack_info",
-        "lineno",
-        "funcName",
-        "created",
-        "msecs",
-        "relativeCreated",
-        "thread",
-        "threadName",
-        "processName",
-        "process",
-        "message",
-        "asctime",
-        "taskName",
-    }
+    _STD_KEYS: ClassVar[frozenset[str]] = STD_LOG_RECORD_KEYS
 
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, object] = {
@@ -133,24 +108,6 @@ class _PrintingBarSink(BaseSink):
             print(f"--- end of first {self._limit} bar(s) ---", flush=True)
 
 
-class _ExtraDumpFilter(logging.Filter):
-    """Serialise `extra` kwargs into record.extra_dump for the plain formatter.
-
-    Attached to the StreamHandler (not to a logger) so it fires for every
-    record that reaches the handler — including records from child loggers
-    that only propagate up to root's handlers, not to root's own filters.
-    """
-
-    _STD: ClassVar[set[str]] = _JsonFormatter._STD_KEYS | {"extra_dump"}
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        extras = {
-            k: v for k, v in record.__dict__.items() if k not in self._STD and not k.startswith("_")
-        }
-        record.extra_dump = json.dumps(extras, default=str) if extras else ""
-        return True
-
-
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="tradestation-data-ingest",
@@ -172,8 +129,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--endpoint",
-        default="tcp://127.0.0.1:5555",
-        help="ZeroMQ SUB endpoint to connect to (default: tcp://127.0.0.1:5555).",
+        default="tcp://127.0.0.1:5556",
+        help="ZeroMQ endpoint to connect this SUB socket to — the hub's XPUB port "
+        "(default: tcp://127.0.0.1:5556). NOT 5555: that is the hub's XSUB port, "
+        "where the TradeStation chart processes connect. Pointing a SUB at it "
+        "yields an incompatible socket pair and total silence.",
     )
     p.add_argument(
         "--data-root",

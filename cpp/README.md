@@ -2,7 +2,9 @@
 
 > 📖 [繁體中文版](README.zh-TW.md)
 
-C++ DLL that bridges TradeStation EasyLanguage calls to a ZeroMQ PUB socket. The Python side ([`tradestation-data-provider`](../README.md), root of this repo) subscribes over `tcp://127.0.0.1:5555` and routes the events through its pluggable sink pipeline.
+C++ DLL that bridges TradeStation EasyLanguage calls to a ZeroMQ XPUB socket. The DLL **connects** to `tcp://127.0.0.1:5555`, where `ts2py-hub` is bound; the Python side ([`tradestation-data-provider`](../README.md), root of this repo) connects to the hub's other port, `tcp://127.0.0.1:5556`, and routes the events through its pluggable sink pipeline.
+
+The hub exists because TradeStation 10 gives every chart its own `orchart.exe`, each with its own copy of this DLL's globals. `bind()` is exclusive, so when the DLL bound the port itself only the first chart could publish and every other one got `-3` until TradeStation was restarted. With both ends connecting, something has to bind — that is the hub, and it must be running or nothing publishes. See [`contract/wire.md`](../contract/wire.md).
 
 This subdirectory is the **publisher** half of the system. The current ABI is **DLL version 2**, carrying wire `proto` 2. There is exactly one of each — see [`../contract/wire.md`](../contract/wire.md).
 
@@ -238,7 +240,7 @@ int __stdcall EL_Publish(
     double bid, double ask);
 ```
 
-Return codes: `0` success, `1` this chart already announced, `-1` not initialized, `-2` ZMQ send failed, `-3` init failed (bind / socket create), `-4` invalid argument, `-6` ABI mismatch (tombstone), `-7` no subscriber yet.
+Return codes: `0` success, `1` this chart already announced, `-1` not initialized, `-2` ZMQ send failed, `-3` init failed (socket create / `connect` — **not** "port in use"; the DLL connects now), `-4` invalid argument, `-6` ABI mismatch (tombstone), `-7` no subscriber yet (**including "the hub is not running"**), `-10` this point reached nobody.
 
 ### `-7`, and why init can refuse to succeed
 

@@ -32,7 +32,7 @@ from _common import PYTHON_DIR, REPO_ROOT, run_uv_entrypoint
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     p.add_argument("--config", help="path to symbols.yaml")
-    p.add_argument("--endpoint", default="tcp://127.0.0.1:5555")
+    p.add_argument("--endpoint", default="tcp://127.0.0.1:5556")
     p.add_argument("--data-root", default=None)
     p.add_argument(
         "--log-level",

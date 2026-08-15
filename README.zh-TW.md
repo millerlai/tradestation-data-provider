@@ -38,7 +38,9 @@ flowchart TB
         GO["Go<br/>將來"]
         RS["Rust · C#<br/>將來"]
     end
-    DLL -->|"ZMQ XPUB<br/>tcp://127.0.0.1:5555"| WIRE
+    HUB["ts2py-hub<br/>XSUB bind :5555 · XPUB bind :5556<br/>一張圖一個 orchart.exe，全部扇入這裡"]
+    DLL -->|"ZMQ XPUB · connect"| HUB
+    HUB -->|"tcp://127.0.0.1:5556"| WIRE
     WIRE -.->|規範| PY
     WIRE -.->|規範| GO
     WIRE -.->|規範| RS
@@ -49,6 +51,7 @@ flowchart TB
     classDef existing fill:#e9ecef,stroke:#adb5bd,color:#495057
     classDef added fill:#d4edda,stroke:#28a745,color:#155724
     class TS,EL,DLL,PY existing
+    class HUB added
     class WIRE,SEM,FIX added
 ```
 

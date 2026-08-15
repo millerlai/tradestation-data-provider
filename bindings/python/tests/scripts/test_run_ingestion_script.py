@@ -31,7 +31,7 @@ def test_explicit_config_passes_through(monkeypatch, tmp_path):
 
     argv = captured["argv"]
     assert argv[argv.index("--config") + 1] == str(cfg)
-    assert argv[argv.index("--endpoint") + 1] == "tcp://127.0.0.1:5555"
+    assert argv[argv.index("--endpoint") + 1] == "tcp://127.0.0.1:5556"
     assert argv[argv.index("--log-level") + 1] == "INFO"
     assert "--no-storage" not in argv
     assert "--log-json" not in argv
