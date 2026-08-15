@@ -63,7 +63,7 @@ ready-made binaries. See [`../cpp/README.md`](../cpp/README.md) for the details.
 
 | input | default | what it does |
 | --- | --- | --- |
-| `ZMQEndpoint` | `tcp://127.0.0.1:5555` | where the DLL publishes |
+| `ZMQEndpoint` | `tcp://127.0.0.1:5555` | where the DLL **connects** — `ts2py-hub` binds this port. Unchanged by the hub work on purpose, so no chart has to be re-added or re-Verified. **The hub must be running**, or `EL_InitChart` returns `-7` and this chart publishes nothing |
 | `Enabled` | `True` | master switch |
 | `LogErrors` | `True` | init failures, sub-minute / aggregated-tick chart detection, non-zero publish return codes |
 | `LogPublish` | `False` | one line per publish call — see below |

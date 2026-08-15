@@ -2,7 +2,9 @@
 
 > 📖 [English version](README.md)
 
-C++ DLL，把 TradeStation EasyLanguage 的呼叫橋到 ZeroMQ PUB socket。Python 端（[`tradestation-data-provider`](../README.md)，本 repo 根目錄）透過 `tcp://127.0.0.1:5555` 訂閱，再把收到的事件交給可插拔的 sink pipeline。
+C++ DLL，把 TradeStation EasyLanguage 的呼叫橋到 ZeroMQ XPUB socket。DLL **connect** 到 `tcp://127.0.0.1:5555`，那裡由 `ts2py-hub` 綁著；Python 端（[`tradestation-data-provider`](../README.md)，本 repo 根目錄）連 hub 的另一個 port `tcp://127.0.0.1:5556`，再把收到的事件交給可插拔的 sink pipeline。
+
+hub 存在的理由：TradeStation 10 每開一張圖就是一個新的 `orchart.exe`，各有一份這顆 DLL 的全域變數。`bind()` 獨佔，所以當年 DLL 自己綁 port 時，只有第一張圖發得出資料，其餘每一張都拿到 `-3`，直到 TradeStation 重開為止。兩端都改成 connect 之後就必須有人 bind —— 那就是 hub，**它沒開就什麼都不會發**。詳見 [`contract/wire.md`](../contract/wire.md)。
 
 這個子目錄是整個系統的**發布端**。當前 ABI 是 **DLL version 2**，承載 wire `proto` 2。兩者都只有一個版本 —— 見 [`../contract/wire.md`](../contract/wire.md)。
 
@@ -238,7 +240,7 @@ int __stdcall EL_Publish(
     double bid, double ask);
 ```
 
-Return codes：`0` 成功、`1` 這張圖已宣告過、`-1` 未初始化、`-2` ZMQ send 失敗、`-3` init 失敗（bind / socket create）、`-4` 參數無效、`-6` ABI 不符（墓碑）、`-7` 尚無訂閱者。
+Return codes：`0` 成功、`1` 這張圖已宣告過、`-1` 未初始化、`-2` ZMQ send 失敗、`-3` init 失敗（socket 建立 / `connect`，**不再是「port 被佔用」**，DLL 現在是 connect 側）、`-4` 參數無效、`-6` ABI 不符（墓碑）、`-7` 尚無訂閱者（**包含「hub 沒開」**）、`-10` 這一筆沒有人收到。
 
 ### `-7`，以及為什麼 init 可以拒絕成功
 

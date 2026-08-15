@@ -54,7 +54,7 @@ cd cpp
 
 | input | 預設 | 作用 |
 | --- | --- | --- |
-| `ZMQEndpoint` | `tcp://127.0.0.1:5555` | DLL 發布的位址 |
+| `ZMQEndpoint` | `tcp://127.0.0.1:5555` | DLL **connect** 的位址 —— 這個 port 由 `ts2py-hub` 綁著。hub 這次改動刻意沒動它，所以任何一張圖都不需要重加或重 Verify。**hub 必須在跑**，否則 `EL_InitChart` 回 `-7`，這張圖什麼都不會發 |
 | `Enabled` | `True` | 總開關 |
 | `LogErrors` | `True` | init 失敗、sub-minute / aggregated-tick 圖表偵測、非零的 publish 回傳碼 |
 | `LogPublish` | `False` | 每次 publish 印一行 —— 見下 |

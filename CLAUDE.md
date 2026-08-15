@@ -63,11 +63,38 @@ have to guess belongs in `contract/semantics.md`, with a fixture.
   chart, cleared when a subscriber returns. Without it, every bar published during a
   consumer restart was discarded by ZMQ and reported as rc 0, and nothing backfills.
 
-  One endpoint per process: only the first chart binds, so a chart naming a different
-  one is refused with **`-8`** rather than silently published to the first chart's port.
-  And `-9` separates "the subscription queue could not be read" from `-7`'s "nobody has
-  subscribed yet" — both leave the subscriber set empty, and reporting a broken socket
-  as the normal startup state made it invisible.
+  One endpoint per process: only the first chart creates the socket, so a chart naming a
+  different one is refused with **`-8`** rather than silently published to the first
+  chart's port. And `-9` separates "the subscription queue could not be read" from `-7`'s
+  "nobody has subscribed yet" — both leave the subscriber set empty, and reporting a
+  broken socket as the normal startup state made it invisible.
+
+- **Nobody `bind`s except the hub. The DLL `connect`s, and so does every consumer.**
+  TradeStation 10 gives each chart its own `orchart.exe`, each with its own copy of the
+  DLL's globals — and `bind()` is exclusive, so the first process took port 5555 and every
+  other chart got `-3` until TradeStation was restarted. `ts2py-hub` (an XSUB/XPUB
+  forwarder, `tradestation_data.hub`) binds **5555 for publishers** and **5556 for
+  consumers**. Publishers keep 5555 so no chart has to be re-added or re-Verified; only
+  consumers move.
+
+  **The hub is not a plain `zmq_proxy`.** Four libzmq behaviours bite only in this
+  topology, all of them undocumented upstream and each one silently disabling a guarantee.
+  They are tabulated with source citations in `contract/wire.md` — read that table before
+  touching `hub.py` or `drain_monitor()`, because every one of the workarounds looks
+  redundant in isolation:
+  the WAKE nonce exists because a brand-new pipe's first write is stranded until some later
+  write; real subscriptions are forwarded once and **never replayed** because replaying
+  inflates XSUB's refcount and kills unsubscribe propagation (and with it `-10`); the hub
+  mirrors that refcount because `XPUB_VERBOSE` reports every subscribe but only the last
+  unsubscribe; and the DLL carries a **socket monitor** because a connect-side pipe
+  survives its peer's death, so without it a dead hub means `EL_Publish` returns 0 forever
+  for bars that reach nobody.
+
+  `tests/test_hub.py` is the regression test for three of the four — **re-run it after any
+  libzmq upgrade**, it is the only written evidence they exist. The WAKE one is the
+  exception: a continuously polling XSUB happens to release the stranded write on its own,
+  so no test here fails when the wake is deleted. That gap is deliberate and documented;
+  the wake stays because the masking is an undocumented accident, not a guarantee.
 
   The chart registry is capped at **24** entries, evicting the least recently published.
   Nothing removes a chart otherwise: the wire carries no chart-closed signal and EL has
@@ -150,15 +177,22 @@ cmake --build --preset x86-release
 # The MSBuild path — note the SOLUTION platform is x86, not Win32
 msbuild TS2Python.sln /p:Configuration=Release /p:Platform=x86
 
-# Drive the DLL without TradeStation, then watch or record the wire.
-# THE SUBSCRIBER STARTS FIRST. EL_InitChart returns -7 and publishes nothing until one
-# is attached, so a harness run with no SUB just times out. --warmup-ms no longer
-# guards against the silent no-subscriber drop; it is only a settle sleep.
+# Drive the DLL without TradeStation, then watch or record the wire. THREE windows now:
+# the DLL connects, so something has to bind, and that is the hub.
+# THE HUB AND THE SUBSCRIBER START FIRST. EL_InitChart returns -7 and publishes nothing
+# until a subscription reaches it, so a harness run with neither just times out.
+# --warmup-ms is only a settle sleep; it never guarded the silent no-subscriber drop.
 # build.bat / VS write to cpp\Release\; cmake to cpp\build\x86-release\Release\.
-python contract/tools/record.py --endpoint tcp://127.0.0.1:5599     # window 1
+tradestation-data-hub --frontend tcp://127.0.0.1:5599 --backend tcp://127.0.0.1:5600
+python contract/tools/record.py --endpoint tcp://127.0.0.1:5600     # window 2
 cpp/Release/TS2Python_TestHarness.exe --mode smoke --endpoint tcp://127.0.0.1:5599
 # --count includes the two leading hello frames every mode announces first.
 python contract/tools/record.py --count 8 --quiet --record contract/fixtures/smoke.jsonl
+
+# THE RECORDER MUST ALREADY BE DRAINING. The harness calls EL_Shutdown the moment it
+# finishes publishing and the socket has LINGER=0, so a reader that only starts
+# collecting afterwards gets the hellos and none of the points — measured, and the
+# extra hub hop widens the window.
 ```
 
 Harness modes: `smoke` (3 topics + one bar), `noquote` (bid/ask absent, the
@@ -177,12 +211,17 @@ rather than widening the filter.
 ### Live ingest data-flow
 
 ```
-                ◀── XPUB sees the subscription; EL_InitChart returns -7 until it does
-TradeStation EL DLL  ──ZMQ XPUB──▶  TradeStationELProvider (SUB, asyncio)
-      │                                     │
-      │ EL_InitChart ── topic __ts2py__ ───┤  hello: symbol/category/bar_type/bar_interval
+  one orchart.exe PER CHART, each with its own DLL globals and its own `sid`.
+  Subscriptions travel back up this path; EL_InitChart returns -7 until one arrives.
+DLL (XPUB, connect) ─┐
+DLL (XPUB, connect) ─┼──▶ ts2py-hub ──▶ TradeStationELProvider (SUB, connect :5556)
+DLL (XPUB, connect) ─┘   XSUB :5555         │
+      │                  XPUB :5556         │
+      │ EL_InitChart ── topic __ts2py__ ────┤  hello: symbol/category/bar_type/bar_interval
       │                                     │  (logged, never yielded as a Bar)
       │  EL_Publish ── topic = symbol ──────┤  one point shape, whatever the chart
+                                            │  N publishers fan in, so gap detection is
+                                            │  keyed (sid, topic), never topic alone
                                             ▼
                               IngestionRuntime._handle_provider_bar
                               (intra-bar buffer, dedupe, replace-last)

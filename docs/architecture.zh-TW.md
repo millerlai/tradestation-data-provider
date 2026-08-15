@@ -62,7 +62,7 @@ flowchart TB
 
     subgraph WIRE["② Wire Contract — 本 repo 真正的產品"]
         direction TB
-        ZMQ["ZeroMQ PUB/SUB<br/>tcp://127.0.0.1:5555（預設）"]
+        ZMQ["ZeroMQ XPUB → ts2py-hub → SUB<br/>publisher connect :5555 · consumer connect :5556"]
         FRAME["2-frame message<br/>topic = symbol · payload = JSON<br/>proto 2 · 19 個必填欄位"]
         SEM["contract/semantics.md<br/>schema 驗不到、但 binding 必須一致的規則"]
         ZMQ --> FRAME
@@ -196,9 +196,10 @@ EL_InitChart = _EL_InitChart@20  <- 5 個參數；只有新 .ELD 找得到
 
 | 項目 | 值 |
 | --- | --- |
-| Pattern | ZeroMQ **XPUB/SUB**，逐訊息 fire-and-forget，無送達保證 |
-| Publisher | DLL `bind`，預設 `tcp://127.0.0.1:5555` |
-| Subscriber | 普通的 `SUB`。`connect` 同一 endpoint，逐一精確訂閱 symbol，**外加無條件訂閱控制 topic** |
+| Pattern | ZeroMQ **XPUB → XSUB/XPUB forwarder → SUB**，逐訊息 fire-and-forget，無送達保證 |
+| Publisher | DLL **`connect`** 到 `tcp://127.0.0.1:5555`。它不 bind：TradeStation 10 每開一張圖就是一個新的 `orchart.exe`，各有一份 DLL 全域，而 `bind()` 獨佔 —— 第一張圖搶走 port，其餘每一張都拿到 `-3`，直到 TradeStation 重開 |
+| **Forwarder** | **`ts2py-hub` 綁兩邊** —— XSUB 在 `:5555` 面向 publisher，XPUB 在 `:5556` 面向 consumer。它是必要的：兩端都 connect，就必須有人 bind。它的義務是規範性的，寫在 [`contract/wire.md`](../contract/wire.md) |
+| Subscriber | 普通的 `SUB`。**`connect` 到 hub 的 XPUB port（`:5556`）** —— 不是 `:5555`，那是面向 publisher 的那一側；`SUB` 連過去是不相容的 socket 配對，唯一的症狀是靜默。逐一精確訂閱 symbol，**外加無條件訂閱控制 topic** |
 | 為什麼是 XPUB | 送出語意與 PUB 完全相同，但訂閱事件會以可讀訊息回到 publisher——那是 DLL 唯一能回答「有沒有人在聽」的途徑，也是 `EL_InitChart` 的 `-7` 賴以成立的基礎 |
 | Topic | `<symbol>` 送 point（`EL_Publish`）；`__ts2py__` 送 chart 宣告（`EL_InitChart`）。**topic 就是鑑別子**，沒有新增 `kind` 欄位 |
 | Frame 數 | 2（`ZMQ_SNDMORE`）：frame 1 = UTF-8 topic，frame 2 = UTF-8 JSON payload |
@@ -259,7 +260,7 @@ EL_InitChart = _EL_InitChart@20  <- 5 個參數；只有新 .ELD 找得到
 | `1` | 這張圖在本 session 已宣告過，冪等 no-op | `EL_InitChart` |
 | `-1` | 未初始化就呼叫 publish | `EL_Publish` |
 | `-2` | ZMQ 送出失敗（觸及 high-water mark 或例外） | `EL_InitChart` `EL_Publish` |
-| `-3` | init 的 bind/socket 建立失敗（最常見：port 已被佔用） | `EL_InitChart` |
+| `-3` | socket / context 建立或 `connect()` 失敗 —— endpoint 字串無效，或資源不足。**不再是「port 被佔用」**：DLL 現在是 connect 側，`connect()` 不會因為 endpoint 忙碌而失敗。「沒有人在聽」是 `-7`，「這一筆沒人收到」是 `-10` | `EL_InitChart` |
 | `-4` | 參數無效：null 指標；**量值超出 ±9.0e15**（略小於 2^53，`double` 能精確表示的最大整數——**不是** `int64` 的範圍，且是拒收而非 clamp）；或 **payload 被 `snprintf` 截斷** | `EL_InitChart` `EL_Publish` |
 | `-6` | ABI 不符——呼叫端是早於本協定的 `.ELD` | 兩個墓碑匯出 |
 | `-7` | **尚無訂閱者。可重試，而且是啟動時的正常狀態** | `EL_InitChart` |

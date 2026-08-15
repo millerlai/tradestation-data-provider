@@ -128,7 +128,10 @@ from tradestation_data.sinks.parquet import ParquetBarSink
 
 async def main() -> None:
     runtime = IngestionRuntime(
-        provider=TradeStationELProvider(endpoint="tcp://127.0.0.1:5555"),
+        # The hub's XPUB port. 5555 is its XSUB side, where the chart
+        # processes connect — a SUB there is an incompatible socket pair,
+        # and the only symptom is silence.
+        provider=TradeStationELProvider(endpoint="tcp://127.0.0.1:5556"),
         symbols=["SPY", "QQQ"],
         snapshot=MarketSnapshot(),
         sinks=SinkPipeline([
@@ -173,16 +176,23 @@ uv run python examples/04_replay_fixtures.py --fixture bars
 not have to be TradeStation — the C++ harness drives the DLL directly:
 
 ```powershell
-# Terminal A — from bindings\python. THE SUBSCRIBER STARTS FIRST: EL_InitChart
-# returns -7 and publishes nothing until one is attached, so the harness
-# would otherwise wait out its timeout and exit non-zero. (It used to be the
-# other way round, with --warmup-ms buying time to attach — a PUB socket
-# silently dropped whatever it sent while nobody was listening, and now the
-# publisher refuses to start instead of dropping.)
+# Terminal A — THE HUB STARTS FIRST, and it is not optional. Both the DLL and
+# the subscriber connect, so something has to bind, and that is the hub.
+# Without it neither end can reach the other and nothing says so: the harness
+# waits out its timeout and exits -7, the subscriber just sits there.
+tradestation-data-hub
+
+# Terminal B — from bindings\python. The subscriber comes second, still before
+# the harness: EL_InitChart returns -7 and publishes nothing until a
+# subscription reaches it. (The order used to be the other way round, with
+# --warmup-ms buying time to attach — a PUB socket silently dropped whatever
+# it sent while nobody was listening, and now the publisher refuses to start
+# instead of dropping.)
 uv run python examples\01_print_events.py --count 6
 
-# Terminal B — from the repo root. The path is where cpp\build.bat (and
-# Visual Studio) put it; a CMake preset build leaves it in
+# Terminal C — from the repo root. Note it targets the hub's FRONTEND (5555),
+# while terminal B is on the backend (5556). The path is where cpp\build.bat
+# (and Visual Studio) put it; a CMake preset build leaves it in
 # cpp\build\x86-release\Release\ instead.
 cpp\Release\TS2Python_TestHarness.exe --mode smoke
 ```

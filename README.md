@@ -40,7 +40,9 @@ flowchart TB
         GO["Go<br/>future"]
         RS["Rust · C#<br/>future"]
     end
-    DLL -->|"ZMQ XPUB<br/>tcp://127.0.0.1:5555"| WIRE
+    HUB["ts2py-hub<br/>XSUB bind :5555 · XPUB bind :5556<br/>one orchart.exe per chart fans in here"]
+    DLL -->|"ZMQ XPUB · connect"| HUB
+    HUB -->|"tcp://127.0.0.1:5556"| WIRE
     WIRE -.->|specifies| PY
     WIRE -.->|specifies| GO
     WIRE -.->|specifies| RS
@@ -52,6 +54,7 @@ flowchart TB
     classDef added fill:#d4edda,stroke:#28a745,color:#155724
     class TS,EL,DLL,PY existing
     class WIRE,SEM,FIX added
+    class HUB added
 ```
 
 ## The product is the wire contract
@@ -76,6 +79,26 @@ noticed, because nothing checked.
 | [`docs/`](docs/) | Architecture notes and working plans |
 
 ## Quick start
+
+**Running `ts2py-hub`, first and always.** Every TradeStation chart runs in its own
+`orchart.exe` with its own copy of the DLL, and `bind()` is exclusive — so the DLL
+**connects** (to `:5555`) and so does every consumer (to `:5556`). Something has to bind,
+and that is the hub. Nothing publishes while it is down.
+
+```powershell
+tradestation-data-hub          # XSUB :5555 for charts, XPUB :5556 for consumers
+```
+
+**Set it to start at logon and restart on failure.** Task Scheduler → Create Task →
+trigger *At log on*; action *Start a program*, `tradestation-data-hub`; on the Settings
+tab tick *If the task fails, restart every* 1 minute. Run it as the same user that runs
+TradeStation, and start it before TradeStation so no chart wastes a bar on `-7`.
+
+Losing the hub mid-session costs data: the bars published while it is down are dropped and
+nothing backfills them. Both ends do say so — `EL_Publish` starts returning `-10` (one
+line per chart in TradeStation's Print Log) and a consumer that started with no hub logs
+`wire_silent` — but neither of those brings the bars back, which is why the restart
+setting is part of the install rather than a nicety.
 
 **Consuming the feed in Python** → [`bindings/python/README.md`](bindings/python/README.md),
 or go straight to the runnable scripts in

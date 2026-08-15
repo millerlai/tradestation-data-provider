@@ -46,19 +46,30 @@
 用 [`../tools/record.py`](../tools/record.py) 搭配 `cpp` 的 `test_harness`（它不需要
 TradeStation 就能驅動 DLL）：
 
-**順序反過來了：先開 recorder，再開 harness。** DLL 的 `EL_InitChart` 在控制 topic 看不到
-訂閱者之前回 `-7` 且什麼都不發，所以 harness 現在**必須**有一個先在的 SUB，否則會等到
-`--subscriber-timeout-ms` 逾時然後以 `-7` 退出。舊寫法（harness 先跑、`--warmup-ms 8000`
-硬等）已經不成立。
+**三個程序，而且順序是固定的：hub → recorder → harness。**
+
+hub 是新加的，而且**不是可選的**：DLL 現在是 `connect` 側（一張圖一個 `orchart.exe`，
+`bind` 獨佔會讓除了第一個以外的圖全部拿到 `-3`），所以 harness 與 recorder 兩邊都在
+connect，中間必須有人 bind。少了 hub，兩端誰也連不上誰，而且不會有任何錯誤 ——
+harness 等到 `--subscriber-timeout-ms` 逾時後以 `-7` 退出，recorder 錄出一份空檔案。
+
+recorder 仍然要排在 harness 之前：`EL_InitChart` 在控制 topic 看不到訂閱者之前回 `-7`
+且什麼都不發。舊寫法（harness 先跑、`--warmup-ms 8000` 硬等）早就不成立。
 
 ```bash
-# recorder 先起來，harness 再跑
-python contract/tools/record.py --endpoint tcp://127.0.0.1:5599 \
+# hub 先起來，recorder 次之，harness 最後
+tradestation-data-hub --frontend tcp://127.0.0.1:5599 \
+    --backend tcp://127.0.0.1:5600 &
+sleep 2
+python contract/tools/record.py --endpoint tcp://127.0.0.1:5600 \
     --count 8 --quiet --record contract/fixtures/smoke.jsonl &
 sleep 3
 cpp/Release/TS2Python_TestHarness.exe --mode smoke --endpoint tcp://127.0.0.1:5599
 wait
 ```
+
+**注意兩個 port 不一樣**：harness 打 hub 的**前台**（XSUB，5599），recorder 連 hub 的
+**後台**（XPUB，5600）。兩邊寫成同一個 port 是最容易犯的錯，而它的症狀是靜默。
 
 `record.py` 一定會訂閱 `__ts2py__`，即使命令列有指定 symbol 過濾。少了它 DLL 永遠不會
 開始發布，而錄出來的會是一份空 fixture，沒有任何地方會報錯。
@@ -88,8 +99,11 @@ wait
 > `bars` 的 9 個 frame 對應 9 種 `BarType`/`BarInterval` 組合 —— 包含 2 分鐘(1/2)、
 > 週線(3/1)與 2 日(2/2)。**沒有任何組合被拒收**;`-5` 的映射拒收已隨 `tf` 一起移除。
 
-> TradeStation 執行中時它已經佔用預設的 `tcp://127.0.0.1:5555`，init 會回 `-3`。
-> 不必關掉 TradeStation，兩邊都指定同一個別的 port 即可。
+> **錄製時要換掉預設 port，但理由已經不是 `-3`。** DLL 改成 connect 之後不會再因為
+> 「port 被佔用」失敗（見 `contract/error_codes.md` 的 `-3` 一節）。現在的理由是：
+> TradeStation 正在用的那個 hub 綁著 5555/5556，錄製用自己的一組 port（例如
+> 5599/5600）才不會讓錄製流量與正式流量混在一起 —— 兩邊會互相收到對方的 frame，
+> 錄出來的 fixture 就多了不該有的東西。不必關掉 TradeStation。
 
 手寫的 fixture 只是把「我們以為 wire 長怎樣」寫第二遍，抓不到實作與規格的落差 ——
 而那正是 fixture 存在的理由。

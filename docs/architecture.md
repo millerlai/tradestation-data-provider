@@ -67,7 +67,7 @@ flowchart TB
 
     subgraph WIRE["② Wire Contract — this repo's actual product"]
         direction TB
-        ZMQ["ZeroMQ PUB/SUB<br/>tcp://127.0.0.1:5555 (default)"]
+        ZMQ["ZeroMQ XPUB → ts2py-hub → SUB<br/>publishers connect :5555 · consumers connect :5556"]
         FRAME["2-frame message<br/>topic = symbol · payload = JSON<br/>proto 2 · 19 required fields"]
         SEM["contract/semantics.md<br/>rules a schema can't check, that bindings must still agree on"]
         ZMQ --> FRAME
@@ -221,9 +221,10 @@ a log line rather than a TradeStation crash.
 
 | Item | Value |
 | --- | --- |
-| Pattern | ZeroMQ **XPUB/SUB**, fire-and-forget per message, no delivery guarantee |
-| Publisher | The DLL `bind`s, defaulting to `tcp://127.0.0.1:5555` |
-| Subscriber | An ordinary `SUB`. `connect`s to the same endpoint, subscribes to each symbol precisely, **plus the control topic unconditionally** |
+| Pattern | ZeroMQ **XPUB → XSUB/XPUB forwarder → SUB**, fire-and-forget per message, no delivery guarantee |
+| Publisher | The DLL **`connect`s** to `tcp://127.0.0.1:5555`. It does not bind: TradeStation 10 gives each chart its own `orchart.exe` with its own copy of the DLL's globals, and `bind()` is exclusive, so the first chart took the port and every other one got `-3` until TradeStation was restarted |
+| **Forwarder** | **`ts2py-hub` binds both sides** — XSUB on `:5555` for publishers, XPUB on `:5556` for consumers. It is mandatory: with both ends connecting, something has to bind. Its obligations are normative and live in [`contract/wire.md`](../contract/wire.md) |
+| Subscriber | An ordinary `SUB`. **`connect`s to the hub's XPUB port (`:5556`)** — not `:5555`, which is the publisher-facing side; a `SUB` pointed there is an incompatible socket pair whose only symptom is silence. Subscribes to each symbol precisely, **plus the control topic unconditionally** |
 | Why XPUB | Identical send semantics to PUB, but subscriptions arrive back as readable messages — the only way the DLL can answer "is anyone listening", which is what `EL_InitChart`'s `-7` rests on |
 | Topics | `<symbol>` carries points (`EL_Publish`); `__ts2py__` carries chart announcements (`EL_InitChart`). **The topic is the discriminator** — no `kind` field was added |
 | Frame count | 2 (`ZMQ_SNDMORE`): frame 1 = UTF-8 topic, frame 2 = UTF-8 JSON payload |
@@ -292,7 +293,7 @@ matches" and "this is actually old data" can never both be true at once.
 | `1` | This chart was already announced in this session; an idempotent no-op | `EL_InitChart` |
 | `-1` | Publish called before a successful init | `EL_Publish` |
 | `-2` | ZMQ send failed (hit the high-water mark, or an exception) | `EL_InitChart` `EL_Publish` |
-| `-3` | Init's bind/socket creation failed (most commonly: the port is already in use) | `EL_InitChart` |
+| `-3` | Socket/context creation or `connect()` failed — an invalid endpoint string, or resources unavailable. **No longer "the port is in use"**: the DLL connects now, and `connect()` does not fail on a busy endpoint. "Nobody is listening" is `-7`; "this point reached nobody" is `-10` | `EL_InitChart` |
 | `-4` | Invalid argument: a null pointer; **a quantity outside ±9.0e15** (just under 2^53, the largest integer a `double` holds exactly — *not* `int64`'s range, and rejected rather than clamped); or **the assembled payload being truncated by `snprintf`** past its buffer | `EL_InitChart` `EL_Publish` |
 | `-6` | ABI mismatch — the caller is a `.ELD` older than this protocol | The three tombstone exports |
 | `-7` | **No subscriber yet. Retryable, and the normal state at startup** | `EL_InitChart` |
