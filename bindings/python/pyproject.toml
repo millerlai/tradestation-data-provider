@@ -66,6 +66,7 @@ dev = [
 
 [project.scripts]
 tradestation-data-ingest = "tradestation_data.runtime.main:main"
+tradestation-data-hub = "tradestation_data.hub:main"
 
 [project.urls]
 Homepage = "https://github.com/millerlai/tradestation-data-provider"
