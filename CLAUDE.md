@@ -433,6 +433,19 @@ The supported spelling is `asyncio.run(coro, loop_factory=asyncio.SelectorEventL
 
 ## Conventions
 
+- **A user-visible change updates `CHANGELOG.md`'s `[Unreleased]` in the SAME PR.**
+  User-visible means the wire, the ABI, an error code, the CLI, the deployment topology,
+  or any public API. This is the same same-commit rule `contract/error_codes.md` already
+  states for itself and `ts2python.h`, and it exists for the same reason: a fact recorded
+  in one place and not the other is a fact that quietly becomes wrong.
+
+  It is stated here because it has been missed three times running — ABI 4, the
+  `on_partial_bar` callback, and the hub transport all shipped without an entry, and the
+  `[Unreleased]` section was left describing an `EL_Init` signature that ABI 4 had already
+  reversed. **When writing a plan, list `CHANGELOG.md` explicitly in the documentation
+  changes.** Nothing else catches it: a reviewer checks the change against the plan, so a
+  file the plan never names is a file no review will ask about, and no grep for endpoints
+  or symbols will ever hit it.
 - Lint/format: ruff (line length 100, target py311; rules `E,F,W,I,N,UP,B,SIM,RUF`; tests get `N802/N803` relaxed). Run it from `bindings/python/`. The repo-root `.ruff.toml` exists only to stop a top-level `ruff check .` from falling back to defaults and rewriting the vendored vcpkg checkout — which has happened.
 - Types: mypy strict on `src/`; `tests/` is excluded.
 - C++ builds Win32 (x86) only — TradeStation is a 32-bit process. `DEFINE_SYMBOL` on the `TS2Python` target supplies `TS2PYTHON_EXPORTS`; CMake's automatic `<target>_EXPORTS` differs in case and leaves the header on the `dllimport` branch.
