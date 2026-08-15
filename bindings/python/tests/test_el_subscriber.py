@@ -334,6 +334,13 @@ async def test_connect_is_idempotent_and_creates_owned_context() -> None:
     await provider.close()
 
 
+def test_endpoint_property_reflects_the_configured_address() -> None:
+    """Read-only view for callers (the ingestion runtime's `wire_silent`
+    diagnostic) that need to name the endpoint without a private attribute."""
+    provider = TradeStationELProvider(endpoint="tcp://127.0.0.1:5556")
+    assert provider.endpoint == "tcp://127.0.0.1:5556"
+
+
 @pytest.mark.asyncio
 async def test_subscribe_without_connect_raises() -> None:
     provider = TradeStationELProvider(endpoint="inproc://unused")
@@ -502,6 +509,102 @@ def test_publisher_restart_resets_instead_of_reporting_huge_loss() -> None:
     assert t.messages_lost == 0
     t.observe("SPY", 2, 7002)
     assert t.messages_lost == 0
+
+
+def test_same_topic_gaining_a_new_sid_logs_once(caplog) -> None:
+    """A topic seeing a sid it has not seen before is worth exactly one line.
+
+    Deliberately does NOT call this a restart, in the log or here: on the
+    wire it is indistinguishable from a second process joining the same
+    topic (see the interleaving test below), so neither this test nor the
+    code claims to know which one happened.
+    """
+    t = _tracker()
+    with caplog.at_level("INFO", logger="tradestation_data.wire.el_subscriber"):
+        t.observe("SPY", 900, 7001)
+        t.observe("SPY", 901, 7001)
+        t.observe("SPY", 1, 7002)  # a sid SPY has not carried before
+        t.observe("SPY", 2, 7002)
+    assert t.messages_lost == 0
+    changed = [r for r in caplog.records if r.message == "publisher_session_changed"]
+    assert len(changed) == 1
+    assert changed[0].topic == "SPY"
+    assert changed[0].new_sid == 7002
+    assert changed[0].known_sids == [7001]
+
+
+def test_two_sids_interleaved_on_different_topics_stay_independent(caplog) -> None:
+    """N TradeStation chart processes fan into one socket, one sid each.
+
+    This is the scenario the scalar `sid` got wrong: QQQ's frames carrying a
+    different sid than SPY's must never look like SPY's own publisher
+    changing. Two clean, contiguous, and entirely unrelated streams.
+    """
+    t = _tracker()
+    with caplog.at_level("INFO", logger="tradestation_data.wire.el_subscriber"):
+        t.observe("SPY", 1, 7001)
+        t.observe("QQQ", 1, 7002)
+        t.observe("SPY", 2, 7001)
+        t.observe("QQQ", 2, 7002)
+        t.observe("SPY", 3, 7001)
+        t.observe("QQQ", 3, 7002)
+    assert t.messages_lost == 0
+    assert not [r for r in caplog.records if r.message == "publisher_session_changed"], (
+        "two DIFFERENT topics each seeing their own sid for the first time is not "
+        "news about either one"
+    )
+
+
+def test_gap_on_one_sid_topic_still_counted_amid_interleaving() -> None:
+    """A real gap on one (sid, topic) pair must not be masked by a second,
+    healthy, interleaved (sid, topic) stream sharing the same tracker."""
+    t = _tracker()
+    t.observe("SPY", 1, 7001)
+    t.observe("QQQ", 1, 7002)
+    t.observe("SPY", 5, 7001)  # SPY/7001 lost 2, 3, 4
+    t.observe("QQQ", 2, 7002)  # QQQ/7002 stays contiguous throughout
+    assert t.messages_lost == 3
+
+
+def test_two_sids_interleaved_on_the_SAME_topic_stay_independent(caplog) -> None:
+    """Models `__ts2py__`: every open chart process's hello lands on this one
+    literal topic, so N sids are live on it simultaneously, not one replacing
+    another. A(seq1) B(seq1) A(seq2) B(seq2) A(seq3) must track two
+    contiguous streams, not re-baseline every single frame.
+
+    This is the exact defect a scalar "last sid per topic" reintroduces: A's
+    frame would evict B's expectation, B's next frame would evict A's, and
+    each `observe()` call would find nothing to compare against -- gap
+    detection blind on this topic specifically, forever, while every other
+    topic looked fine. `publisher_session_changed` must fire exactly once
+    (when B, a sid SPY has not carried before, first appears), not on every
+    alternation.
+    """
+    t = _tracker()
+    with caplog.at_level("INFO", logger="tradestation_data.wire.el_subscriber"):
+        t.observe("__ts2py__", 1, 7001)  # A baseline
+        t.observe("__ts2py__", 1, 7002)  # B baseline, first time this topic sees 7002
+        t.observe("__ts2py__", 2, 7001)  # A continues
+        t.observe("__ts2py__", 2, 7002)  # B continues
+        t.observe("__ts2py__", 3, 7001)  # A continues again
+    assert t.messages_lost == 0
+    changed = [r for r in caplog.records if r.message == "publisher_session_changed"]
+    assert len(changed) == 1, "must log once for B joining, not once per alternation"
+    assert changed[0].new_sid == 7002
+
+
+def test_gap_inside_one_sid_still_counted_while_another_sid_shares_the_topic() -> None:
+    """The other half of the SAME-topic scenario: A's own gap must still be
+    caught even though B is live on the identical topic the whole time --
+    proof that neither sid's expectation is ever evicted by the other's
+    traffic."""
+    t = _tracker()
+    t.observe("__ts2py__", 1, 7001)  # A baseline
+    t.observe("__ts2py__", 1, 7002)  # B baseline
+    t.observe("__ts2py__", 2, 7002)  # B contiguous
+    t.observe("__ts2py__", 5, 7001)  # A: seq 2, 3, 4 never arrived
+    t.observe("__ts2py__", 3, 7002)  # B still contiguous
+    assert t.messages_lost == 3
 
 
 def test_sequence_regression_does_not_rewind_expectation() -> None:
@@ -913,4 +1016,84 @@ async def test_announcement_declaring_another_proto_is_refused(zmq_inproc_bus, c
     assert any(r.message == "chart_announcement_refused" for r in caplog.records)
     assert provider.announced_charts == {}
 
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_chart_announced_under_two_sids_warns_but_key_shape_is_unchanged(
+    zmq_inproc_bus, caplog
+) -> None:
+    """Two TradeStation processes with the same chart open.
+
+    `announced_charts` answers "what charts are attached", not "which
+    process attached them" -- its key must stay the plain chart identity
+    even though two different sids claimed it. The warning is the only
+    place this doubling becomes visible at all: both processes publish under
+    one topic with their own internally-contiguous `seq`, so no gap ever
+    appears to reveal it.
+    """
+    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
+    await _publish(pub, CONTROL_TOPIC, _hello(sid=7001))
+    await _publish(pub, CONTROL_TOPIC, _hello(sid=7002))
+    await _publish(pub, "SPY", _frame())
+
+    with caplog.at_level("WARNING", logger="tradestation_data.wire.el_subscriber"):
+        await _drain_until_bar(provider)
+
+    record = next(r for r in caplog.records if r.message == "chart_announced_under_new_sid")
+    assert record.symbol == "SPY"
+    assert record.bar_type == 1
+    assert record.bar_interval == 5
+    assert record.new_sid == 7002
+    assert record.known_sids == [7001]
+    # The note must NOT assert a cause: a restart and a second process are
+    # indistinguishable on the wire, and TradeStation restarting under a
+    # live consumer walks every chart through here at once.
+    assert "either" in record.note and "cannot tell" in record.note
+    # Exactly one entry, and the key is still the plain 3-tuple -- a second
+    # publisher claiming a chart must not fork it into two.
+    assert provider.announced_charts == {("SPY", 1, 5): 2}
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_chart_reannounced_by_its_known_sid_does_not_rewarn(zmq_inproc_bus, caplog) -> None:
+    """The hub replays hello for every known chart on every subscriber
+    attach, so the SAME sid re-announcing is routine, not a second process
+    showing up -- warning on it every reconnect would drown the one line
+    that actually matters."""
+    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
+    await _publish(pub, CONTROL_TOPIC, _hello(sid=7001))
+    await _publish(pub, CONTROL_TOPIC, _hello(sid=7001, seq=2))
+    await _publish(pub, "SPY", _frame())
+
+    with caplog.at_level("WARNING", logger="tradestation_data.wire.el_subscriber"):
+        await _drain_until_bar(provider)
+
+    assert not [r for r in caplog.records if r.message == "chart_announced_under_new_sid"]
+
+    await provider.close()
+
+
+@pytest.mark.asyncio
+async def test_frames_received_counts_hello_and_point_frames_before_filtering(
+    zmq_inproc_bus,
+) -> None:
+    """Every frame taken off the socket, counted before any parsing or
+    filtering -- the fact `wire_silent` reads to tell a dead transport
+    (this stays 0) from a quiet market (frames, at least hellos, arrive).
+    """
+    provider, pub = await _connected(zmq_inproc_bus, ["SPY"])
+    assert provider.frames_received == 0
+
+    await _publish(pub, CONTROL_TOPIC, _hello())
+    await _publish(pub, "SPY", _frame(seq=2))
+
+    gen = provider.events()
+    event = await asyncio.wait_for(anext(gen), timeout=1.0)
+    assert event.symbol == "SPY"
+    assert provider.frames_received == 2
+
+    await gen.aclose()
     await provider.close()

@@ -500,6 +500,61 @@ def test_emit_heartbeat_updates_counters() -> None:
     assert runtime._counters.last_report_bars == 2
 
 
+def test_wire_silent_fires_once_and_only_once_when_no_frames_have_arrived(caplog) -> None:
+    """Say-once, like the DLL's own -7.
+
+    Hub down, wrong port, or both ends bound instead of one bound one
+    connected all look identical from here: silence. Repeating this every
+    heartbeat for the rest of the process's life would bury the one line
+    that matters, so it must survive a second heartbeat without repeating.
+    """
+    import logging
+
+    class _SilentProvider(_StubProvider):
+        frames_received = 0
+        endpoint = "tcp://127.0.0.1:5556"
+
+    runtime = IngestionRuntime(
+        provider=_SilentProvider(),
+        symbols=["SPY", "QQQ"],
+        snapshot=MarketSnapshot(),
+        heartbeat_interval=3600,
+        flush_poll_interval=3600,
+        advance_interval=3600,
+    )
+    with caplog.at_level(logging.WARNING):
+        runtime._emit_heartbeat()
+        runtime._emit_heartbeat()
+
+    silent = [r for r in caplog.records if r.message == "wire_silent"]
+    assert len(silent) == 1, "must fire at most once per process, not once per heartbeat"
+    assert silent[0].endpoint == "tcp://127.0.0.1:5556"
+    assert silent[0].symbols_subscribed == 2
+
+
+def test_wire_silent_does_not_fire_once_frames_have_arrived(caplog) -> None:
+    """The precondition, not just the dedup: a transport that delivered even
+    one frame (a hello counts) is proven alive and must never trip this,
+    however quiet the market gets afterwards."""
+    import logging
+
+    class _LiveProvider(_StubProvider):
+        frames_received = 5
+
+    runtime = IngestionRuntime(
+        provider=_LiveProvider(),
+        symbols=["SPY"],
+        snapshot=MarketSnapshot(),
+        heartbeat_interval=3600,
+        flush_poll_interval=3600,
+        advance_interval=3600,
+    )
+    with caplog.at_level(logging.WARNING):
+        runtime._emit_heartbeat()
+
+    assert not [r for r in caplog.records if r.message == "wire_silent"]
+
+
 # ---- additional coverage: provider/task/loop/strategy-cycle edge cases -----
 
 

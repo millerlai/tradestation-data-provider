@@ -162,6 +162,11 @@ class IngestionRuntime:
         # exactly what one bool does. Bounded in practice — series count is the
         # number of open charts, and exception types are the callback's own.
         self._partial_callback_warned: set[tuple[tuple[str, int, int], str]] = set()
+        # Say-once flag for `wire_silent` (see _emit_heartbeat), matching the
+        # DLL's own -7 convention: a diagnostic for "did the transport ever
+        # come up", not a running health check, so it must never repeat once
+        # the answer is known.
+        self._wire_silent_warned = False
 
     # ---- lifecycle --------------------------------------------------
 
@@ -530,3 +535,27 @@ class IngestionRuntime:
         )
         self._counters.last_report_monotonic = now
         self._counters.last_report_bars = self._counters.bars_out
+
+        # Say-once, like the DLL's own -7. Hub down, wrong port, or both ends
+        # bound instead of one bound one connected all look identical from
+        # here: silence. And silence after the close is normal, so a
+        # continuous check would either miss the real cases or false-alarm
+        # every evening — only a one-shot "has ANYTHING ever arrived" survives
+        # both. `frames_received` counts hello frames too, so it can only be
+        # 0 before the very first subscriber attach anywhere; once it is
+        # nonzero the transport is proven alive and this must never fire
+        # again, even if the market itself goes quiet for the rest of the day.
+        frames_received = getattr(self._provider, "frames_received", None)
+        if not self._wire_silent_warned and frames_received == 0:
+            self._wire_silent_warned = True
+            log.warning(
+                "wire_silent",
+                extra={
+                    "endpoint": getattr(self._provider, "endpoint", None),
+                    "symbols_subscribed": len(self._symbols),
+                    "hint": (
+                        "is the hub running? if the DLL was just replaced, "
+                        "check the consumer is connected to the hub's XPUB port"
+                    ),
+                },
+            )
