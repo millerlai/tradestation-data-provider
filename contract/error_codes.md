@@ -10,13 +10,27 @@
 | `1` | 這張圖在本 session 已宣告過。沿用既有 socket，第二次為 no-op | `EL_InitChart` | 不需處理。Indicator 可選擇不重複輸出 "init ok" |
 | `-1` | 未初始化 —— 在成功的 init 之前呼叫了 publish | `EL_Publish` | 先呼叫 `EL_InitChart` |
 | `-2` | ZeroMQ 送出失敗。可能是觸及 high-water mark 導致 `send()` 回傳 `EAGAIN`，或非預期的 `zmq::error_t` | `EL_InitChart` `EL_Publish` | 記錄後繼續，下一筆會重試。若持續發生，檢查 SUB 端是否存在 |
-| `-3` | init 的 bind / socket 建立失敗 —— 最常見是 TCP endpoint 已被其他 process 佔用（或前一個 TradeStation session 殘留的 DLL handle） | `EL_InitChart` `EL_Shutdown` | 檢查 `netstat -ano \| findstr :5555`，結束佔用者後重新 Verify indicator |
+| `-3` | socket 建立或 `connect()` 失敗 —— endpoint 字串無效，或 context / socket 建不出來 | `EL_InitChart` `EL_Shutdown` | 檢查 `ZMQEndpoint` 的字串。**這不再是「port 被佔用」**，見下節 |
 | `-4` | 參數無效。`zmq_endpoint` 或 `symbol` 為 null；**或 payload `snprintf` 被截斷**（代表數值輸入異常超出範圍） | `EL_InitChart` `EL_Publish` | 上游資料問題，確認 EL indicator 傳入的型別 |
 | `-6` | **ABI 不符 —— 呼叫端是早於本協定的 `.ELD`** | `EL_Init` `EL_PublishTick` `EL_PublishBar`（三者皆為墓碑） | 重新匯入隨這顆 DLL 一起發布的 `.ELD`。見下節 |
-| `-7` | **尚無訂閱者。可重試，而且是啟動時的正常狀態** | `EL_InitChart` | 不需處理。Indicator 保持 `InitDone = False`，下一根 bar 再呼叫一次 |
+| `-7` | **尚無訂閱者。可重試，而且是啟動時的正常狀態** | `EL_InitChart` | 不需處理。Indicator 保持 `InitDone = False`，下一根 bar 再呼叫一次。**hub 沒開的表現也是這個** |
 | `-8` | **endpoint 衝突** —— 這張圖要求的 endpoint 與第一張圖已綁定的不同 | `EL_InitChart` | 把該圖的 `ZMQEndpoint` input 改成與其他圖一致。見下節 |
 | `-9` | **訂閱佇列讀不到** —— socket 故障，這次呼叫無從回答「有沒有人在聽」 | `EL_InitChart` | 真正的錯誤，不是可重試的啟動狀態。檢查 endpoint 與 socket 狀態。見下節 |
-| `-10` | **這個 symbol 沒有訂閱者，這一筆資料已經遺失** | `EL_Publish` | 檢查 consumer 是否在跑、以及它的 symbol 清單是否包含這張圖。每個「無訂閱者事件」每張圖只回報一次。見下節 |
+| `-10` | **這個 symbol 沒有訂閱者，這一筆資料已經遺失** | `EL_Publish` | 檢查 consumer 是否在跑、它的 symbol 清單是否包含這張圖、以及 **hub 是否還活著**。每個「無訂閱者事件」每張圖只回報一次。見下節 |
+
+## `-3`：以前的處置建議是錯的
+
+`-3` 過去的意思是「bind 失敗」，而文件給的處置是「用 `netstat` 找出佔用者、結束它、
+重新 Verify」。那段建議設想的佔用者只有兩種 —— 別的程式，或前一個 TradeStation session
+殘留的 handle —— **兩種都是外來的、可以殺掉的**。
+
+它漏掉了第三種，而那正是實務上唯一會發生的一種：**佔用者是本次 session 自己的另一個
+chart 程序**。TradeStation 10 每開一張圖就是一個新的 `orchart.exe`，第一個搶到 port，
+其餘每一個都拿到 `-3`。照那段建議去殺掉佔用者，等於把裡面正常運作的圖一起弄死。
+
+現在 DLL 是 **connect 側**，這個失敗模式不存在了：`connect()` 不會因為「已被佔用」失敗。
+`-3` 剩下的意思是 endpoint 字串無效或 socket 建不出來 —— 真正罕見的狀況。
+「沒有人在聽」由 `-7` 表達，「這一筆沒人收」由 `-10` 表達。
 
 ## `-7` 不是錯誤
 
@@ -32,14 +46,27 @@ Indicator 對任何負值 rc 都保持 `InitDone = False`，所以這件事會�
 起來，下一根 bar 的 `EL_InitChart` 就會回 0 並開始發布。指標只會在 Print Log 說一次
 「waiting for a subscriber」，不會每根 bar 洗版。
 
+**hub 沒開起來的表現也是 `-7`**，而且這是對的：hub 沒開就等於沒有人在聽。
+
+### 「下一根 bar」可能是隔天開盤
+
+重試的節奏不由 DLL 決定，也不是計時器 —— **EasyLanguage 的 indicator 只在有資料進來時
+求值**。所以「下一根 bar」對一個盤前不跳動的 symbol（breadth 指數如 `$TICK`、`$ADD`、
+`$VOLD`、`$TRIN`）可能是**隔天開盤**。
+
+實測 2026-08-14：那批圖的第一根收盤 5 分鐘 bar 出現在 09:34:59，也就是 RTH 開盤後的第一
+個 5 分鐘邊界，不是啟動時。這不是故障，但它意味著：**consumer 應該在 TradeStation 之前
+起來**，否則某些 symbol 會安靜到下一次它們真的有成交為止。
+
 > **這代表 `cpp/Release/TS2Python_TestHarness.exe` 必須先有訂閱者才跑得動。**
 > 先開 `contract/tools/record.py`（或任何 SUB），否則 harness 會等到
 > `--subscriber-timeout-ms` 逾時後以 `-7` 退出。
 
 ## `-8`：一個 process 只有一個 endpoint
 
-DLL 的 socket 是**整個 process 共用一個**。哪張圖先跑到 `EL_InitChart` 就由它 bind，之後每一
-張圖拿到的都是同一個 socket —— 這是刻意的，多張圖共用一條 PUB 通道正是這個設計的重點。
+DLL 的 socket 是**整個 process 共用一個**。哪張圖先跑到 `EL_InitChart` 就由它建立並
+`connect`，之後每一張圖拿到的都是同一個 socket —— 這是刻意的，多張圖共用一條通道正是
+這個設計的重點。（TradeStation 10 一張圖一個程序，所以這一條實務上很難踩到；規則不變。）
 
 代價是後面的圖傳進來的 `zmq_endpoint` **無處可用**。以前那個參數會被靜默丟棄，然後回
 `0`：Print Log 印著 "publishing starts now"，而那張圖的每一筆資料其實送往第一張圖選的
@@ -85,6 +112,20 @@ Print Log 留一行（indicator 對任何負值 rc 都會印）。DLL 端記在 
 該 symbol 的訂閱者一回來就清除，下一次斷線會重新回報一次。
 
 `EL_Publish` **仍然照送**：送出的成本是零，而且訂閱者有可能在檢查與送出之間接上。
+
+### hub 斷線也算，而且它需要一個 socket monitor 才看得見
+
+DLL 現在是 connect 側，而 libzmq 為了讓重連透明，**connect 側的 pipe 是跨重連保留的**
+（`ZMQ_IMMEDIATE=0`，預設）。所以 hub 死掉時對端 pipe 不被銷毀、`xpipe_terminated`
+不會跑、**不產生任何取消訂閱訊息** —— 訂閱集合永遠不會清空。
+
+實測後果：hub 死著的時候 `EL_Publish` 對每一根 bar 回 `0`，而每一根都進虛空。
+`send()` 二十萬次都沒有失敗過（XPUB 過了 SNDHWM 是靜默丟棄，不回錯誤），indicator 只在
+`rc < 0` 才印，所以 Print Log 一行都不會有。那些 bar 也**補不回來**。
+
+這正是 `-10` 存在要消滅的失敗模式，所以 DLL 在自己的 socket 上掛了一個 monitor：
+收到 `ZMQ_EVENT_DISCONNECTED` 就清空訂閱集合，於是 `-10` 立刻開始回報，並在 hub 回來、
+訂閱重新到達時自行恢復。**這個 monitor 不是最佳化，是 `-10` 在 hub 架構下成立的前提。**
 
 ## `-6` 與墓碑匯出
 
