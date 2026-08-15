@@ -22,7 +22,7 @@
   resolving that here is what used to force a publisher-convention version
   number onto every payload, because the choice was invisible on the wire.
 
-  NOTHING IS PUBLISHED UNTIL A CONSUMER IS LISTENING. EL_Init returns -7
+  NOTHING IS PUBLISHED UNTIL A CONSUMER IS LISTENING. EL_InitChart returns -7
   while no subscriber is attached, and this file leaves InitDone False on any
   negative rc, so it simply tries again on the next bar. That is the normal
   path every time TradeStation starts before run_ingestion.py: the chart sits
@@ -148,9 +148,9 @@ DefineDLLFunc: "TS2Python.dll", int, "EL_Shutdown";
 DefineDLLFunc: "TS2Python.dll", int, "EL_DllVersion";
 
 { -- Chart identity, assigned every bar and BEFORE the init block ----------
-     EL_Init announces this chart to the consumer, so it needs these; the
-     publish block below reuses them rather than reading the reserved words
-     a second time.
+     EL_InitChart announces this chart to the consumer, so it needs these;
+     the publish block below reuses them rather than reading the reserved
+     words a second time.
 
      `Category` must be assigned to a numeric variable before it can be read
      — TradeStation's own requirement. Both travel verbatim; this script
@@ -163,10 +163,11 @@ Cat = Category;
 
 { -- Init: retried until it succeeds, then never again on this chart.
 
-     EL_Init both binds the socket (whichever chart gets there first) and
-     announces THIS chart. rc 1 means this chart was already announced in
-     this session — still success. rc -7 means no consumer is subscribed
-     yet, which is the ordinary state at startup and is handled below.
+     EL_InitChart both connects the socket (whichever chart gets there
+     first) and announces THIS chart. rc 1 means this chart was already
+     announced in this session — still success. rc -7 means no consumer is
+     subscribed yet, which is the ordinary state at startup and is handled
+     below.
 
      rc = -6 cannot come from init any more; the tombstones that return it
      are EL_PublishTick / EL_PublishBar, which this file does not bind. It
@@ -197,7 +198,7 @@ If Enabled and InitDone = False Then Begin
                       " bar after it attaches. This message appears once.");
             End;
         End Else If LogErrors Then
-            Print("[TS2Python] EL_Init FAILED rc=", InitRC,
+            Print("[TS2Python] EL_InitChart FAILED rc=", InitRC,
                   " endpoint=", ZMQEndpoint,
                   " symbol=", Sym);
         { leave InitDone = False so we retry on the next tick }
@@ -213,7 +214,7 @@ If Enabled and InitDone = False Then Begin
                       " Reinstall TS2Python.dll and re-import the .ELD that",
                       " shipped with it — they are versioned together.");
         End Else If LogErrors Then
-            Print("[TS2Python] EL_Init ok rc=", InitRC,
+            Print("[TS2Python] EL_InitChart ok rc=", InitRC,
                   " dll_version=", DllVer,
                   " symbol=", Sym,
                   " category=", Cat,
@@ -281,8 +282,8 @@ End;
 
 { -- Publish. One call, every chart, every field. }
 If Enabled and InitDone and VersionMismatch = False Then Begin
-    { Sym and Cat are assigned at the top of the script — EL_Init needs them
-      too, so they are no longer read here. }
+    { Sym and Cat are assigned at the top of the script — EL_InitChart needs
+      them too, so they are no longer read here. }
     { Bar-time string "yyyy-MM/dd-HH:mm:ss" 24-hour (e.g. "2026-04/18-13:30:45").
       Goes on the wire verbatim as ts_str. The authoritative wall-clock ts is
       stamped by the DLL; this string is what the subscriber derives the bar's

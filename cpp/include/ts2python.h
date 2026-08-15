@@ -30,28 +30,34 @@ extern "C" {
 //   1  already initialized (idempotent; not an error)
 //  -1  not initialized
 //  -2  zmq send failed
-//  -3  init failed (bind / socket create)
+//  -3  socket/context creation failed, or connect() rejected the endpoint
+//      string. NOT "the endpoint was already in use" -- this process only
+//      ever connects, and connect() does not fail for that reason.
 //  -4  invalid argument (null pointer, non-representable quantity, ...)
 //  -6  ABI mismatch — the caller is an .ELD older than this protocol
 //  -7  no subscriber yet — RETRYABLE, and the normal state at startup
 //  -8  endpoint conflict — this chart asked for an endpoint other than the
-//      one already bound by the first chart
+//      one already connected to by the first chart
 //  -9  the subscription queue could not be read, so "is anyone listening"
 //      has no answer this call
 // -10  published with no subscriber for the symbol — the point is lost.
-//      Reported once per episode per chart, not once per bar
+//      Reported once per episode per chart, not once per bar. Also fires
+//      when the far end (the hub) disconnects: caught by a socket monitor,
+//      since the connect-side pipe survives a reconnect and no unsubscribe
+//      is ever generated for it.
 //
 // -5 is RETIRED, not free. It meant "unsupported bar type / interval", from
 // back when the DLL mapped a chart onto a timeframe vocabulary and refused
 // what it had no word for. Nothing refuses an interval any more. Per
 // ../contract/error_codes.md a retired code is never reused.
 
-// Bind the publisher (once per process) and announce this chart.
+// Connect the publisher (once per process) and announce this chart.
 //
 // Every chart running the indicator calls this with its own identity. The
-// socket is bound by whichever chart gets here first; the session id and the
-// sequence counters are stamped only on that first bind, so a second chart —
-// or a re-Verify — does not look like a publisher restart to subscribers.
+// socket is created and connected by whichever chart gets here first; the
+// session id and the sequence counters are stamped only on that first
+// connect, so a second chart — or a re-Verify — does not look like a
+// publisher restart to subscribers.
 //
 // WHAT MAKES THIS DIFFERENT FROM A PLAIN INIT: it does not return 0 until a
 // subscriber is actually attached. The socket is XPUB rather than PUB, which
@@ -64,13 +70,15 @@ extern "C" {
 // and reports nothing. Without this gate an operator sees "init ok" in the
 // Print Log while every frame goes in the bin.
 //
-//   rc  0  bound, a subscriber is attached, and this chart's hello was sent
+//   rc  0  connected, a subscriber is attached, and this chart's hello was
+//          sent
 //   rc  1  this exact chart already announced in this session; nothing to do
 //   rc -2  the hello frame could not be sent
-//   rc -3  bind / socket create failed
+//   rc -3  socket/context creation failed, or connect() rejected the
+//          endpoint string
 //   rc -4  zmq_endpoint or symbol was NULL
 //   rc -7  no subscriber on the control topic yet — call again next bar
-//   rc -8  a different endpoint is already bound — see below
+//   rc -8  a different endpoint is already connected to — see below
 //   rc -9  the XPUB subscription queue could not be read
 //
 // -9 EXISTS TO KEEP -7 HONEST. Subscriptions arrive as readable messages, so
@@ -80,11 +88,12 @@ extern "C" {
 // retries in silence forever, while the consumer sits there running. They
 // are different facts and now they have different codes.
 //
-// ONE ENDPOINT PER PROCESS. The first chart to get here binds; every later
-// chart is handed that same socket. A chart naming a different endpoint is
-// therefore refused with -8 rather than being silently published to the
-// first chart's port, which is indistinguishable from working until someone
-// notices the consumer on the named port has been idle all session.
+// ONE ENDPOINT PER PROCESS. The first chart to get here creates the socket
+// and connects it; every later chart is handed that same socket. A chart
+// naming a different endpoint is therefore refused with -8 rather than being
+// silently published through the first chart's connection, which is
+// indistinguishable from working until someone notices the consumer on the
+// named endpoint has been idle all session.
 //
 // On success a hello frame goes out on the CONTROL topic (not the symbol's),
 // carrying symbol / category / bar_type / bar_interval. It has to be a

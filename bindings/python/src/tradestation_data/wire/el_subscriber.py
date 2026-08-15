@@ -274,7 +274,10 @@ class TradeStationELProvider:
 
     def __init__(
         self,
-        endpoint: str = "tcp://127.0.0.1:5555",
+        # The hub's XPUB port. 5555 is the hub's XSUB side, where the chart
+        # processes connect — a SUB pointed there is an incompatible socket
+        # pair, which shows up as silence rather than an error.
+        endpoint: str = "tcp://127.0.0.1:5556",
         *,
         context: zmq.asyncio.Context | None = None,
     ) -> None:

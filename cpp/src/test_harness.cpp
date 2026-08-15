@@ -9,12 +9,12 @@
 //   TS2Python_TestHarness.exe --mode stress --rate 10000 --seconds 10
 //   TS2Python_TestHarness.exe --mode multithread --threads 8 --per-thread 5000
 //
-// A SUBSCRIBER MUST BE RUNNING FIRST. EL_InitChart returns -7 until one attaches
-// to the control topic, so start `contract/tools/record.py` (or any SUB on
-// the endpoint) in another window before this. That is the point of the
-// change: the old harness "succeeded" with nobody listening and every frame
-// went in the bin. Exits 0 on success, non-zero on any init / publish
-// failure.
+// THE HUB MUST BE RUNNING FIRST, WITH A SUBSCRIBER ATTACHED TO IT.
+// EL_InitChart returns -7 until one attaches to the control topic, so start
+// ts2py-hub, then `contract/tools/record.py` (or any other SUB on the hub)
+// in another window before this. That is the point of the change: the old
+// harness "succeeded" with nobody listening and every frame went in the
+// bin. Exits 0 on success, non-zero on any init / publish failure.
 //
 // Every run also asserts the ABI version, that the EL_PublishTick /
 // EL_PublishBar tombstones refuse with -6, and that re-announcing the same
@@ -408,8 +408,9 @@ int main(int argc, char** argv) {
     // is what the EasyLanguage indicator does across successive bars,
     // compressed into a poll.
     //
-    // IT MEANS THE HARNESS NEEDS A SUBSCRIBER. Start `contract/tools/record.py`
-    // (or any SUB on the endpoint) first, or this exits with -7.
+    // IT MEANS THE HUB MUST BE RUNNING FIRST, WITH A SUBSCRIBER ATTACHED TO
+    // IT. Start ts2py-hub, then `contract/tools/record.py` (or any other SUB
+    // on the hub) first, or this exits with -7.
     std::printf("[harness] EL_InitChart(%s) — waiting up to %dms for a subscriber\n",
                 o.endpoint.c_str(), o.subscriber_timeout_ms);
     int rc = -7;
@@ -454,10 +455,11 @@ int main(int argc, char** argv) {
     std::printf("[harness] second chart announced rc=%d\n", rc3);
 
     // A chart naming a DIFFERENT endpoint must be REFUSED. Only the first
-    // chart binds, so this one's points would otherwise go to the port that
-    // chart chose while a consumer on the endpoint it names sits idle all
-    // session — reported as rc 0, with nothing on either side to reveal it.
-    // Checked here so the refusal is regression-tested on every harness run.
+    // chart creates the socket, so this one's points would otherwise go to
+    // the endpoint that chart connected to while a consumer on the endpoint
+    // it names sits idle all session — reported as rc 0, with nothing on
+    // either side to reveal it. Checked here so the refusal is
+    // regression-tested on every harness run.
     const int rc_conflict = EL_InitChart("tcp://127.0.0.1:1", "ZZZ",
                                     /*category*/ 2, /*bar_type*/ 1,
                                     /*bar_interval*/ 1);

@@ -46,6 +46,11 @@ constexpr int kDllVersion = 4;
 // (or be prefixed by one) would cross-deliver.
 constexpr char kControlTopic[] = "__ts2py__";
 
+// Fixed inproc endpoint for the DLL's own socket monitor (see g_monitor
+// below). One socket per process, so a fixed name can never collide with a
+// second instance of anything in this process.
+constexpr char kMonitorEndpoint[] = "inproc://ts2py.monitor";
+
 std::mutex       g_mutex;
 // Raw pointers, never destroyed implicitly. See pin_self_module_once()
 // for the full rationale — short version: zmq_ctx_term() joins the ZMQ
@@ -55,16 +60,30 @@ std::mutex       g_mutex;
 // EL_Shutdown for the standalone test harness path.
 zmq::context_t*  g_ctx  = nullptr;
 zmq::socket_t*   g_sock = nullptr;
-
-// The endpoint g_sock is actually bound to.
+// PAIR socket wired to g_sock's own event stream (ZMQ_EVENT_DISCONNECTED
+// only, via zmq_socket_monitor). It exists for one reason: this process is
+// now on the CONNECT side of its socket, and libzmq keeps a connect-side
+// pipe alive across a TCP reconnect (ZMQ_IMMEDIATE=0, the default) — so
+// when the hub dies, the pipe is never terminated, xpub_t::xpipe_terminated
+// never runs, and no unsubscribe is ever generated. Without this monitor,
+// g_sub_topics would never learn the hub is gone. See "L4" in
+// docs/plans/transport-hub-2026-08-15.md.
 //
-// Only the first chart to reach EL_InitChart binds; every later chart passes its
-// own `zmq_endpoint` and gets the already-bound socket. Without recording
-// what that socket is bound to, a chart configured with a different endpoint
-// was registered, announced and reported as success while publishing to the
-// port the FIRST chart chose — a consumer on the endpoint that chart names
-// receives nothing, forever, with no rc and no log line to say why. Comparing
-// against this is what turns that into -8.
+// Same raw-pointer / no-destructor rule as g_ctx and g_sock, same reason —
+// see pin_self_module_once(). Created once, alongside g_sock, in
+// EL_InitChart's first-caller branch; closed in EL_Shutdown BEFORE g_sock
+// and g_ctx.
+zmq::socket_t*   g_monitor = nullptr;
+
+// The endpoint g_sock is actually connected to.
+//
+// Only the first chart to reach EL_InitChart creates the socket; every later
+// chart passes its own `zmq_endpoint` and gets that same socket. Without
+// recording what it is connected to, a chart configured with a different
+// endpoint was registered, announced and reported as success while
+// publishing through the connection the FIRST chart made — a consumer on
+// the endpoint that chart names receives nothing, forever, with no rc and no
+// log line to say why. Comparing against this is what turns that into -8.
 std::string      g_endpoint;
 
 // ---- gap detection --------------------------------------------------------
@@ -414,6 +433,69 @@ bool send_hello(Chart& c) {
     return true;
 }
 
+// Drain g_monitor's event queue non-blockingly. Must be called with g_mutex
+// held, and only when g_monitor exists.
+//
+// libzmq keeps a CONNECT-side pipe alive across a TCP reconnect
+// (ZMQ_IMMEDIATE=0, the default), so when the hub dies the pipe is NOT
+// terminated, xpub_t::xpipe_terminated never runs on it, and NO unsubscribe
+// is ever generated — g_sub_topics would stay populated forever, and
+// EL_Publish would keep returning 0 for bars that reach nobody. This
+// monitor is the only way this process learns the hub is gone. See "L4" in
+// docs/plans/transport-hub-2026-08-15.md.
+//
+// A monitor message is TWO frames: a 6-byte event id + value, then the
+// endpoint address string. Both are read every iteration so the socket is
+// never left mid-message — the same hazard close_abandoned_message() exists
+// for on g_sock.
+//
+// A read failure here is swallowed, unconditionally, and NEVER becomes a
+// caller-visible rc — there is no -9-shaped code for it, on purpose. -9
+// exists to keep -7 honest about "is anyone subscribed", a question this
+// function does not answer, so failing EL_InitChart over a monitor hiccup
+// would conflate two different facts on every subsequent init.
+void drain_monitor() {
+    if (!g_monitor) return;
+    try {
+        zmq::message_t event_frame;
+        zmq::message_t addr_frame;
+        while (g_monitor->recv(event_frame, zmq::recv_flags::dontwait)) {
+            // The address frame follows; read it so the socket stays on a
+            // message boundary for the next iteration.
+            //
+            // GUARDED BY more(), AND NON-BLOCKING, both deliberately. This
+            // runs under g_mutex on the publish path, so a recv that blocks
+            // here does not merely stall a drain — it freezes every chart in
+            // the process, inside TradeStation, with no way out. ZMQ delivers
+            // a multipart message to the receiver atomically, so dontwait is
+            // guaranteed to find the second frame; the guard costs nothing
+            // and means a monitor protocol that ever stops being two frames
+            // degrades to a dropped event instead of a hang.
+            if (event_frame.more()) {
+                (void)g_monitor->recv(addr_frame, zmq::recv_flags::dontwait);
+            }
+
+            std::uint16_t event_id = 0;
+            if (event_frame.size() >= sizeof(event_id)) {
+                std::memcpy(&event_id, event_frame.data(), sizeof(event_id));
+            }
+            if (event_id != ZMQ_EVENT_DISCONNECTED) continue;
+
+            // The hub is gone. Clear what it takes for EL_Publish to start
+            // reporting -10 again, and re-arm every chart's hello so the
+            // consumer that comes back with it hears from all of them —
+            // the same recovery a fresh subscribe already gets below.
+            g_sub_topics.clear();
+            for (auto& c : g_charts) {
+                c.announced = false;
+            }
+        }
+    } catch (...) {
+        // Never propagates. See the function comment: no rc exists for "the
+        // monitor queue could not be read", on purpose.
+    }
+}
+
 // Read whatever subscription traffic XPUB has queued, and re-announce every
 // known chart when a consumer attaches. Must be called with g_mutex held.
 //
@@ -467,9 +549,10 @@ bool drain_subscriptions() {
             // predecessor by a few milliseconds, and libzmq then never sees
             // the topic reach zero subscribers — measured, the reconnecting
             // consumer got no hellos at all, while the same test with a
-            // six-second gap got both. XPUB_VERBOSE (set at bind) is what
-            // makes this reliable: without it XPUB reports only the FIRST
-            // subscriber per topic and the overlapping one is invisible.
+            // six-second gap got both. XPUB_VERBOSE (set at socket creation
+            // below) is what makes this reliable: without it XPUB reports
+            // only the FIRST subscriber per topic and the overlapping one is
+            // invisible.
             //
             // The cost is a duplicate hello for a consumer that subscribes
             // to two topics both covering this one (say "" and __ts2py__).
@@ -494,6 +577,11 @@ bool drain_subscriptions() {
         // state at startup". The caller decides what it costs.
         drained = false;
     }
+
+    // Hub-disconnect detection. Deliberately does not touch `drained` — see
+    // drain_monitor()'s own comment for why a monitor read failure is never
+    // conflated with "the subscription queue could not be read" (-9).
+    drain_monitor();
 
     // Announce every chart not yet announced to the CURRENT subscriber set.
     //
@@ -534,21 +622,25 @@ TS2P_API int TS2P_CALL EL_InitChart(const char* zmq_endpoint,
         std::lock_guard<std::mutex> lock(g_mutex);
 
         if (!g_sock) {
-            // RAII UNTIL THE BIND SUCCEEDS, then hand ownership to the raw
-            // globals. bind() throws whenever something already holds the
-            // endpoint — the ordinary case, since TradeStation's own chart
-            // process takes the default port — and the indicator retries
-            // EL_InitChart on EVERY bar of EVERY chart while InitDone is False,
-            // with no backoff. A leaked context is not merely leaked memory:
-            // it has already started libzmq's I/O and reaper threads, so the
-            // retry loop burns two OS threads plus their stacks per bar per
-            // chart. Inside 32-bit TradeStation that exhausts threads and
-            // address space in seconds once several charts are loaded, and
-            // libzmq's own win_assert then aborts the host process.
+            // RAII UNTIL EVERY STEP BELOW SUCCEEDS, then hand ownership to
+            // the raw globals. This process is now the CONNECT side: a hub
+            // binds zmq_endpoint and every chart process connects to it, and
+            // connect() does not fail because someone else already holds the
+            // endpoint — only bind() ever did that. So -3 is rare now, not
+            // the ordinary case it used to be. But the indicator still
+            // retries EL_InitChart on EVERY bar of EVERY chart while
+            // InitDone is False, with no backoff, so whatever CAN still
+            // throw here (a malformed endpoint string, the process being out
+            // of sockets, a monitor registration failure) must still cost
+            // nothing to fail repeatedly: a leaked context has already
+            // started libzmq's I/O and reaper threads, and inside 32-bit
+            // TradeStation that exhausts threads and address space in
+            // seconds once several charts are loaded, with libzmq's own
+            // win_assert then aborting the host process.
             //
-            // ctx is declared FIRST so it is destroyed LAST: the socket must
-            // close before zmq_ctx_term() runs, and linger is set to 0 below
-            // so closing never blocks.
+            // ctx is declared FIRST so it is destroyed LAST: both sockets
+            // below must close before zmq_ctx_term() runs, and linger is set
+            // to 0 on the publish socket so closing never blocks.
             std::unique_ptr<zmq::context_t> ctx(new zmq::context_t(1));
             // XPUB, not PUB. Same send semantics; the difference is that a
             // subscription arrives as a readable message, which is the only
@@ -569,14 +661,31 @@ TS2P_API int TS2P_CALL EL_InitChart(const char* zmq_endpoint,
             // field is what lets the subscriber notice them.
             sock->set(zmq::sockopt::sndhwm, 100000);
             sock->set(zmq::sockopt::linger, 0);
-            sock->bind(zmq_endpoint);
+
+            // Socket monitor — registered BEFORE connect(), so a disconnect
+            // can never race the connection it is meant to observe. It is
+            // the only signal this process gets that the hub is gone; the
+            // why and the how are on g_monitor and drain_monitor() above.
+            // ZMQ_EVENT_DISCONNECTED is the one event this design acts on,
+            // so it is the only one requested.
+            if (zmq_socket_monitor(sock->handle(), kMonitorEndpoint,
+                                   ZMQ_EVENT_DISCONNECTED) != 0) {
+                throw zmq::error_t();
+            }
+            std::unique_ptr<zmq::socket_t> monitor(
+                new zmq::socket_t(*ctx, zmq::socket_type::pair));
+            monitor->connect(kMonitorEndpoint);
+
+            sock->connect(zmq_endpoint);
 
             g_ctx      = ctx.release();
             g_sock     = sock.release();
+            g_monitor  = monitor.release();
             g_endpoint = zmq_endpoint;
             // New publisher session: stamp its id and restart every counter.
-            // Only on the first bind — a second chart, or a re-Verify, must
-            // not look like a publisher restart to subscribers.
+            // Only on the first successful connect — a second chart, or a
+            // re-Verify, must not look like a publisher restart to
+            // subscribers.
             g_sid = recv_unix_microseconds();
             g_seq.clear();
             g_charts.clear();
@@ -584,11 +693,12 @@ TS2P_API int TS2P_CALL EL_InitChart(const char* zmq_endpoint,
             pin_self_module_once();  // stay resident for the life of the host
         } else if (g_endpoint != zmq_endpoint) {
             // A later chart asking for a DIFFERENT endpoint. Only the first
-            // chart binds, so this one's points would go to the port that
-            // chart chose while a consumer on the endpoint THIS chart names
-            // receives nothing — and it used to be told rc 0, print
-            // "publishing starts now", and leave no trace of the substitution
-            // anywhere. Refusing is the only answer that is not a lie.
+            // chart creates the socket, so this one's points would go to the
+            // endpoint that chart connected to while a consumer on the
+            // endpoint THIS chart names receives nothing — and it used to be
+            // told rc 0, print "publishing starts now", and leave no trace of
+            // the substitution anywhere. Refusing is the only answer that is
+            // not a lie.
             return -8;
         }
 
@@ -628,6 +738,11 @@ TS2P_API int TS2P_CALL EL_InitChart(const char* zmq_endpoint,
         // 1 = the chart was already announced before this call.
         return announced_before ? 1 : 0;
     } catch (const zmq::error_t&) {
+        // Context/socket creation failed, a sockopt or connect() rejected
+        // the endpoint string, or the monitor could not be registered.
+        // Bind exclusivity is gone now that this process only ever
+        // connects, so this used to be the ordinary case and now rarely
+        // fires.
         return -3;
     } catch (...) {
         return -3;
@@ -823,8 +938,13 @@ TS2P_API int TS2P_CALL EL_Shutdown(void) {
     // zmq_close / zmq_ctx_term run inside the deletes below.
     try {
         std::lock_guard<std::mutex> lock(g_mutex);
-        delete g_sock; g_sock = nullptr;
-        delete g_ctx;  g_ctx  = nullptr;
+        // Monitor first: it holds a PAIR socket connected to an inproc
+        // endpoint g_sock's context owns, so it must go before g_sock and
+        // g_ctx for the same reason ctx is declared last of the three when
+        // they are created — see g_monitor's own comment.
+        delete g_monitor; g_monitor = nullptr;
+        delete g_sock;    g_sock    = nullptr;
+        delete g_ctx;     g_ctx     = nullptr;
         g_endpoint.clear();
         g_seq.clear();
         g_charts.clear();

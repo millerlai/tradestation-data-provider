@@ -129,8 +129,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--endpoint",
-        default="tcp://127.0.0.1:5555",
-        help="ZeroMQ SUB endpoint to connect to (default: tcp://127.0.0.1:5555).",
+        default="tcp://127.0.0.1:5556",
+        help="ZeroMQ endpoint to connect this SUB socket to — the hub's XPUB port "
+        "(default: tcp://127.0.0.1:5556). NOT 5555: that is the hub's XSUB port, "
+        "where the TradeStation chart processes connect. Pointing a SUB at it "
+        "yields an incompatible socket pair and total silence.",
     )
     p.add_argument(
         "--data-root",

@@ -53,7 +53,10 @@ def format_quote(bid: float | None, ask: float | None) -> str:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--endpoint", default="tcp://127.0.0.1:5555")
+    # The hub's XPUB port. 5555 is its XSUB side, where the chart processes
+    # connect — a SUB pointed there is an incompatible socket pair, and the
+    # only symptom is silence.
+    p.add_argument("--endpoint", default="tcp://127.0.0.1:5556")
     p.add_argument("--symbols", nargs="+", default=["SPY", "QQQ", "VXX"])
     p.add_argument("--count", type=int, default=0, help="Stop after N events (0 = forever).")
     return p.parse_args()

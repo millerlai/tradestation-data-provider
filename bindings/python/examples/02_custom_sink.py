@@ -118,7 +118,8 @@ class SessionStatsSink(BaseSink):
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--endpoint", default="tcp://127.0.0.1:5555")
+    # The hub's XPUB port — see 01_print_events.py for why not 5555.
+    p.add_argument("--endpoint", default="tcp://127.0.0.1:5556")
     p.add_argument("--symbols", nargs="+", default=["SPY", "QQQ", "VXX"])
     p.add_argument("--seconds", type=float, default=10.0, help="Run for N seconds then stop.")
     return p.parse_args()
