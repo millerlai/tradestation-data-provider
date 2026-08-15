@@ -446,6 +446,24 @@ The supported spelling is `asyncio.run(coro, loop_factory=asyncio.SelectorEventL
   changes.** Nothing else catches it: a reviewer checks the change against the plan, so a
   file the plan never names is a file no review will ask about, and no grep for endpoints
   or symbols will ever hit it.
+- **Bumping `version` in `bindings/python/pyproject.toml` IS cutting a release. Do all
+  three in the same PR, or none of them.** Rename `CHANGELOG.md`'s `[Unreleased]` to
+  `## [X.Y.Z] — YYYY-MM-DD`, open a fresh empty one, restore the link definitions at the
+  bottom of that file, and push the `vX.Y.Z` tag — the tag is what fires
+  `.github/workflows/release.yml`, and it checks the tag against `version`.
+
+  **If you are not ready to release, do not touch `version`.** That is the mistake this
+  rule exists to stop: `0.3.0` was bumped inside an unrelated `chore(deps)!` commit with
+  no release intent, so the number moved while the changelog and the tags did not. The
+  result was a repository with **no git tags at all**, a `pyproject.toml` claiming a
+  version nothing had ever published, three dead `releases/tag/...` links in
+  `CHANGELOG.md`, and an `[Unreleased]` section that had silently become the contents of
+  an unreleased 0.3.0. Nothing ever failed — it just stopped being true, which is the
+  expensive kind.
+
+  Tagging starts at `v0.3.0`; 0.1.0–0.2.0 are deliberately not backfilled. The first
+  publish also needs this workflow registered as a Trusted Publisher on the PyPI project
+  page (workflow `release.yml`, environment `pypi`), or the tag push fails at upload.
 - Lint/format: ruff (line length 100, target py311; rules `E,F,W,I,N,UP,B,SIM,RUF`; tests get `N802/N803` relaxed). Run it from `bindings/python/`. The repo-root `.ruff.toml` exists only to stop a top-level `ruff check .` from falling back to defaults and rewriting the vendored vcpkg checkout — which has happened.
 - Types: mypy strict on `src/`; `tests/` is excluded.
 - C++ builds Win32 (x86) only — TradeStation is a 32-bit process. `DEFINE_SYMBOL` on the `TS2Python` target supplies `TS2PYTHON_EXPORTS`; CMake's automatic `<target>_EXPORTS` differs in case and leaves the header on the `dllimport` branch.

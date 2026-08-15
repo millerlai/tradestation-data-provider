@@ -7,6 +7,19 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) st
 v1.0.0. While the project is in `0.x`, minor releases (`0.X.0`) may introduce breaking
 changes; patch releases (`0.x.Y`) will not.
 
+> **Nothing here has been released yet, and tagging starts at `v0.3.0`.** This repository
+> has no git tags at all — 0.1.0, 0.1.1 and 0.2.0 record what changed and when, but no
+> artifact was ever published for them, and they are deliberately **not** being backfilled.
+>
+> `bindings/python/pyproject.toml` already reads `0.3.0`, so `[Unreleased]` below is the
+> content of that release. Cutting it means, in one PR: rename this section to
+> `## [0.3.0] — YYYY-MM-DD`, open a fresh empty `[Unreleased]`, restore the link
+> definitions at the bottom of this file, and push the `v0.3.0` tag — which fires
+> `.github/workflows/release.yml`. That workflow checks the tag against
+> `pyproject.toml`'s `version`, and **the first publish also needs this workflow
+> registered as a Trusted Publisher on the PyPI project page** (workflow `release.yml`,
+> environment `pypi`) or it fails at the upload step.
+
 ## [Unreleased]
 
 ### Changed — BREAKING: publishers connect through `ts2py-hub`; nobody binds but the hub
@@ -457,7 +470,15 @@ byte-for-byte unchanged and every recorded fixture still passes.
 - MIT LICENSE; `py.typed` marker for downstream mypy.
 - Bilingual README (English primary, 繁體中文 mirror) with Mermaid architecture diagram.
 
-[Unreleased]: https://github.com/millerlai/tradestation-data-provider/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/millerlai/tradestation-data-provider/releases/tag/v0.2.0
-[0.1.1]: https://github.com/millerlai/tradestation-data-provider/releases/tag/v0.1.1
-[0.1.0]: https://github.com/millerlai/tradestation-data-provider/releases/tag/v0.1.0
+[Unreleased]: https://github.com/millerlai/tradestation-data-provider/commits/main
+
+<!--
+0.1.0, 0.1.1 and 0.2.0 have no link because they have no tag: this repository was
+never tagged, and tagging starts at v0.3.0 rather than being backfilled. Those
+three sections remain the accurate record of what changed when; they simply do
+not correspond to a published artifact. See the note under the header.
+
+When v0.3.0 is cut, restore a compare link:
+[Unreleased]: https://github.com/millerlai/tradestation-data-provider/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/millerlai/tradestation-data-provider/releases/tag/v0.3.0
+-->
