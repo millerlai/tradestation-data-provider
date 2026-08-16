@@ -67,6 +67,12 @@ BAR_SCHEMA: pa.Schema = pa.schema(
     ]
 )
 
+# The only three BAR_SCHEMA columns that are nullable. Historical replay
+# carries no quote, so when a republish collides with a bar already on disk
+# these three keep the stored value instead of being overwritten by a null.
+_COALESCE_COLUMNS = frozenset({"bid", "ask", "ts"})
+_MERGE_COLUMNS = [f.name for f in BAR_SCHEMA if f.name != "bar_time"]
+
 
 @dataclass(slots=True)
 class _Partition:
@@ -79,8 +85,11 @@ class _Partition:
     buffer: list[Bar] = field(default_factory=list)
     writer: pq.ParquetWriter | None = None
     # Its day has rolled over: the file is closed and will take no more
-    # bars. Kept in the table rather than dropped so a late bar is refused
-    # instead of reopening — pq.ParquetWriter truncates on open.
+    # bars from the streaming path. Kept in the table rather than dropped so
+    # a late bar on a tick chart or a still-open day is refused instead of
+    # reopening — pq.ParquetWriter truncates on open. On a partition that
+    # rewrites (see rewrites() below), this flag means only "its writer, if
+    # it ever had one, is closed" — write() lets more bars in there.
     sealed: bool = False
     # This partition cannot be written and never will be during this run —
     # most often a file on disk under a superseded schema. Poisoning it
@@ -93,9 +102,8 @@ class _Partition:
     # and the rest of its bars would be refused.
     last_write_monotonic: float | None = None
 
-    @property
-    def rewrites(self) -> bool:
-        return self.day is None
+    def rewrites(self, today: date) -> bool:
+        return self.day is None or (self.bar_type != 0 and self.day < today)
 
     def path(self, root: Path) -> Path:
         base = (
@@ -145,8 +153,8 @@ class BarWriter:
     cache the unbuffered version promised (and Tier-1 ticks can rebuild
     intraday bars anyway).
 
-    A day partition is **sealed** — buffer flushed, file closed — on either
-    of two signals, and it needs both:
+    A day partition is **sealed** — buffer flushed, streaming writer closed
+    — on either of two signals, and it needs both:
 
       1. a bar for a **later day** of the same (timeframe, symbol) arrives;
       2. the day is **over in ET** and nothing has arrived for it in a whole
@@ -161,15 +169,26 @@ class BarWriter:
     because no later day is ever coming: a chart loaded with five days
     published all five, sealed four, and the fifth only became readable on
     Ctrl+C. (2) alone would seal a day mid-burst — a replay delivers five
-    already-past days within seconds — and `write` refuses a sealed
-    partition, so a readability problem would become lost bars. The quiet
-    period is what separates "this day is over" from "this day has stopped
-    arriving".
+    already-past days within seconds — and, where a sealed partition is
+    still refused (see below), a readability problem would become lost
+    bars. The quiet period is what separates "this day is over" from "this
+    day has stopped arriving".
+
+    Sealing means two different things depending on whether the partition
+    **rewrites** (`_Partition.rewrites()`). On a tick chart, or a day that
+    has not yet rolled over, it still means what it always did: `write`
+    refuses the partition any more bars, because reopening its
+    `ParquetWriter` would truncate it. On every other `date=` partition
+    once its day is in the past, it means only that a streaming writer — if
+    one was ever opened, from before the day rolled over — has been closed.
+    `write` keeps accepting bars there, because landing one means reading
+    the file back and merging (`_rewrite`), never reopening a truncating
+    writer.
 
     Today's partition is never sealed by (2): more bars are coming, and
     `pq.ParquetWriter` truncates on open, so it cannot be closed and
-    resumed. Rewritten partitions never need sealing at all — every flush
-    leaves a complete file.
+    resumed. A rewriting partition never needs sealing to stay readable —
+    every flush already leaves a complete file.
     """
 
     def __init__(
@@ -220,7 +239,7 @@ class BarWriter:
                 day=partition_day,
             )
             self._partitions[key] = part
-        elif part.sealed:
+        elif part.sealed and not part.rewrites(self._today_et()):
             # Reopening would truncate a finished day. Losing one late bar
             # beats losing the session it belongs to.
             log.warning(
@@ -270,7 +289,16 @@ class BarWriter:
         path = part.path(self._root)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            if part.rewrites:
+            if part.rewrites(self._today_et()):
+                if part.writer is not None:
+                    # This writer was opened while this partition was still
+                    # "today". Once ET midnight has passed it, the partition
+                    # switches to rewriting, which needs the file closed
+                    # first: _rewrite reads the whole file back, and on
+                    # Windows os.replace cannot overwrite a file that is
+                    # still open under a handle.
+                    part.writer.close()
+                    part.writer = None
                 self._rewrite(path, part.buffer)
             else:
                 if part.writer is None:
@@ -320,44 +348,79 @@ class BarWriter:
 
         Reading the existing rows back is what makes a restart safe: this
         file is the only copy of a native daily bar, and pq.write_table
-        truncates. A repeated `bar_time` keeps the later row — that is
-        a chart reload re-sending days we already have, and the fresher
-        copy is the one TradeStation just adjusted.
+        truncates. A repeated `bar_time` keeps the later row's non-null
+        columns — that is a chart reload re-sending days we already have,
+        and the fresher copy is the one TradeStation just adjusted — except
+        for `bid`/`ask`/`ts`, which keep the stored value when the incoming
+        one is null: historical replay carries no quote.
         """
         incoming = pl.from_arrow(_bars_to_table(bars))
         assert isinstance(incoming, pl.DataFrame)
         frames = [incoming]
         if path.exists():
-            # ParquetFile, not read_table: this path sits under
-            # bartype=/interval=/symbol=, and read_table runs hive discovery on those
-            # and hands back two extra dictionary columns, which
-            # pl.concat(how="vertical") rejects as a width mismatch.
-            existing = pl.from_arrow(pq.ParquetFile(path).read())
-            assert isinstance(existing, pl.DataFrame)
-            # Check the shape before concatenating, so the failure names the
-            # cause. `publisher_version` took `union_by_name` and the
-            # `with_publisher_version` pad with it when the schema stopped
-            # evolving, and nothing replaced them — so a store written by a
-            # superseded release (columns `volume`, `tick_count`, `source`)
-            # reaches here and pl.concat raises something that reads like a
-            # polars bug rather than "your data root is from an old
-            # version". Old and new bars cannot be merged: the intraday
-            # `volume` there is up-tick volume, not the total, so there is
-            # no correct column mapping to attempt.
-            missing = [f.name for f in BAR_SCHEMA if f.name not in existing.columns]
-            if missing:
-                raise ValueError(
-                    f"{path} was written under a different schema and cannot be "
-                    f"merged: missing {missing}. This is a store from a release "
-                    f"before the el_* quantity columns. Point --data-root (or "
-                    f"the per-sink `root` in sinks.yaml) at a fresh directory "
-                    f"and keep the old one for reading with an older release; "
-                    f"the two conventions cannot be mixed in one file."
+            try:
+                # ParquetFile, not read_table: this path sits under
+                # bartype=/interval=/symbol=, and read_table runs hive discovery on those
+                # and hands back two extra dictionary columns, which
+                # pl.concat(how="vertical") rejects as a width mismatch.
+                existing = pl.from_arrow(pq.ParquetFile(path).read())
+            except pa.ArrowInvalid as exc:
+                # ArrowInvalid and nothing wider. It is the one family that
+                # means "these bytes are not a Parquet file" — measured on
+                # pyarrow 24, a footerless half-file, a truncated one, a
+                # zero-byte one and pure garbage all raise it, and a hard
+                # kill mid-session (Task Manager, power loss, OOM — close()
+                # never ran) leaves exactly that. Dropping it and writing the
+                # buffer alone is what the streaming writer this path
+                # replaces already did by truncating on open, so the day
+                # self-heals instead of the partition being poisoned for the
+                # rest of the run.
+                #
+                # Everything else propagates. A share violation from
+                # antivirus or a backup agent, a concurrent reader, any
+                # OSError — those mean the file may be perfectly intact and
+                # merely unavailable this instant, and _flush_partition's
+                # poison path stops writing but LEAVES THE FILE ALONE.
+                # Catching them here would overwrite undamaged rows with
+                # whatever happened to be buffered, and `_rewrite` is also
+                # the daily path, where that file is the only copy of a
+                # native daily bar there is.
+                log.warning(
+                    "bar_partition_unreadable_overwritten",
+                    extra={"path": str(path), "error": f"{type(exc).__name__}: {exc}"},
                 )
-            frames = [existing, incoming]
+            else:
+                assert isinstance(existing, pl.DataFrame)
+                # Check the shape before concatenating, so the failure names the
+                # cause. `publisher_version` took `union_by_name` and the
+                # `with_publisher_version` pad with it when the schema stopped
+                # evolving, and nothing replaced them — so a store written by a
+                # superseded release (columns `volume`, `tick_count`, `source`)
+                # reaches here and pl.concat raises something that reads like a
+                # polars bug rather than "your data root is from an old
+                # version". Old and new bars cannot be merged: the intraday
+                # `volume` there is up-tick volume, not the total, so there is
+                # no correct column mapping to attempt.
+                missing = [f.name for f in BAR_SCHEMA if f.name not in existing.columns]
+                if missing:
+                    raise ValueError(
+                        f"{path} was written under a different schema and cannot be "
+                        f"merged: missing {missing}. This is a store from a release "
+                        f"before the el_* quantity columns. Point --data-root (or "
+                        f"the per-sink `root` in sinks.yaml) at a fresh directory "
+                        f"and keep the old one for reading with an older release; "
+                        f"the two conventions cannot be mixed in one file."
+                    )
+                frames = [existing, incoming]
         merged = (
             pl.concat(frames, how="vertical")
-            .unique(subset=["bar_time"], keep="last", maintain_order=True)
+            .group_by("bar_time", maintain_order=True)
+            .agg(
+                [
+                    (pl.col(n).drop_nulls() if n in _COALESCE_COLUMNS else pl.col(n)).last()
+                    for n in _MERGE_COLUMNS
+                ]
+            )
             .sort("bar_time")
         )
         # Write beside the target and rename over it: a crash mid-write

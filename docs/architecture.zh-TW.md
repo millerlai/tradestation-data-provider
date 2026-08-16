@@ -551,8 +551,17 @@ partition，不映射成任何名字——這樣「這個 binding 沒有名字�
 
 `BarType 2`（日線）沒有 `date=` 層，因為一天份的日線 partition 只有一列，而一個關閉的
 Parquet 檔案不論裝多少列都要付約 2.9 KB 的 schema/footer 成本——20 年一支 symbol 也才
-約 5,000 列，所以整檔在每次 flush 時**整份重寫**（讀回現有列 + 合併新列 + 依
-`bar_time` 去重取最後一筆 + 排序 + 寫暫存檔 + `os.replace` 原子替換）。
+約 5,000 列。
+
+**一個 partition 要嘛整份重寫、要嘛用 streaming 寫入**（`_Partition.rewrites()`）。
+日線檔案（完全沒有 `date=` 層）一律重寫；其餘的 `date=` partition，只要自己那一天已經
+過去也會改走重寫——唯一的例外是 tick 圖（`bar_type == 0`），因為它一天的列數沒有上限，
+所以永遠維持 streaming。重寫是讀回現有列、和新列合併（`bar_time` 相撞時後者勝，除了
+`bid`/`ask`/`ts`——這三欄如果新到的那筆是 null 就保留 store 裡原本的值，因為歷史重播
+沒有報價）、排序、寫暫存檔、再用 `os.replace` 原子替換。Streaming 則是透過一個開著的
+`pq.ParquetWriter` 寫入，它開檔即截斷，所以一旦關閉就不能再開——今天自己的 partition
+和每一個 tick 圖 partition 因此永遠走 streaming。一旦 ET 午夜跨過某個非 tick partition
+的那一天，下一次 flush 就會把它還開著的 streaming writer（如果有的話）關掉，改走重寫。
 
 **緩衝與 flush 觸發** —— `should_flush()` 在**三者任一**成立時回傳 True，檢查順序如下：
 
@@ -566,8 +575,7 @@ Parquet 檔案不論裝多少列都要付約 2.9 KB 的 schema/footer 成本—�
 單筆即寫曾經讓每根 bar 各佔一個 Parquet row group——實測 78 根 5 分鐘 bar，逐筆寫
 145,977 bytes / 78 row groups，緩衝後一次寫 5,936 bytes / 1 row group。
 
-**Partition 的 sealing（僅 `date=` partition）** 在**兩個獨立訊號的任一個**成立時發生
-——它們是 OR，不是 AND：
+**Partition 的 sealing** 在**兩個獨立訊號的任一個**成立時發生——它們是 OR，不是 AND：
 
 1. 同一 (timeframe, symbol) 的**更晚一天**的 bar 到達——`_seal_earlier_days()`，
    由 `write()` 呼叫，**不做安靜期檢查**；**或**
@@ -577,10 +585,18 @@ Parquet 檔案不論裝多少列都要付約 2.9 KB 的 schema/footer 成本—�
 兩個都需要，因為各自單獨都會在真實情境下失效。只有 (1) 會讓一次重播的**最新一天**
 永遠開著（沒有更晚的一天會來）——日線圖重播兩年曾經留下 499 個沒有 footer 的檔案，
 只有 Ctrl+C 才收得掉。只有 (2) 會在重播突發（五天資料幾秒內全部到齊）進行到一半時
-就把當天封起來，而 `write()` 拒收已 sealed 的 partition——把「還沒能讀」的問題變成
-「資料真的丟了」。(2) 裡的安靜期就是用來區分「這天結束了」與「這天只是暫時沒有新資料」。
-**今天的 partition 永遠不會被 (2) 封存**，因為 `pq.ParquetWriter` 一旦 `close()`
-就不能重新開啟續寫。
+就把當天封起來——這對還會拒收已 sealed partition 的那一類 partition（見下文）來說，
+就是把「還沒能讀」的問題變成「資料真的丟了」。(2) 裡的安靜期就是用來區分「這天結束了」與
+「這天只是暫時沒有新資料」。**今天的 partition 永遠不會被 (2) 封存**，因為
+`pq.ParquetWriter` 一旦 `close()` 就不能重新開啟續寫。
+
+`sealed` 這個字對兩種 partition 意思不同，取決於這個 partition 是否會重寫。對 tick 圖、
+或是還沒過去的一天，`write()` 在它被 sealed 之後仍然拒收更多 bar——因為重開它的
+`ParquetWriter` 會截斷整個檔案，少一根晚到的 bar 好過丟掉整個 session。對其餘的
+`date=` partition，一旦它的日子已經過去，`sealed` 就只剩下「它的 streaming writer
+（如果曾經開過）已經被關掉」這個意思；`write()` 照樣接受更多 bar，因為現在收一根等於
+透過 `_rewrite` 合併，而不是重開一個會截斷的 writer——這也是為什麼同一個 process 內，
+一個過去日可以被重新匯入不只一次。
 
 **讀取端（`storage/history_store.py`）只讀，不推算**：查詢一個從未發布過的 interval
 回傳零列，絕不生出一個看似合理的替代值，也絕不在讀路徑上寫入。想要衍生的 interval，

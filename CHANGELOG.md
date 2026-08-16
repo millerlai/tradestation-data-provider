@@ -22,6 +22,51 @@ changes; patch releases (`0.x.Y`) will not.
 
 ## [Unreleased]
 
+### Fixed — a past `date=` partition is merged on republish, not truncated
+
+A chart reload that re-sends history for a day already on disk used to truncate that day
+to whatever the reload carried, because the streaming `pq.ParquetWriter` behind every
+intraday `date=` partition truncates on open. Measured on a real `$TICK` 5-minute chart:
+republishing six days of history fixed the one day that was missing a bar and cost the
+**oldest** day of the burst 1-91 rows, including a symbol's entire pre-market session.
+Measured directly against `BarWriter`: writing 4 bars for a past day, then republishing 3
+of them from a fresh process, left **3** rows on disk — the oldest one gone. A second
+symptom of the same root cause: once a past day sealed (~60s of quiet), every later
+republish of it was silently discarded by `bar_partition_sealed` while the DLL still
+reported `rc=0` — recovering it meant restarting the whole process. A third symptom the
+report that found the other two didn't name: republishing the same day again *before* it
+sealed duplicated every bar instead (streaming is an append), so the same 3 bars written
+twice in one run landed as **6** rows, not 3.
+
+Every non-tick `date=` partition (`bar_type != 0`) now takes the same read-merge-replace
+`_rewrite` path daily bars already used, once its own day is in the past, instead of a
+streaming writer — fixing all three. `write()` no longer refuses a sealed partition once
+it qualifies for rewriting. Today's own partition and every tick-chart partition
+(`bar_type == 0`; its row count per day has no upper bound) are unaffected and keep
+streaming.
+
+A `date=` file that is not a valid Parquet file (a footerless half-file left by a hard kill
+mid-session) no longer poisons the partition for the rest of the run: `_rewrite` now logs
+`bar_partition_unreadable_overwritten` once and continues with the incoming bars alone —
+the same outcome the streaming writer it replaces already had, except now it says so. This
+is scoped to `ArrowInvalid`, the one exception family that means "these bytes are not
+Parquet", and deliberately no wider: a read that fails for any other reason (a share
+violation from antivirus or a backup agent, a concurrent reader) may be reporting a
+perfectly intact file, so it still propagates and poisons the partition, which stops
+writing but leaves the file untouched. A genuine schema mismatch likewise still raises,
+unchanged.
+
+### Changed — merging a `date=` partition is column-wise, and covers more of them
+
+- **A repeated `bar_time` no longer blanks `bid`/`ask`/`ts` with a null.** Historical
+  replay carries no quote, so when a republish collides with a bar already on disk, those
+  three columns now keep the stored value if the incoming one is null, while every other
+  column still takes the incoming value. This is `_rewrite` itself, so daily
+  (`bartype=2`) bars merge the same way.
+- **`bar_partition_sealed` no longer fires for a past `date=` partition.** It still fires
+  for a tick chart, or for today's own partition, where reopening a `pq.ParquetWriter`
+  would truncate it.
+
 ### Changed — BREAKING: publishers connect through `ts2py-hub`; nobody binds but the hub
 
 TradeStation 10 gives **every chart its own `orchart.exe`**, each loading its own copy of
