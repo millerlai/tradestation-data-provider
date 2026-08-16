@@ -9,7 +9,7 @@ is the negative — see `test_load_bars_never_derives_bars_it_was_not_given`.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
@@ -186,7 +186,11 @@ def test_sealed_day_is_readable_while_the_writer_holds_today_open(tmp_path: Path
     including reads of days that were sealed and complete.
     """
     root = tmp_path
-    writer = BarWriter(root / "bars")
+    # Pinned so 04-19 really is "today" from the writer's perspective: past
+    # `date=` partitions now rewrite (readable after every flush), and
+    # without this the real clock would already be well past 04-19 and
+    # this test would stop pinning what it claims to.
+    writer = BarWriter(root / "bars", today_et=lambda: date(2026, 4, 19))
     try:
         writer.write(_bar("SPY", T0, 450.0))  # 2026-04-18
         writer.write(_bar("SPY", T0 + timedelta(days=1), 451.0))  # seals 04-18
@@ -211,7 +215,9 @@ def test_range_reaching_into_the_open_day_answers_with_the_sealed_ones(
     days and naming what was skipped beats raising about magic bytes.
     """
     root = tmp_path
-    writer = BarWriter(root / "bars")
+    # See test_sealed_day_is_readable_while_the_writer_holds_today_open for
+    # why 04-19 has to be pinned as "today" here too.
+    writer = BarWriter(root / "bars", today_et=lambda: date(2026, 4, 19))
     try:
         writer.write(_bar("SPY", T0, 450.0))
         writer.write(_bar("SPY", T0 + timedelta(days=1), 451.0))

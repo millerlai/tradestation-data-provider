@@ -638,10 +638,21 @@ binding has no name for" no longer means "this data doesn't exist":
 `BarType 2` (daily) has no `date=` level, because one day's worth of daily bars
 is a single row, and a closed Parquet file costs roughly 2.9 KB of schema/footer
 overhead no matter how many rows it holds — twenty years of one symbol is only
-about 5,000 rows. So the whole file is **rewritten in full on every flush**
-(the existing rows are read back, merged with the new ones, deduplicated on
-`bar_time` keeping the last write, sorted, written to a temp file, then swapped
-in with `os.replace`).
+about 5,000 rows.
+
+**A partition is either rewritten whole or streamed** (`_Partition.rewrites()`).
+Rewriting applies to every daily file (no `date=` level at all) and to any
+other `date=` partition once its own day is in the past — except a tick
+chart's (`bar_type == 0`), which always streams, because its row count per
+day has no upper bound. Rewriting reads the existing rows back, merges them
+with the new ones (later wins on a repeated `bar_time`, except `bid`/`ask`/`ts`,
+which keep the stored value when the incoming one is null — historical replay
+carries no quote), sorts, and writes to a temp file that swaps in with
+`os.replace`. Streaming writes through an open `pq.ParquetWriter`, which
+truncates on open, so it can never be reopened once closed — today's own
+partition and every tick-chart partition therefore always stream. Once ET
+midnight passes a non-tick partition's day, the next flush closes its
+streaming writer, if it had one, and switches it to rewriting.
 
 **Buffering and flush triggers** — `should_flush()` returns True on **any of
 three**, checked in this order:
@@ -658,8 +669,8 @@ Writing one bar at a time used to cost one Parquet row group per bar — measure
 on 78 five-minute bars, writing one at a time produced 145,977 bytes across 78
 row groups, versus 5,936 bytes in 1 row group when buffered.
 
-**Sealing a partition (only `date=` partitions)** happens on **either** of two
-independent signals — they are an OR, not an AND:
+**Sealing a partition** happens on **either** of two independent signals —
+they are an OR, not an AND:
 
 1. A bar for a **later day** of the same (timeframe, symbol) arrives —
    `_seal_earlier_days()`, called from `write()`, with no quiet-period check; **or**
@@ -670,12 +681,22 @@ Both are needed because each alone fails a real case. Signal (1) alone leaves th
 **newest** day of a finished replay open forever, since no later day is ever
 coming — a daily chart replaying two years once left 499 footerless files behind,
 readable only after Ctrl+C. Signal (2) alone would seal a day partway through a
-replay burst (five days of data can arrive within seconds), and `write()` refuses
-a sealed partition — turning "not readable yet" into "the data is really gone."
-Within signal (2) the quiet period is what separates "this day is over" from
-"this day has merely gone quiet for now." **Today's partition is never sealed by
-(2)**, because once a `pq.ParquetWriter` is `close()`d, it can't be reopened and
-resumed.
+replay burst (five days of data can arrive within seconds) — turning "not
+readable yet" into "the data is really gone" on a partition that still refuses
+a sealed one (see below). Within signal (2) the quiet period is what separates
+"this day is over" from "this day has merely gone quiet for now." **Today's
+partition is never sealed by (2)**, because once a `pq.ParquetWriter` is
+`close()`d, it can't be reopened and resumed.
+
+`sealed` means two different things depending on whether the partition
+rewrites. On a tick chart, or a day that has not yet rolled over, `write()`
+still refuses the partition any more bars once sealed, because reopening its
+`ParquetWriter` would truncate it — losing one late bar beats losing the
+session. On every other `date=` partition once its day is in the past,
+`sealed` means only that a streaming writer, if one was ever open, has been
+closed; `write()` keeps accepting bars there, because landing one now means
+merging through `_rewrite` rather than reopening a truncating writer — which
+is also why a past day can be re-imported more than once in the same process.
 
 **The read side (`storage/history_store.py`) only reads, and never derives**: a
 query for an interval that was never published returns zero rows, never

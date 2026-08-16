@@ -55,7 +55,7 @@ def test_parquet_bar_sink_buffers_until_flush(tmp_path: Path) -> None:
     assert not out.exists()
 
     sink.flush()
-    assert out.exists()  # written, but the footer only lands on close
+    assert out.exists()  # 2026-04-18 is already a past day, so it rewrites and is complete
     assert sink.should_flush() is False
 
     sink.close()
