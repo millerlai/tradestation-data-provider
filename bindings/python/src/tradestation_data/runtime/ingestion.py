@@ -100,6 +100,10 @@ class IngestionRuntime:
     it does not mean what it looks like — is stated once, in
     :meth:`_on_partial_bar`. Read it before registering one.
 
+    Optional `clock_shift` lets a caller compensate the direct-bar close-rule
+    for a symbol whose wire clock lags real time; omitted, it defaults to no
+    shift for every symbol.
+
     Neither callback may be an `async def`; both are called synchronously and
     the constructor refuses a coroutine function rather than letting it be
     built and dropped unrun. See :func:`_reject_async_callback`.
@@ -117,6 +121,7 @@ class IngestionRuntime:
         heartbeat_interval: float = 60.0,
         flush_poll_interval: float = 1.0,
         advance_interval: float = 1.0,
+        clock_shift: Callable[[str], timedelta] | None = None,
     ) -> None:
         self._provider = provider
         self._symbols = symbols
@@ -131,6 +136,7 @@ class IngestionRuntime:
         self._heartbeat_interval = heartbeat_interval
         self._flush_poll_interval = flush_poll_interval
         self._advance_interval = advance_interval
+        self._clock_shift_fn = clock_shift
 
         self._stop = asyncio.Event()
         self._counters = _Counters()
@@ -261,6 +267,15 @@ class IngestionRuntime:
             self._last_emitted_direct_bucket[_key(bar)] = bar.bar_time
         return drained
 
+    def _clock_shift(self, symbol: str) -> timedelta:
+        """Per-symbol offset between that symbol's wire clock and real time.
+
+        Defaults to zero when the caller supplies no `clock_shift` callable.
+        """
+        if self._clock_shift_fn is None:
+            return timedelta(0)
+        return self._clock_shift_fn(symbol)
+
     def _advance_direct_bars(self, now: datetime) -> list[Bar]:
         """Close buffered direct bars whose own interval has fully elapsed.
 
@@ -278,11 +293,19 @@ class IngestionRuntime:
         one full interval late, and a daily point one full DAY late. No
         per-chart-type duration table is needed, which also removes the
         question of what a weekly chart's duration would be.
+
+        A symbol's wire clock can itself lag real time — a chart that
+        publishes on its exchange's local clock rather than US Eastern — so
+        its `bar_time` already sits past the deadline while the bar is still
+        forming, and the bar would be released on its first frame with every
+        later frame dropped as a duplicate. `_clock_shift` adds that
+        per-symbol offset to the deadline before comparing.
         """
         ready: list[Bar] = []
         for key in list(self._current_direct_bars):
             bar = self._current_direct_bars[key]
-            if bar.bar_time + _DIRECT_BAR_CLOSE_GRACE <= now:
+            shift = self._clock_shift(bar.symbol)
+            if bar.bar_time + shift + _DIRECT_BAR_CLOSE_GRACE <= now:
                 ready.append(bar)
                 del self._current_direct_bars[key]
                 self._counters.bars_direct_in += 1
