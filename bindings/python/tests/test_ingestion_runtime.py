@@ -427,6 +427,52 @@ async def test_direct_bar_release_deadline_is_close_plus_grace() -> None:
 
 
 @pytest.mark.asyncio
+async def test_clock_shift_holds_a_bar_until_its_real_close() -> None:
+    """A symbol whose wall clock runs ahead of UTC must not close early.
+
+    `$VIX.X` and other CST-timestamped series stamp `bar_time` on a clock that
+    is offset from UTC; the close-rule comparison must add that offset before
+    comparing against wall-clock `now`, or the bar releases an hour before it
+    has actually closed. The old deadline (`bar_time + grace`, with no shift)
+    must NOT release it; only `bar_time + shift + grace` does.
+    """
+    runtime = _make_runtime(clock_shift=lambda symbol: timedelta(hours=1))
+    ts = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)
+    await runtime._handle_provider_bar(_bar("SPY", ts))
+
+    # Old, unshifted deadline: must not release yet.
+    assert runtime._advance_direct_bars(ts + timedelta(seconds=5)) == []
+
+    # Shifted deadline: releases.
+    ready = runtime._advance_direct_bars(ts + timedelta(hours=1, seconds=5))
+    assert len(ready) == 1
+
+
+@pytest.mark.asyncio
+async def test_clock_shift_is_asked_per_symbol() -> None:
+    """The shift is looked up per symbol, not applied uniformly to the buffer.
+
+    One provider connection can carry a mix of correctly-clocked symbols (no
+    shift) and offset ones (e.g. `@ES` alongside `$VIX.X`) in the same
+    buffer — a single process-wide shift would either release the correct
+    symbol late or the offset symbol early.
+    """
+    shifts = {"SPY": timedelta(0), "@ES": timedelta(hours=1)}
+    runtime = _make_runtime(clock_shift=lambda symbol: shifts[symbol])
+    ts = datetime(2026, 4, 20, 13, 30, tzinfo=UTC)
+    await runtime._handle_provider_bar(_bar("SPY", ts))
+    await runtime._handle_provider_bar(_bar("@ES", ts))
+
+    # Past SPY's (unshifted) deadline but before @ES's shifted one: only SPY.
+    ready = runtime._advance_direct_bars(ts + timedelta(seconds=5))
+    assert [bar.symbol for bar in ready] == ["SPY"]
+
+    # Past @ES's shifted deadline too.
+    ready = runtime._advance_direct_bars(ts + timedelta(hours=1, seconds=5))
+    assert [bar.symbol for bar in ready] == ["@ES"]
+
+
+@pytest.mark.asyncio
 async def test_tick_chart_frames_bypass_the_buffer_entirely() -> None:
     """Every bar_type-0 frame is forwarded the moment it arrives.
 
