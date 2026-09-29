@@ -294,11 +294,12 @@ class IngestionRuntime:
         per-chart-type duration table is needed, which also removes the
         question of what a weekly chart's duration would be.
 
-        A symbol's wire clock can itself lag real time — an exchange that
-        publishes on its own local clock rather than US Eastern — and the
-        close-rule must not mistake that lag for "not closed yet" forever,
-        nor release the bar before it has actually closed. `_clock_shift`
-        adds that per-symbol offset to the deadline before comparing.
+        A symbol's wire clock can itself lag real time — a chart that
+        publishes on its exchange's local clock rather than US Eastern — so
+        its `bar_time` already sits past the deadline while the bar is still
+        forming, and the bar would be released on its first frame with every
+        later frame dropped as a duplicate. `_clock_shift` adds that
+        per-symbol offset to the deadline before comparing.
         """
         ready: list[Bar] = []
         for key in list(self._current_direct_bars):
