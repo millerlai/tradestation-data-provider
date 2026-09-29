@@ -22,6 +22,14 @@ changes; patch releases (`0.x.Y`) will not.
 
 ## [Unreleased]
 
+### Added — `IngestionRuntime` accepts a per-symbol `clock_shift`
+
+`IngestionRuntime` gained an optional `clock_shift: Callable[[str], timedelta] | None = None`
+constructor parameter so a caller can compensate for a symbol whose wire timestamps lag real
+time. The direct-bar close-rule in `_advance_direct_bars` now adds this per-symbol shift
+before comparing `bar_time` against wall-clock time. Omitting it keeps today's behavior
+exactly — every symbol is treated as unshifted.
+
 ### Fixed — a past `date=` partition is merged on republish, not truncated
 
 A chart reload that re-sends history for a day already on disk used to truncate that day
