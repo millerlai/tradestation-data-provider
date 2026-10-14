@@ -41,7 +41,7 @@ dependencies = [
     # Upper bounds keep us safe from accidental major-bump breakage at
     # `pip install` time; revisit on each major release (see CHANGELOG).
     "pyzmq>=26.0,<28",
-    "polars>=1.0,<2",
+    "polars>=1.0,<3",
     "pyarrow>=16.0,<27",
     "pyyaml>=6.0,<7",
     # Windows Python stdlib ships without IANA tz data; polars needs it
